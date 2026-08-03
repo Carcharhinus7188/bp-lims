@@ -253,12 +253,27 @@ def controlled_pdf_preview_pages(pdf_content):
 
 def show_controlled_pdf_preview(title, pdf_content):
     st.markdown("#### 正式单据 PDF 预览")
-    st.caption("此处展示的就是单据中心正式PDF本身，仅隐藏下载按钮。")
+    st.caption("此处读取单据中心的同一份正式PDF；请在阅读器内翻页或缩放，审核阶段不提供文件下载按钮。")
     try:
+        if hasattr(st, "pdf"):
+            # Native fixed-height PDF reader: page navigation and zoom stay
+            # inside one viewport instead of expanding every page vertically.
+            st.pdf(pdf_content, height=900, key=f"pdf_reader_{hashlib.sha256(pdf_content).hexdigest()[:16]}")
+            return
+        # Compatibility fallback for an incompletely rebuilt deployment:
+        # render exactly one selected page, never the entire document at once.
         with st.spinner("正在读取正式PDF…"):
             pages=controlled_pdf_preview_pages(pdf_content)
-        for index,page in enumerate(pages,1):
-            st.image(page,caption=f"{title}｜第 {index} 页",use_container_width=True)
+        page_number=st.number_input(
+            "预览页码",min_value=1,max_value=len(pages),value=1,step=1,
+            key=f"pdf_page_{hashlib.sha256(pdf_content).hexdigest()[:16]}",
+        )
+        st.caption(f"{title}｜共 {len(pages)} 页")
+        st.image(
+            pages[int(page_number)-1],
+            caption=f"{title}｜第 {int(page_number)} 页",
+            use_container_width=True,
+        )
     except Exception as error:
         st.error(str(error))
 
