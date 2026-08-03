@@ -2,7 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, time
 from pathlib import Path
-import csv, hashlib, io, json, re, uuid, zipfile
+import csv, hashlib, html, io, json, re, uuid, zipfile
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -67,6 +67,49 @@ def show_df(data,columns=None):
 def user_map():return {x["username"]:x["display_name"] for x in list_users()}
 def display_user(username):return user_map().get(username,username or "")
 def role_users(role):return [x for x in list_users() if x["role"]==role and x["enabled"]]
+
+
+def quality_evidence_choices(commission_no,selected_task_nos):
+    """Readable investigation choices without exposing internal program keys."""
+    selected=set(selected_task_nos);photo_options=[];record_options=[]
+    for item in list_attachments(commission_no=commission_no):
+        if (
+            item.get("task_no") not in selected
+            or item.get("evidence_status")!="有效"
+            or item.get("capture_source")!="live_camera"
+        ):continue
+        photo_options.append(
+            f"{item.get('attachment_id','')}｜{item.get('task_no','')}｜"
+            f"{item.get('sample_no') or '任务整体'}｜{item.get('checkpoint_label') or item.get('attachment_type','')}｜"
+            f"{item.get('server_captured_at') or item.get('captured_at','')}"
+        )
+    for task_no in selected_task_nos:
+        task_row=task(task_no) or {};record_row=latest_record(task_no) or {}
+        business=(record_row.get("payload") or {}).get("business_record") or {}
+        kind=(task_config_snapshot(task_no) or {}).get("kind") or "generic"
+        definition=SCHEMAS.get(kind) or SCHEMAS["generic"];labels={}
+        for section in definition.get("sections",[]):
+            for field in section.get("fields",[]):labels[field["key"]]=field.get("label") or field["key"]
+        for key,label,_field_type in definition.get("columns",[]):labels[key]=label
+        for key,value in (business.get("parameters") or {}).items():
+            if key in labels and value not in (None,"",[]):
+                record_options.append(f"{task_no}｜{task_row.get('experiment','')}｜环境/参数｜{labels[key]}={value}")
+        for raw in business.get("rows") or []:
+            sample_no=raw.get("sample_no","")
+            for key,value in raw.items():
+                if key in labels and key!="sample_no" and value not in (None,"",[]):
+                    record_options.append(f"{task_no}｜{sample_no or '任务整体'}｜原始测量｜{labels[key]}={value}")
+        for label,key in (("结果摘要","report_summary"),("单项结论","report_conclusion"),("异常/偏离","deviation"),("是否复测","retest")):
+            value=business.get(key)
+            if value not in (None,"",[]):record_options.append(f"{task_no}｜{task_row.get('experiment','')}｜{label}={value}")
+    other_options=[
+        "检验委托单及客户信息","样品登记表与样品状态","实验任务派发与接收记录",
+        "实验开始/结束时间轴","设备配置与校准有效期","检测方法及SOP受控版本",
+        "原始记录历史版本","修改记录日志PDF","检验报告及审批记录",
+        "报告发放登记表","样品领用归还记录","危废处置记录",
+    ]
+    return list(dict.fromkeys(photo_options)),list(dict.fromkeys(record_options)),other_options
+
 
 def increment_base(base,n):
     m=re.fullmatch(r"(BP\d{8})(\d{3})",base)
@@ -388,6 +431,39 @@ if page=="首页看板":
     metrics=[("委托",counts["commissions"]),("在册样品",counts["samples"]),("待接收任务包",counts["packages"]),("检测中",counts["testing"]),("待复核",counts["reviews"]),("待回库",counts["returns"]),("待发布报告",counts["reports"])]
     for col,(label,value) in zip(cols,metrics):col.metric(label,value)
     show_df(list_samples(),["sample_no","commission_no","group_no","sample_name","model","material_name","status","current_location","current_holder","updated_at"])
+    st.divider()
+    st.subheader("样品组流转时间轴")
+    timeline_groups=sample_groups_for_timeline()
+    if timeline_groups:
+        timeline_group_id=st.selectbox(
+            "选择样品组",
+            [x["id"] for x in timeline_groups],
+            format_func=lambda group_id:next(
+                f"{x['group_no']}｜{x['sample_name']}｜{x['client_name']}｜{x['status']}"
+                for x in timeline_groups if x["id"]==group_id
+            ),
+            key="dashboard_group_timeline",
+        )
+        selected_group=next(x for x in timeline_groups if x["id"]==timeline_group_id)
+        st.caption(
+            f"委托：{selected_group['commission_no']}｜样品组：{selected_group['group_no']}｜"
+            f"型号：{selected_group.get('model','')}｜批号：{selected_group.get('product_no','')}｜"
+            f"当前位置/状态：{selected_group.get('storage_area','')} / {selected_group.get('status','')}"
+        )
+        timeline_rows=sample_group_timeline(timeline_group_id)
+        for item in timeline_rows:
+            safe_item={key:html.escape(str(value or "")) for key,value in item.items()}
+            st.markdown(
+                f"<div class='timeline'><b>{safe_item['时间']}｜{safe_item['流转环节']}</b><br>"
+                f"状态：{safe_item['状态变化'] or '—'}　位置：{safe_item['位置变化'] or '—'}<br>"
+                f"样品：{safe_item['涉及样品'] or '样品组整体'}　操作人：{safe_item['操作人'] or '系统'}"
+                f"{'<br>说明：'+safe_item['说明'] if safe_item['说明'] else ''}</div>",
+                unsafe_allow_html=True,
+            )
+        with st.expander("查看时间轴表格"):
+            show_df(timeline_rows,["时间","流转环节","状态变化","位置变化","涉及样品","操作人","说明"])
+    else:
+        st.info("暂无样品组流转记录。")
 
 elif page=="单位信息库":
     header("委托客户、生产单位和受委托生产企业信息库")
@@ -636,7 +712,14 @@ elif page=="实验记录":
         tn=st.selectbox(
             "选择实验任务",
             [t["task_no"] for t in task_list],
-            format_func=lambda x:next(f"{t['task_no']}｜{t['experiment']}" for t in task_list if t['task_no']==x),
+            format_func=lambda x:(
+                next(f"{t['task_no']}｜{t['experiment']}" for t in task_list if t['task_no']==x)
+                + (
+                    "｜⚠️ 二次编辑"
+                    if next((t.get("status")=="退回修改" for t in task_list if t["task_no"]==x),False)
+                    or int((latest_record(x) or {}).get("version") or 1)>1 else ""
+                )
+            ),
         )
         t=task(tn)
         # 第一次进入实验过程即自动开始；只写入一次，页面刷新不会覆盖。
@@ -656,6 +739,22 @@ elif page=="实验记录":
         compare=None
         if version>1:
             versions=record_versions(tn);compare=versions[-2]["payload"] if len(versions)>1 else None
+        returned_review=one(
+            """SELECT rv.*,u.display_name reviewer_name FROM reviews rv
+               LEFT JOIN users u ON u.username=rv.reviewer
+               WHERE rv.record_no=? AND rv.decision='退回'
+               ORDER BY rv.id DESC LIMIT 1""",
+            (tn,),
+        )
+        if version>1 and latest and latest.get("status")!="已锁定":
+            st.error(f"⚠️ 此实验为二次编辑：当前正在编辑 V{version} 草稿，上一提交版本已由复核员退回。")
+            if returned_review:
+                st.warning(
+                    f"复核员：{returned_review.get('reviewer_name') or returned_review.get('reviewer','')}｜"
+                    f"退回时间：{returned_review.get('reviewed_at','')}｜"
+                    f"复核意见：{returned_review.get('comment','')}"
+                )
+            st.success("上一版本已填写的实验数据、设备信息、照片关联和结论已完整保留在当前草稿中，请按复核意见修改后重新提交。")
 
         group0=group(t["group_id"]);commission0=commission(t["commission_no"]);package0=package(t["package_no"])
         sample_ids=t["sample_nos_list"]
@@ -1222,6 +1321,7 @@ elif page=="客户异议":
                 report_no=st.selectbox("关联已签发报告",report_options,index=default_index,key="obj_report")
                 report_row=report(report_no);commission_row=commission(report_row["commission_no"])
                 task_rows=commission_tasks(report_row["commission_no"])
+                commissioned_tests=commission_tests(report_row["commission_no"])
                 group_rows=commission_groups(report_row["commission_no"])
                 all_samples=[]
                 for group_row in group_rows:all_samples.extend(group_samples(group_row["id"]))
@@ -1230,7 +1330,12 @@ elif page=="客户异议":
                 submitted_at=a.date_input("客户提出日期",value=china_today())
                 channel=b.selectbox("受理渠道",["书面申请","电子邮件","电话后补书面","现场提交","其他"])
                 contact=c.text_input("客户联系人",commission_row.get("contact",""))
-                disputed_items=st.multiselect("争议检验项目",list(dict.fromkeys(x["experiment"] for x in task_rows)))
+                commissioned_experiments=list(dict.fromkeys(x["experiment"] for x in commissioned_tests))
+                disputed_items=st.multiselect(
+                    "争议检测项目（仅限该委托已选择项目）",
+                    commissioned_experiments,
+                    help="不能录入该委托范围之外的实验项目。",
+                )
                 involved_samples=st.multiselect("涉及样品", [x["sample_no"] for x in all_samples])
                 description=st.text_area("客户书面异议内容")
                 evidence=st.text_area("随附材料和证据说明")
@@ -1264,36 +1369,91 @@ elif page=="客户异议":
             related.update(x["task_no"] for x in commission_tasks(obj["commission_no"]))
             related_logs=[x for x in modification_logs() if x.get("entity_id") in related]
             st.download_button("下载相关修改日志PDF",modification_log_pdf(related_logs,scope=f"异议 {objection_no}"),f"{objection_no}_修改日志.pdf",use_container_width=True)
-            evidence=st.text_area("调取并核对的证据（追溯表、照片、原始记录、报告版本等）")
+            st.markdown("#### ① 选择调查范围")
+            disputed_names={
+                x.strip() for x in str(obj.get("disputed_items") or "").split("、") if x.strip()
+            }
+            candidate_tasks=[
+                x for x in commission_tasks(obj["commission_no"])
+                if not disputed_names or x.get("experiment") in disputed_names
+            ]
+            selected_task_nos=st.multiselect(
+                "本次调查涉及的实验任务",
+                [x["task_no"] for x in candidate_tasks],
+                default=[x["task_no"] for x in candidate_tasks],
+                format_func=lambda task_no:next(
+                    f"{x['task_no']}｜{x['experiment']}" for x in candidate_tasks if x["task_no"]==task_no
+                ),
+            )
+            photo_options,record_options,other_options=quality_evidence_choices(
+                obj["commission_no"],selected_task_nos,
+            )
+            st.markdown("#### ② 勾选调查证据")
+            photo_evidence=st.multiselect(
+                "照片证据编号",
+                photo_options,
+                help="选项同时显示照片编号、实验任务、样品、拍摄节点和服务器时间。",
+            )
+            record_evidence=st.multiselect(
+                "原始记录字段",
+                record_options,
+                help="只显示受控原始记录里的中文字段和值，不显示程序字段。",
+            )
+            other_evidence=st.multiselect(
+                "其他追溯资料",
+                other_options,
+                default=["检验委托单及客户信息","检测方法及SOP受控版本","修改记录日志PDF","检验报告及审批记录"],
+            )
+            st.markdown("#### ③ 核查结果")
+            check_options=["符合要求","存在问题","未涉及","需要补充资料"]
             a,b=st.columns(2)
-            method_check=a.text_area("检测方法/SOP核查")
-            equipment_check=b.text_area("设备、校准与软件数据核查")
-            environment_check=a.text_area("环境与温湿度核查")
-            operation_check=b.text_area("人员操作与过程符合性核查")
-            calculation_check=st.text_area("数据计算、转录、复核与报告核查")
-            impact_scope=st.text_area("影响范围")
-            investigation=st.text_area("完整调查过程")
+            method_check=a.selectbox("检测方法/SOP核查",check_options,key="quality_method_check")
+            equipment_check=b.selectbox("设备、校准与软件数据核查",check_options,key="quality_equipment_check")
+            environment_check=a.selectbox("环境与温湿度核查",check_options,key="quality_environment_check")
+            operation_check=b.selectbox("人员操作与过程符合性核查",check_options,key="quality_operation_check")
+            calculation_check=st.selectbox("数据计算、转录、复核与报告核查",check_options,key="quality_calculation_check")
+            impact_options=st.multiselect(
+                "影响范围",
+                ["仅涉及本样品","涉及同批次样品","涉及本实验任务","涉及同方法其他报告","需要扩大调查"],
+            )
+            impact_note=st.text_input("影响范围补充说明")
+            st.markdown("#### ④ 备注、结论与处理建议")
+            investigation=st.text_area("调查备注")
             conclusion=st.text_area("调查结论与证据链")
-            suggestion=st.text_area("处理建议")
+            suggestion=st.text_area(
+                "处理建议",
+                help="例如：联系客户确认重测、维持原报告、作废替换、扩大调查等。",
+            )
             pathway=st.radio(
                 "责任判定（提交后自动转交样品管理员）",
                 ["是我方问题","样品问题"],horizontal=True,
             )
             if st.button("提交调查结论",type="primary"):
-                try:
-                    quality_submit_objection(objection_no,username,pathway,investigation,conclusion,{
-                        "quality_evidence":evidence,"quality_method_check":method_check,
-                        "quality_equipment_check":equipment_check,"quality_environment_check":environment_check,
-                        "quality_operation_check":operation_check,"quality_calculation_check":calculation_check,
-                        "impact_scope":impact_scope,"treatment_suggestion":suggestion,
-                    });st.rerun()
-                except Exception as e:st.error(str(e))
+                if not selected_task_nos:
+                    st.error("至少选择一个调查实验任务")
+                elif not (photo_evidence or record_evidence or other_evidence):
+                    st.error("至少选择一项调查证据")
+                else:
+                    evidence_text=(
+                        "照片证据：\n"+"\n".join(photo_evidence or ["未选"])+"\n"
+                        "原始记录字段：\n"+"\n".join(record_evidence or ["未选"])+"\n"
+                        "其他追溯资料：\n"+"\n".join(other_evidence or ["未选"])
+                    )
+                    try:
+                        quality_submit_objection(objection_no,username,pathway,investigation,conclusion,{
+                            "quality_evidence":evidence_text,"quality_method_check":method_check,
+                            "quality_equipment_check":equipment_check,"quality_environment_check":environment_check,
+                            "quality_operation_check":operation_check,"quality_calculation_check":calculation_check,
+                            "impact_scope":"、".join(impact_options)+("；"+impact_note if impact_note else ""),
+                            "treatment_suggestion":suggestion,
+                        });st.rerun()
+                    except Exception as e:st.error(str(e))
         if role=="样品管理员" and obj["status"]=="待客户确认重测":
             st.warning("质量调查判定为实验室问题。请在系统外询问客户，并在此记录处理结果。")
             a,b=st.columns(2)
             contact_at=a.text_input("联系时间",value=now())
             contact_method=b.selectbox("联系方式",["电话","微信","电子邮件","现场","其他"])
-            decision=st.radio("客户是否需要重测",["待处理","需要重测","不需要重测"],horizontal=True)
+            decision=st.radio("客户是否需要重测",["需要重测","不需要重测"],horizontal=True)
             note=st.text_area("客户意见、留样/重新送样说明")
             if st.button("记录客户决定",type="primary"):
                 try:record_customer_retest_decision(objection_no,username,decision,note,contact_at,contact_method);st.rerun()

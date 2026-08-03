@@ -388,6 +388,12 @@ CREATE TABLE IF NOT EXISTS hazardous_waste_records(
         )
         c.execute("UPDATE objections SET pathway='是我方问题' WHERE pathway='是我们的问题'")
         c.execute("UPDATE objections SET pathway='样品问题' WHERE pathway IN ('不是我们的问题','样品自身问题')")
+        c.execute(
+            """UPDATE objections SET customer_retest_decision=NULL,
+               status='待客户确认重测',updated_at=?
+               WHERE customer_retest_decision='待处理'""",
+            (now(),),
+        )
         c.execute("UPDATE users SET role='实验员' WHERE role='实验人员'")
         c.execute("UPDATE users SET role='复核员' WHERE role='复核实验员'")
         c.execute("UPDATE users SET role='管理员' WHERE role='批准人'")
@@ -1885,11 +1891,16 @@ def review_record(record_no: str, version: int, reviewer: str, decision: str, co
     r = record(record_no, version)
     if not r:
         raise ValueError("记录不存在")
+    if r.get("status") not in ("待复核", "更正待复核"):
+        raise ValueError("该版本已经处理，不能重复复核")
     t = task(record_no)
     if t and t["reviewer"] != reviewer:
         raise ValueError("当前人员不是该任务的复核人")
+    if decision == "退回" and not comment.strip():
+        raise ValueError("退回实验员修改时必须填写复核意见")
     ts = now()
-    status = "已锁定" if decision == "通过" else "退回修改"
+    status = "已锁定" if decision == "通过" else "复核退回"
+    next_version = version + 1
     with connect() as c:
         c.execute(
             """UPDATE records SET status=?,reviewer_signed_at=?,updated_at=?
@@ -1898,15 +1909,42 @@ def review_record(record_no: str, version: int, reviewer: str, decision: str, co
         )
         c.execute("INSERT INTO reviews(record_no,version,reviewer,decision,comment,reviewed_at) VALUES(?,?,?,?,?,?)", (record_no, version, reviewer, decision, comment, ts))
         c.execute("UPDATE tasks SET status=?,updated_at=? WHERE task_no=?", ("已复核" if decision == "通过" else "退回修改", ts, record_no))
+        if decision == "退回":
+            latest_version=c.execute(
+                "SELECT COALESCE(MAX(version),0) n FROM records WHERE record_no=?",
+                (record_no,),
+            ).fetchone()["n"]
+            next_version=max(version+1,int(latest_version)+1)
+            c.execute(
+                """INSERT INTO records(
+                   record_no,task_no,version,experiment,owner,status,payload,
+                   template_version,sop_version,change_reason,
+                   created_at,updated_at
+                   ) VALUES(?,?,?,?,?,'草稿',?,?,?,?,?,?)""",
+                (
+                    record_no,record_no,next_version,r.get("experiment",""),
+                    r.get("owner",""),json.dumps(r.get("payload") or {},ensure_ascii=False,default=str),
+                    r.get("template_version") or "A/0",r.get("sop_version") or "A/0",
+                    f"复核退回二次编辑：{comment}",ts,ts,
+                ),
+            )
     audit("record", record_no, reviewer, "复核" + decision, reason=comment)
     if decision == "通过" and t:
         freeze_document_version("record", record_no, version, "实验员自查及复核员审核锁定", r["payload"], reviewer)
         ensure_report_for_task(record_no)
         _refresh_package_and_report(t["package_no"], t["commission_no"])
     elif t:
+        freeze_document_version(
+            "record",record_no,version,"复核退回历史版本",r["payload"],reviewer,
+        )
+        audit(
+            "record",record_no,reviewer,"创建修改版（复核退回）",
+            old_value=f"V{version}",new_value=f"V{next_version}",
+            reason=comment,snapshot=r["payload"],
+        )
         create_notification(
             t.get("assignee", ""), "原始记录已退回",
-            f"{record_no} V{version} 已被复核员退回，请进入修改中心处理。",
+            f"{record_no} V{version} 已被复核员退回；复核意见：{comment}。系统已保留全部数据并生成二次编辑草稿 V{next_version}，请进入实验记录修改。",
             "record", record_no,
         )
 
@@ -2238,6 +2276,120 @@ def sample_events(sample_no: str) -> list[dict[str, Any]]:
 
 def list_samples() -> list[dict[str, Any]]:
     return rows("SELECT * FROM samples ORDER BY updated_at DESC")
+
+
+def sample_groups_for_timeline() -> list[dict[str, Any]]:
+    return rows(
+        """SELECT g.*,c.client_name
+           FROM sample_groups g JOIN commissions c ON c.commission_no=g.commission_no
+           WHERE g.is_void=0 ORDER BY g.updated_at DESC,g.group_no"""
+    )
+
+
+def sample_group_timeline(group_id: int) -> list[dict[str, Any]]:
+    """Return a deduplicated business timeline for one complete sample group."""
+    group_row=group(group_id)
+    if not group_row:return []
+    names={x["username"]:x["display_name"] for x in list_users()}
+    events=[]
+    def json_list(value):
+        if isinstance(value,list):return [str(x) for x in value]
+        try:return [str(x) for x in json.loads(value or "[]")]
+        except Exception:return []
+    def add(at,stage,status="",location="",samples="",actor="",details=""):
+        if not at:return
+        events.append({
+            "时间":str(at).replace("T"," "),"流转环节":stage,"状态变化":status,
+            "位置变化":location,"涉及样品":samples,"操作人":names.get(actor,actor or "系统"),
+            "说明":details,
+        })
+    sample_nos=[x["sample_no"] for x in group_samples(group_id)]
+    add(
+        group_row.get("created_at"),"收样登记与入库",f"建立样品组 → {group_row.get('status','')}",
+        group_row.get("storage_area",""),"、".join(sample_nos),group_row.get("created_by",""),
+        f"{group_row.get('sample_name','')}｜型号：{group_row.get('model','')}｜批号：{group_row.get('product_no','')}",
+    )
+    event_rows=rows(
+        """SELECT e.created_at,e.action,e.from_status,e.to_status,
+                  e.from_location,e.to_location,e.details,e.actor,
+                  GROUP_CONCAT(e.sample_no,'、') sample_nos
+           FROM sample_events e JOIN samples s ON s.sample_no=e.sample_no
+           WHERE s.group_id=?
+           GROUP BY e.created_at,e.action,e.from_status,e.to_status,
+                    e.from_location,e.to_location,e.details,e.actor
+           ORDER BY e.created_at,e.id""",
+        (group_id,),
+    )
+    for item in event_rows:
+        add(
+            item.get("created_at"),item.get("action","样品流转"),
+            f"{item.get('from_status') or '—'} → {item.get('to_status') or '—'}",
+            f"{item.get('from_location') or '—'} → {item.get('to_location') or '—'}",
+            item.get("sample_nos",""),item.get("actor",""),item.get("details",""),
+        )
+    packages=rows("SELECT * FROM task_packages WHERE group_id=? ORDER BY created_at",(group_id,))
+    for package_row in packages:
+        package_samples="、".join(json_list(package_row.get("sample_nos")))
+        add(
+            package_row.get("assigned_at"),"实验任务派发","待分配 → 待接收","样品库 → 待实验员接收",
+            package_samples,package_row.get("assigned_by",""),
+            f"{package_row.get('package_no','')}｜实验员：{names.get(package_row.get('assignee'),package_row.get('assignee',''))}",
+        )
+        add(
+            package_row.get("accepted_at"),"实验员接收/领用","待接收 → 检测中",
+            f"样品库 → {package_row.get('detection_location') or '检测区域'}",
+            package_samples,package_row.get("assignee",""),
+            package_row.get("acceptance_result","")+"；"+str(package_row.get("acceptance_note") or ""),
+        )
+        add(
+            package_row.get("return_submitted_at"),"实验员提交归还","检测完成 → 待回库确认",
+            f"{package_row.get('detection_location') or '检测区域'} → 样品库待确认",
+            package_samples,package_row.get("assignee",""),package_row.get("package_no",""),
+        )
+        add(
+            package_row.get("return_confirmed_at"),"样品管理员确认回库","待回库确认 → 已回库",
+            "样品库待确认 → 指定留样位置",package_samples,"",
+            package_row.get("package_no",""),
+        )
+    tasks=rows("SELECT * FROM tasks WHERE group_id=? ORDER BY created_at",(group_id,))
+    for task_row in tasks:
+        task_samples="、".join(json_list(task_row.get("sample_nos")))
+        add(
+            task_row.get("experiment_started_at"),"实验开始","检测中",
+            task_row.get("detection_location",""),task_samples,task_row.get("assignee",""),
+            f"{task_row.get('task_no','')}｜{task_row.get('experiment','')}",
+        )
+        add(
+            task_row.get("experiment_ended_at"),"实验结束","检测中 → 待复核",
+            task_row.get("detection_location",""),task_samples,task_row.get("assignee",""),
+            f"{task_row.get('task_no','')}｜{task_row.get('experiment','')}",
+        )
+    review_rows=rows(
+        """SELECT rv.*,t.experiment FROM reviews rv
+           JOIN tasks t ON t.task_no=rv.record_no WHERE t.group_id=?
+           ORDER BY rv.reviewed_at,rv.id""",
+        (group_id,),
+    )
+    for item in review_rows:
+        add(
+            item.get("reviewed_at"),"原始记录复核",
+            f"复核结果：{item.get('decision','')}","",item.get("record_no",""),
+            item.get("reviewer",""),f"{item.get('experiment','')}｜{item.get('comment','')}",
+        )
+    waste_rows=rows(
+        "SELECT * FROM hazardous_waste_records WHERE commission_no=? ORDER BY occurred_at",
+        (group_row["commission_no"],),
+    )
+    group_task_nos={x["task_no"] for x in tasks}
+    for item in waste_rows:
+        if not group_task_nos.intersection(json_list(item.get("task_nos"))):continue
+        add(
+            item.get("occurred_at"),"废液/废弃样品处置",item.get("status",""),
+            item.get("container_no",""),"、".join(sample_nos),item.get("handler",""),
+            f"{item.get('waste_name','')}｜{item.get('quantity','')} {item.get('unit','')}｜{item.get('disposal_method','')}",
+        )
+    events.sort(key=lambda item:item["时间"])
+    return events
 
 
 def dashboard_counts() -> dict[str, int]:
@@ -2680,6 +2832,18 @@ def register_objection(data: dict[str, Any], actor: str) -> str:
         raise ValueError("只能对已经签发的检验报告登记异议")
     if not str(data.get("description") or "").strip():
         raise ValueError("客户异议内容不能为空")
+    disputed_items=[
+        x.strip() for x in str(data.get("disputed_items") or "").replace("，","、").split("、")
+        if x.strip()
+    ]
+    allowed_items={
+        x.get("experiment","") for x in commission_tests(report_row["commission_no"])
+        if x.get("experiment")
+    }
+    if not disputed_items:
+        raise ValueError("至少选择一个争议检测项目")
+    if any(item not in allowed_items for item in disputed_items):
+        raise ValueError("争议检测项目必须来自该委托当时选择的实验项目")
     objection_no = _next_objection_no()
     inspector = report_row.get("quality_inspector") or _auto_match_user("质量检测员")
     ts = now()
@@ -2695,7 +2859,7 @@ def register_objection(data: dict[str, Any], actor: str) -> str:
                 objection_no, report_row["report_no"], report_row["commission_no"],
                 data.get("client_name", ""), data.get("contact", ""),
                 data.get("submitted_at", ts), data.get("description", ""),
-                data.get("evidence_note", ""), data.get("disputed_items", ""),
+                data.get("evidence_note", ""), "、".join(disputed_items),
                 data.get("involved_samples", ""), data.get("application_channel", ""),
                 inspector, actor, ts, ts,
             ),
@@ -2797,9 +2961,9 @@ def record_customer_retest_decision(
         raise ValueError("只有样品管理员可以记录客户重测决定")
     if not row or row["status"] != "待客户确认重测":
         raise ValueError("当前异议不在客户重测确认阶段")
-    if decision not in ("需要重测", "不需要重测", "待处理"):
+    if decision not in ("需要重测", "不需要重测"):
         raise ValueError("客户决定选项无效")
-    status = "待安排重测" if decision == "需要重测" else ("待异议回复" if decision == "不需要重测" else "待客户确认重测")
+    status = "待安排重测" if decision == "需要重测" else "待异议回复"
     with connect() as c:
         c.execute(
             """UPDATE objections SET customer_retest_decision=?,retest_note=?,
