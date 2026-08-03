@@ -479,11 +479,19 @@ def _build_equipment_for_prefill(equipment: list[dict[str, Any]], checks: list[d
     return result
 
 
-def _parameter_for_field(field: dict[str, Any], params: dict[str, Any]) -> tuple[str | None, Any]:
+def _parameter_for_field(field: dict[str, Any], params: dict[str, Any], kind: str) -> tuple[str | None, Any]:
     combined = " ".join([field.get("label", ""), field.get("row_label", ""), field.get("col_header", ""), field.get("template_text", "")])
     for key, aliases in PARAM_ALIASES.items():
         if key in params and _field_match(combined, aliases):
             return key, params.get(key)
+    # Newly exposed mother-template observations can map by their controlled
+    # Chinese label without requiring a second hard-coded alias table.
+    for section in schema(kind).get("sections", []):
+        for definition in section.get("fields", []):
+            key = definition.get("key", "")
+            label = definition.get("label", "")
+            if key in params and label and _field_match(combined, [label]):
+                return key, params.get(key)
     return None, None
 
 
@@ -561,7 +569,7 @@ def business_to_template_fields(
             values[key] = f"{_format_value(params.get('temperature', ''))} ℃ {_format_value(params.get('humidity', ''))} %RH"
             continue
 
-        param_key, param_value = _parameter_for_field(field, params)
+        param_key, param_value = _parameter_for_field(field, params, kind)
         if param_key is not None and param_value not in (None, ""):
             if "□" in original or "☐" in original:
                 values[key] = _select_checkbox_value(original, param_value)
@@ -608,7 +616,10 @@ def business_to_template_fields(
         # Logical defaults are only applied to real confirmation items.
         # Pure layout blanks and unused alternatives stay exactly as in the source template.
         if "□" in original or "☐" in original:
-            auto_tokens = ("检验类别", "接收状态", "是否符合", "使用前状态", "确认结果", "判定", "结果", "状态", "允许曝光", "授权操作", "Z轴正方向标识")
+            # Only workflow facts may be auto-selected. Actual observations,
+            # conformance decisions and result/status cells must come from an
+            # explicit UI field or calculation and otherwise remain unselected.
+            auto_tokens = ("检验类别", "接收状态")
             if any(token in combined for token in auto_tokens):
                 values[key] = _select_checkbox_value(original, "")
             continue

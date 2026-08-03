@@ -15,13 +15,13 @@ from business_record_engine import initialize_business_record, calculate_busines
 from business_record_ui import render_readonly_summary, render_task_confirmations, render_equipment_confirmation, render_prechecks, render_parameters, render_sample_data, render_exception_and_summary, render_completion
 from equipment_registry import EQUIPMENT_BINDING_ROLES
 from experiment_schemas import SCHEMAS
-from form_engine import commission_document, sample_register_document, loan_return_document, report_document, report_delivery_document, hazardous_waste_document
+from form_engine import commission_document, sample_register_document, loan_return_document, report_document, report_delivery_document, hazardous_waste_document, modification_log_pdf
 from report_rules import overall_conclusion, report_item
 from trace_excel_engine import build_internal_trace_workbook
 from camera_evidence import save_live_camera_photo
 from pdf_preview import build_preview_pdf, pdf_page_images
 from docx_preview import docx_review_html
-from quick_demo import create_pending_review_demo
+from quick_demo import create_pending_review_demo, create_full_document_demo
 
 ROOT=Path(__file__).parent
 TEMPLATE_DIR=ROOT/"templates"
@@ -115,13 +115,8 @@ def render_experiment_timeline(task_row, actor, key_prefix):
     a.markdown(f'<div class="timeline"><b>任务接收</b><br>{task_row.get("created_at") or "已建立任务"}</div>',unsafe_allow_html=True)
     b.markdown(f'<div class="timeline"><b>实验开始</b><br>{start_at.replace("T"," ") if start_at else "等待记录"}</div>',unsafe_allow_html=True)
     c.markdown(f'<div class="timeline"><b>实验结束</b><br>{end_at.replace("T"," ") if end_at else "等待记录"}</div>',unsafe_allow_html=True)
-    x,y=st.columns(2)
-    if x.button("记录实验开始时间",disabled=bool(start_at),use_container_width=True,key=f"{key_prefix}_timeline_start"):
-        try:
-            mark_task_experiment_time(task_row["task_no"],actor,"开始")
-            st.rerun()
-        except Exception as e:st.error(str(e))
-    if y.button("记录实验结束时间",disabled=not start_at or bool(end_at),use_container_width=True,key=f"{key_prefix}_timeline_end"):
+    st.info("进入实验过程后，系统已自动记录开始时间；实验员只需要在全部操作完成后手动结束实验。")
+    if st.button("记录实验结束时间",disabled=not start_at or bool(end_at),use_container_width=True,key=f"{key_prefix}_timeline_end"):
         try:
             mark_task_experiment_time(task_row["task_no"],actor,"结束")
             st.rerun()
@@ -195,9 +190,10 @@ def task_archive(task_no):
                 continue
             archive.writestr(f"{task_no}/{folder}/{meta['original_name']}",path.read_bytes())
         trace_rows=audit_logs(task_no)
+        change_rows=modification_logs(task_no)
         archive.writestr(
-            f"{task_no}/{task_no}_修改日志.json",
-            json.dumps(trace_rows,ensure_ascii=False,indent=2).encode("utf-8"),
+            f"{task_no}/{task_no}_修改记录日志.pdf",
+            modification_log_pdf(change_rows,task_no).getvalue(),
         )
         locked=latest_record(task_no)
         if locked and locked.get("status")=="已锁定":
@@ -275,22 +271,31 @@ def preview_rows(kind, rows0):
 
 
 def show_report_photo_preview(task_no):
+    task_row=task(task_no) or {}
+    decisive_codes=REPORT_DECISIVE_PHOTO_CODES.get(task_row.get("experiment",""),[])
     photos=[
         item for item in list_attachments(task_no=task_no)
-        if item.get("checkpoint_code")=="REPORT_PHOTO"
+        if item.get("checkpoint_code") in decisive_codes
         and item.get("evidence_status")=="有效"
         and not bool(item.get("is_original"))
     ]
+    if not photos:
+        photos=[
+            item for item in list_attachments(task_no=task_no)
+            if item.get("checkpoint_code")=="REPORT_PHOTO"
+            and item.get("evidence_status")=="有效"
+            and not bool(item.get("is_original"))
+        ]
     st.markdown("#### 报告照片区域预览")
     if not photos:
-        st.warning("尚未拍摄“检验报告照片区域用代表性照片”。")
+        st.warning("尚未取得可用于报告的决定性结果照片。")
         return
     for item in photos:
         path=attachment_file(item)
         if path.exists():
             st.image(
                 str(path),
-                caption=f"{item.get('original_name','')}｜{item.get('server_captured_at','')}",
+                caption=f"{item.get('sample_no') or '任务整体'}｜{item.get('checkpoint_label','')}｜{item.get('server_captured_at','')}",
                 width=520,
             )
 
@@ -364,14 +369,22 @@ if pending_notices:
 if page=="首页看板":
     header("委托、样品、任务包和报告状态看板");counts=dashboard_counts();cols=st.columns(7)
     if role=="管理员":
-        st.info("临时测试入口：生成一个已经完成实验并提交、正在等待复核员审核的表面粗糙度任务。")
-        if st.button("生成待复核实验Demo",type="primary",key="create_pending_review_demo_home"):
+        st.info("临时测试入口：可生成待复核任务，或直接生成包含十项实验、结果照片、已签发报告和发放登记的完整单据Demo。")
+        demo_a,demo_b=st.columns(2)
+        if demo_a.button("生成待复核实验Demo",type="primary",key="create_pending_review_demo_home",use_container_width=True):
             try:
                 demo=create_pending_review_demo()
                 st.success(f"已生成：{demo['commission_no']}｜{demo['task_no']}。请使用 reviewer / review123 登录查看复核预览。")
                 st.rerun()
             except Exception as error:
                 st.error("生成演示数据失败："+str(error))
+        if demo_b.button("生成完整单据与照片Demo",key="create_full_document_demo_home",use_container_width=True):
+            try:
+                demo_commission=create_full_document_demo()
+                st.success(f"已生成完整演示委托：{demo_commission}。请前往单据中心查看报告、发放登记和追溯Excel。")
+                st.rerun()
+            except Exception as error:
+                st.error("生成完整演示数据失败："+str(error))
     metrics=[("委托",counts["commissions"]),("在册样品",counts["samples"]),("待接收任务包",counts["packages"]),("检测中",counts["testing"]),("待复核",counts["reviews"]),("待回库",counts["returns"]),("待发布报告",counts["reports"])]
     for col,(label,value) in zip(cols,metrics):col.metric(label,value)
     show_df(list_samples(),["sample_no","commission_no","group_no","sample_name","model","material_name","status","current_location","current_holder","updated_at"])
@@ -625,7 +638,16 @@ elif page=="实验记录":
             [t["task_no"] for t in task_list],
             format_func=lambda x:next(f"{t['task_no']}｜{t['experiment']}" for t in task_list if t['task_no']==x),
         )
-        t=task(tn);config_snapshot=task_config_snapshot(tn);latest=latest_record(tn)
+        t=task(tn)
+        # 第一次进入实验过程即自动开始；只写入一次，页面刷新不会覆盖。
+        if not t.get("experiment_started_at") and t.get("status") in ("检测中","退回修改"):
+            try:
+                mark_task_experiment_time(tn,username,"开始",system_auto=True)
+                t=task(tn)
+                st.success(f"系统已自动记录实验开始时间：{str(t.get('experiment_started_at','')).replace('T',' ')}")
+            except Exception as e:
+                st.error(f"自动记录实验开始时间失败：{e}")
+        config_snapshot=task_config_snapshot(tn);latest=latest_record(tn)
         if latest and latest["status"]=="已锁定":
             st.warning("该记录已锁定。如需更正，请在修改中心创建新版本。")
             st.stop()
@@ -940,8 +962,9 @@ elif page=="一键下载":
 elif page=="单据中心":
     header("检验委托单、样品登记、领用归还、原始记录和检验报告")
     if role=="管理员":
-        st.info("临时演示工具：生成一个样品已入库、实验已完成、正在等待复核的任务。委托单和样品表可立即下载，原始记录复核通过前不会进入单据中心。")
-        if st.button("生成待复核实验Demo并查看委托单",type="primary",key="create_pending_review_demo_documents"):
+        st.info("临时演示工具：待复核Demo用于检查复核流程；完整Demo可直接查看十项原始记录、报告照片、发放登记和异议追溯Excel。")
+        demo_a,demo_b=st.columns(2)
+        if demo_a.button("生成待复核实验Demo",type="primary",key="create_pending_review_demo_documents",use_container_width=True):
             try:
                 demo=create_pending_review_demo()
                 st.session_state["document_commission_no"]=demo["commission_no"]
@@ -949,6 +972,14 @@ elif page=="单据中心":
                 st.rerun()
             except Exception as error:
                 st.error("生成演示数据失败："+str(error))
+        if demo_b.button("生成完整单据与照片Demo",key="create_full_document_demo_documents",use_container_width=True):
+            try:
+                demo_commission=create_full_document_demo()
+                st.session_state["document_commission_no"]=demo_commission
+                st.toast("完整单据演示已生成")
+                st.rerun()
+            except Exception as error:
+                st.error("生成完整演示数据失败："+str(error))
     cs=list_commissions();show_df(cs,["commission_no","client_name","commission_date","due_date","status"])
     if cs:
         commission_options=[x["commission_no"] for x in cs]
@@ -1107,15 +1138,16 @@ elif page=="报告发放登记":
         report_row=report(report_no);commission_row=commission(report_row["commission_no"])
         a,b,c=st.columns(3)
         method=a.selectbox("发放方式",["电子邮件","自取","快递"])
-        recipient=b.text_input("领取/接收人")
-        contact=c.text_input("联系方式")
+        recipient=b.text_input("领取/接收人（取自委托单）",value=commission_row.get("contact",""),disabled=True)
+        contact=c.text_input("联系方式（取自委托单）",value=commission_row.get("phone",""),disabled=True)
         delivered_at=a.text_input("发放时间（服务器时间）",value=now(),disabled=True)
         receipt=b.selectbox("签收状态",["已签收","已发送待确认","无需签收"])
         note=st.text_area("发放及签收备注")
-        if st.button("登记报告发放",type="primary"):
+        if st.button("确认发放并写入登记表",type="primary"):
             add_report_delivery({
                 "report_no":report_no,"client_name":commission_row["client_name"],
-                "delivery_method":method,"recipient":recipient,"recipient_contact":contact,
+                "delivery_method":method,"recipient":commission_row.get("contact",""),
+                "recipient_contact":commission_row.get("phone",""),
                 "delivered_at":now(),"receipt_status":receipt,"receipt_note":note,
             },username)
             st.session_state.flash_message=f"报告 {report_no} 发放记录已登记，可立即下载发放登记表"
@@ -1194,10 +1226,21 @@ elif page=="修改中心":
                 except Exception as e:st.error(str(e))
 
 elif page=="修改日志":
-    header("独立、只追加、不可覆盖的修改日志")
-    st.info("日志采用前后哈希串联；每一次字段修改均记录修改前值、修改后值、原因、操作者和服务器时间。")
-    logs=audit_logs()
-    show_df(logs,["id","entity_type","entity_id","action","field_name","old_value","new_value","reason","actor_name","actor_role","device_id","previous_hash","entry_hash","created_at"])
+    header("独立修改记录日志")
+    st.info("本页只显示修改、作废、更正和照片替代，不混入查看、下载或普通审批。后台仍保留完整哈希审计链。")
+    all_changes=modification_logs()
+    entity_options=["全部单据"]+list(dict.fromkeys(x["entity_id"] for x in all_changes if x.get("entity_id")))
+    selected_entity=st.selectbox("查看范围",entity_options)
+    logs=all_changes if selected_entity=="全部单据" else modification_logs(selected_entity)
+    show_df(logs,["id","entity_type","entity_id","field_label","action","old_value","new_value","reason","actor_name","actor_role","created_at"])
+    st.download_button(
+        "下载修改记录日志 PDF",
+        modification_log_pdf(logs,selected_entity),
+        f"{'全部单据' if selected_entity=='全部单据' else selected_entity}_修改记录日志.pdf",
+        mime="application/pdf",
+        type="primary",
+        use_container_width=True,
+    )
 
 elif page=="SOP与模板版本":
     header("SOP和实验原始记录表受控版本")

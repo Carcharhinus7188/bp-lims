@@ -145,7 +145,13 @@ def render_equipment_confirmation(equipment: list[dict[str, Any]], existing: lis
         with st.container(border=True):
             a, b, c = st.columns([1.3, 1, 1])
             a.markdown(f"**{item.get('equipment_name') or item.get('设备名称','')}**  \n{item.get('model') or item.get('型号规格','')}  \n管理编号：`{no}`")
-            b.caption(f"角色：{item.get('binding_role') or item.get('设备角色','')}  \n测量范围：{item.get('measuring_range') or item.get('测量范围','')}  \n校准时间：{item.get('calibration_time') or item.get('台账校准时间','未填写')}")
+            b.caption(
+                f"角色：{item.get('binding_role') or item.get('设备角色','')}  \n"
+                f"测量范围：{item.get('measuring_range') or item.get('测量范围','')}  \n"
+                f"证书编号：{item.get('calibration_certificate') or item.get('校准证书编号','台账未填写')}  \n"
+                f"溯源机构：{item.get('traceability_agency') or item.get('溯源机构','台账未填写')}  \n"
+                f"有效期：{item.get('calibration_due') or item.get('校准有效期') or item.get('calibration_time') or item.get('台账校准时间','未填写')}"
+            )
             status_options = ["正常", "异常"]
             status = prior.get("status") or prior.get("使用前状态") or "正常"
             with c:
@@ -156,6 +162,11 @@ def render_equipment_confirmation(equipment: list[dict[str, Any]], existing: lis
             output.append({
                 "management_no": no,
                 "equipment_name": item.get("equipment_name") or item.get("设备名称", ""),
+                "model": item.get("model") or item.get("型号规格", ""),
+                "measuring_range": item.get("measuring_range") or item.get("测量范围", ""),
+                "calibration_certificate": item.get("calibration_certificate") or item.get("校准证书编号", ""),
+                "traceability_agency": item.get("traceability_agency") or item.get("溯源机构", ""),
+                "calibration_due": item.get("calibration_due") or item.get("校准有效期", ""),
                 "status": status,
                 "note": note,
                 "required": bool(item.get("required") or item.get("必需设备") == "是"),

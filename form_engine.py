@@ -6,6 +6,15 @@ from typing import Any
 import json
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 from experiment_engine import result_summary
 from report_rules import overall_conclusion, report_item
 
@@ -76,6 +85,87 @@ def report_delivery_document(report_no: str, delivery_rows: list[dict[str, Any]]
             cells[column].text=str(value)
     d.add_paragraph("本表由系统依据报告发放记录自动生成。")
     return _save(d)
+
+
+def modification_log_pdf(log_rows: list[dict[str, Any]], scope: str = "全部单据") -> BytesIO:
+    """Create a human-readable, immutable modification-only log."""
+    output = BytesIO()
+    font_name = "STSong-Light"
+    for font_path in (
+        ROOT / "assets" / "NotoSansCJK-Regular.ttc",
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf"),
+        Path("/System/Library/Fonts/Supplemental/Songti.ttc"),
+    ):
+        if font_path.exists():
+            try:
+                font_name = "BPLab-CJK"
+                pdfmetrics.registerFont(TTFont(font_name, str(font_path), subfontIndex=0))
+                break
+            except Exception:
+                continue
+    if font_name == "STSong-Light":
+        pdfmetrics.registerFont(UnicodeCIDFont(font_name))
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "CNTitle", parent=styles["Title"], fontName=font_name,
+        fontSize=18, leading=24, alignment=TA_CENTER, textColor=colors.HexColor("#12364A"),
+        spaceAfter=5 * mm,
+    )
+    body_style = ParagraphStyle(
+        "CNBody", parent=styles["BodyText"], fontName=font_name,
+        fontSize=8, leading=11, wordWrap="CJK",
+    )
+    small_style = ParagraphStyle(
+        "CNSmall", parent=body_style, fontSize=7, leading=9, textColor=colors.HexColor("#4B5563"),
+    )
+    doc = SimpleDocTemplate(
+        output, pagesize=landscape(A4), leftMargin=10 * mm, rightMargin=10 * mm,
+        topMargin=12 * mm, bottomMargin=12 * mm,
+        title="修改记录日志", author=COMPANY_CN if "COMPANY_CN" in globals() else "大连标普检测有限公司",
+    )
+    story = [
+        Paragraph("修改记录日志", title_style),
+        Paragraph(f"范围：{scope}　　记录数量：{len(log_rows)}", body_style),
+        Paragraph("本日志只列示数据或单据发生的修改、作废及更正，不包含查看、下载和普通审批操作。日志按服务器时间排序，修改前后值及原因不可覆盖。", small_style),
+        Spacer(1, 4 * mm),
+    ]
+    header = ["编号", "单据/对象", "修改位置", "修改内容", "修改前", "修改后", "原因", "操作者/角色", "服务器时间"]
+    data = [[Paragraph(x, body_style) for x in header]]
+    for item in log_rows:
+        entity = f"{item.get('entity_type','')} / {item.get('entity_id','')}"
+        location = item.get("field_label") or item.get("field_name") or "单据级"
+        operator = f"{item.get('actor_name') or item.get('actor','')} / {item.get('actor_role','')}"
+        values = [
+            str(item.get("id", "")), entity, location, item.get("action", ""),
+            item.get("old_value", ""), item.get("new_value", ""), item.get("reason", ""),
+            operator, item.get("created_at", ""),
+        ]
+        data.append([Paragraph(str(value or ""), body_style) for value in values])
+    if len(data) == 1:
+        data.append([Paragraph("暂无修改记录", body_style)] + [""] * (len(header) - 1))
+    table = Table(
+        data, repeatRows=1,
+        colWidths=[12*mm, 30*mm, 39*mm, 27*mm, 38*mm, 38*mm, 42*mm, 29*mm, 29*mm],
+    )
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#176B87")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, -1), font_name),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#94A3B8")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F3F7F9")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph("完整性说明：系统后台同时保存前一日志哈希、本日志哈希和文档版本快照，用于验证日志链未被覆盖。", small_style))
+    doc.build(story)
+    output.seek(0)
+    return output
 
 
 def hazardous_waste_document(item: dict[str, Any]):
@@ -298,19 +388,29 @@ def report_document(c,groups,samples,tasks,records,report,user_names,signatures)
         if p.text.strip().startswith("样品情况说明："):_set_existing_text(p,"样品情况说明："+(report.get("sample_statement") or auto_statement))
         if p.text.strip().startswith("检验结论："):_set_existing_text(p,"检验结论："+(report.get("conclusion") or auto_conclusion))
 
-    # Insert the explicitly captured report-area photo into the controlled report.
+    # Insert conclusion-driving evidence photos. REPORT_PHOTO is a fallback only.
     from lims_db import list_attachments, attachment_file
+    from constants import REPORT_DECISIVE_PHOTO_CODES
     report_photos=[]
     for task_item in tasks:
-        candidates=[
+        codes=REPORT_DECISIVE_PHOTO_CODES.get(task_item.get("experiment",""),[])
+        all_candidates=[
             item for item in list_attachments(task_no=task_item["task_no"])
-            if item.get("checkpoint_code")=="REPORT_PHOTO"
-            and item.get("capture_source")=="live_camera"
+            if item.get("capture_source")=="live_camera"
             and item.get("evidence_status")=="有效"
             and not bool(item.get("is_original"))
         ]
-        if candidates:
-            report_photos.append((task_item,candidates[0]))
+        candidates=[item for item in all_candidates if item.get("checkpoint_code") in codes]
+        if not candidates:
+            candidates=[item for item in all_candidates if item.get("checkpoint_code")=="REPORT_PHOTO"]
+        # Keep every sample-level decisive result, but de-duplicate task-level checkpoints.
+        seen=set()
+        for photo in sorted(candidates,key=lambda x:(codes.index(x.get("checkpoint_code")) if x.get("checkpoint_code") in codes else 999,x.get("sample_no",""),x.get("server_captured_at",""))):
+            identity=(photo.get("checkpoint_code"),photo.get("sample_no") or "TASK")
+            if identity in seen:
+                continue
+            seen.add(identity)
+            report_photos.append((task_item,photo))
     for paragraph in d.paragraphs:
         if paragraph.text.strip().startswith("照片和说明："):
             _set_existing_text(paragraph,"照片和说明：")
@@ -321,9 +421,13 @@ def report_document(c,groups,samples,tasks,records,report,user_names,signatures)
                 paragraph.add_run("\n")
                 try:
                     paragraph.add_run().add_picture(str(path),width=Inches(2.6))
+                    sample_text=photo.get("sample_no") or "任务整体"
+                    record_item=next((x for x in report_items if x.get("task",{}).get("task_no")==task_item.get("task_no")),None) or {}
                     paragraph.add_run(
-                        f"\n{task_item.get('experiment','')}｜{photo.get('server_captured_at','')}｜"
-                        f"{photo.get('original_name','')}"
+                        f"\n{task_item.get('experiment','')}｜样品：{sample_text}"
+                        f"\n证据：{photo.get('checkpoint_label','')}"
+                        f"\n时间：{str(photo.get('server_captured_at','')).replace('T',' ')}｜"
+                        f"结论：{record_item.get('conclusion','')}"
                     )
                 except Exception:
                     paragraph.add_run(f"\n照片文件：{photo.get('original_name','')}")

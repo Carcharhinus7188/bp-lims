@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
+
+from PIL import Image, ImageDraw
 
 from business_record_engine import (
     business_to_template_fields,
@@ -32,13 +35,46 @@ from lims_db import (
     quality_review_report,
     report,
     task_config_snapshot,
+    add_report_delivery,
 )
+from camera_evidence import save_live_camera_photo
+from constants import REPORT_DECISIVE_PHOTO_CODES, SAMPLE_LEVEL_PHOTO_CODES, photo_checkpoints
 
 
 DEMO_COMMISSION_NO = "WT20990101001"
 DEMO_GROUP_NO = "BP20990101001"
 PENDING_DEMO_COMMISSION_NO = "WT20990101002"
 PENDING_DEMO_GROUP_NO = "BP20990101002"
+
+
+def _add_demo_result_photos(task_row: dict, sample_ids: list[str]) -> None:
+    """Create deterministic camera-style evidence so the document demo includes photos."""
+    checkpoint_labels = {code: label for code, label, _required in photo_checkpoints(task_row["experiment"])}
+    for code in REPORT_DECISIVE_PHOTO_CODES.get(task_row["experiment"], ["RESULT"]):
+        entities = sample_ids if code in SAMPLE_LEVEL_PHOTO_CODES else [""]
+        for sample_no in entities:
+            image = Image.new("RGB", (1280, 800), (232, 242, 247))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((55, 55, 1225, 745), outline=(23, 107, 135), width=8)
+            draw.text((95, 105), "BPLab DEMO RESULT EVIDENCE", fill=(18, 54, 74))
+            draw.text((95, 180), task_row["task_no"], fill=(18, 54, 74))
+            draw.text((95, 250), code, fill=(23, 107, 135))
+            draw.text((95, 320), sample_no or "TASK LEVEL", fill=(23, 107, 135))
+            draw.line((95, 520, 1160, 260), fill=(58, 166, 185), width=10)
+            content = BytesIO()
+            image.save(content, "JPEG", quality=92)
+            save_live_camera_photo(
+                {
+                    "commission_no": task_row["commission_no"],
+                    "package_no": task_row["package_no"],
+                    "task_no": task_row["task_no"],
+                    "sample_no": sample_no,
+                    "checkpoint_code": code,
+                    "checkpoint_label": checkpoint_labels.get(code, code),
+                    "device_id": "DEMO-TABLET",
+                },
+                content.getvalue(), "tester", "实验员张工",
+            )
 
 
 def _complete_business(kind: str, sample_ids: list[str], equipment: list[dict]):
@@ -412,6 +448,7 @@ def create_full_document_demo() -> str:
                     "完整单据演示自动生成", timestamp, timestamp, timestamp, timestamp,
                 ),
             )
+        _add_demo_result_photos(task_row, sample_ids)
         freeze_document_version(
             "record", task_no, 1, "完整演示锁定", payload, "reviewer",
         )
@@ -424,6 +461,16 @@ def create_full_document_demo() -> str:
         approver_review_report(
             report_no, report_row["approver"], "批准", "完整演示自动签发",
         )
+        add_report_delivery({
+            "report_no": report_no,
+            "client_name": client["org_name"],
+            "delivery_method": "电子邮件",
+            "recipient": client.get("contact", ""),
+            "recipient_contact": client.get("phone", ""),
+            "delivered_at": now(),
+            "receipt_status": "已发送待确认",
+            "receipt_note": "完整Demo自动登记；信息来自委托单",
+        }, "receiver")
     with connect() as connection:
         connection.execute(
             "UPDATE task_packages SET status='已回库',updated_at=? WHERE package_no=?",

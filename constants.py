@@ -5,7 +5,7 @@ COMPANY_CN = "大连标普检测有限公司"
 COMPANY_EN = "DALIAN BIAOPU TESTING CO., LTD."
 SYSTEM_CN = "大连标普实验室样品全过程追溯系统"
 SYSTEM_EN = "BPLab Sample Lifecycle Tracking System"
-APP_VERSION = "BPLab Trace V7.1 流程校正版"
+APP_VERSION = "BPLab Trace V8.0 异议追溯与证据链版"
 TIMEZONE_NAME = "Asia/Shanghai"
 
 STORAGE_AREAS = ["A区域", "B区域"]
@@ -49,6 +49,21 @@ COMMON_PHOTO_CHECKPOINTS = [
 SAMPLE_LEVEL_PHOTO_CODES = {
     "SAMPLE_BEFORE", "SAMPLE_AFTER", "DAMAGE", "CRACK", "FRACTURE",
     "INDENT", "MEASURE_RESULT", "OBSERVER_RESULT", "PROFILE", "H1", "H2", "ROI",
+}
+
+# 确定报告结论时真正使用的结果证据。报告生成器按此顺序选图，
+# REPORT_PHOTO 只作为人工补充，不再是报告照片的唯一来源。
+REPORT_DECISIVE_PHOTO_CODES = {
+    "表面粗糙度试验": ["PROFILE"],
+    "金属-陶瓷结合裂纹萌生试验": ["FASTTEST_RESULT", "CRACK"],
+    "金属内部质量X射线灰度分析": ["RADIOGRAPH", "ROI"],
+    "翘曲变形试验": ["H1", "H2"],
+    "热膨胀系数试验": ["CTE_CURVE"],
+    "陶瓷牙耐急冷急热试验": ["DAMAGE"],
+    "弯曲性能试验": ["FORCE_CURVE", "FRACTURE"],
+    "维氏硬度试验": ["INDENT"],
+    "增材制造金属试样厚度测量": ["MEASURE_RESULT"],
+    "牙科材料色稳定性试验": ["D65_COMPARE", "OBSERVER_RESULT"],
 }
 
 EXPERIMENT_PHOTO_CHECKPOINTS = {

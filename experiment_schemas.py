@@ -437,3 +437,132 @@ SCHEMAS = {
     },
 
 }
+
+# 对照受控原始记录母版补充的现场观察项。所有字段均在实验过程中显式
+# 展示，由实验员确认或填写；不再依赖模板导出阶段静默勾选“符合”。
+COMMON_PROCESS_OBSERVATIONS = [
+    {"key": "temperature_compliance", "label": "本次温度条件是否符合", "type": "select",
+     "options": ["符合", "不符合"], "default": "符合", "actual": True},
+    {"key": "humidity_compliance", "label": "本次湿度条件是否符合", "type": "select",
+     "options": ["符合", "不符合"], "default": "符合", "actual": True},
+    {"key": "interference_compliance", "label": "环境干扰控制是否符合", "type": "select",
+     "options": ["符合", "不符合"], "default": "符合", "actual": True},
+    {"key": "work_area_condition", "label": "工作区域实际状态", "type": "multiselect",
+     "options": ["清洁", "干燥", "无明显粉尘", "无无关物品"],
+     "default": ["清洁", "干燥", "无明显粉尘", "无无关物品"], "actual": True},
+    {"key": "equipment_traceability_confirmation", "label": "设备证书、有效期及溯源信息核对结果",
+     "type": "select", "options": ["已核对且在有效期内", "存在异常"], "default": "已核对且在有效期内", "actual": True},
+    {"key": "sample_production_date", "label": "样品生产日期/批次日期", "type": "text",
+     "default": "委托资料未提供", "actual": True},
+    {"key": "sample_preparation_actual", "label": "本次样品制备及表面状态说明", "type": "text",
+     "default": "已按方法要求确认", "actual": True},
+    {"key": "method_execution_confirmation", "label": "本次操作与受控方法一致性",
+     "type": "select", "options": ["一致", "存在偏离"], "default": "一致", "actual": True},
+]
+
+SUPPLEMENTAL_PROCESS_FIELDS = {
+    "rough": [
+        {"key": "z_axis_marking", "label": "Z轴正方向标识", "type": "select",
+         "options": ["清晰", "不清晰"], "default": "清晰", "actual": True},
+        {"key": "surface_cleaning_actual", "label": "测试面清洁状态", "type": "select",
+         "options": ["清洁", "不清洁"], "default": "清洁", "actual": True},
+        {"key": "fixture_stability", "label": "试样固定及工作台稳定性", "type": "select",
+         "options": ["符合", "不符合"], "default": "符合", "actual": True},
+        {"key": "measurement_line_note", "label": "实际测量线/方向说明", "type": "text",
+         "default": "按受控方法规定位置测量", "actual": True},
+    ],
+    "mc_crack": [
+        {"key": "centering_confirmation", "label": "试样居中及跨距确认", "type": "select",
+         "options": ["符合", "不符合"], "default": "符合", "actual": True},
+        {"key": "loading_zero_confirmation", "label": "加载前力值清零确认", "type": "select",
+         "options": ["已清零", "未清零"], "default": "已清零", "actual": True},
+        {"key": "crack_observation_note", "label": "裂纹萌生/陶瓷剥离观察说明", "type": "text",
+         "default": "按软件曲线及现场观察共同判定", "actual": True},
+    ],
+    "xray": [
+        {"key": "sample_surface_xray", "label": "样品表面清洁、干燥状态", "type": "select",
+         "options": ["符合", "不符合"], "default": "符合", "actual": True},
+        {"key": "radiation_zone_clear", "label": "辐射区域无无关人员及物品", "type": "select",
+         "options": ["符合", "不符合"], "default": "符合", "actual": True},
+        {"key": "panel_iqi_position_confirmation", "label": "探测板、像质计与样品位置确认",
+         "type": "select", "options": ["符合", "不符合"], "default": "符合", "actual": True},
+        {"key": "operator_authorization", "label": "X射线操作授权确认", "type": "select",
+         "options": ["已授权", "未授权"], "default": "已授权", "actual": True},
+        {"key": "density_control_note", "label": "密度/灰度标准控制范围及核查说明", "type": "text",
+         "default": "核查结果在受控范围内", "actual": True},
+    ],
+    "warp": [
+        {"key": "baseline_actual", "label": "切割前基准线实际确认", "type": "select",
+         "options": ["清晰且符合", "不符合"], "default": "清晰且符合", "actual": True},
+        {"key": "cutting_position_note", "label": "实际切割位置及方向说明", "type": "text",
+         "default": "按受控方法规定位置和方向切割", "actual": True},
+        {"key": "coolant_actual", "label": "切割过程冷却液状态", "type": "select",
+         "options": ["持续供给", "异常"], "default": "持续供给", "actual": True},
+    ],
+    "cte": [
+        {"key": "specimen_processing_state", "label": "试样加工及端面状态", "type": "text",
+         "default": "尺寸及端面状态满足方法要求", "actual": True},
+        {"key": "baseline_stability_actual", "label": "启动前基线/PV稳定性", "type": "select",
+         "options": ["稳定", "不稳定"], "default": "稳定", "actual": True},
+        {"key": "program_execution_note", "label": "升温程序实际执行确认", "type": "text",
+         "default": "按设定程序完整执行", "actual": True},
+    ],
+    "shock": [
+        {"key": "initial_appearance_actual", "label": "试验前逐件外观状态", "type": "text",
+         "default": "逐件检查未见裂纹、崩瓷或破损", "actual": True},
+        {"key": "transfer_compliance", "label": "热冷转移时间与浸没状态", "type": "select",
+         "options": ["符合", "不符合"], "default": "符合", "actual": True},
+        {"key": "inspection_condition", "label": "观察照度、放大条件及冷却状态",
+         "type": "select", "options": ["符合", "不符合"], "default": "符合", "actual": True},
+    ],
+    "bend": [
+        {"key": "specimen_direction", "label": "试样/打印方向", "type": "text",
+         "default": "已按委托及方法要求确认", "actual": True},
+        {"key": "fixture_centering", "label": "夹具平行、试样居中及紧固确认", "type": "select",
+         "options": ["符合", "不符合"], "default": "符合", "actual": True},
+        {"key": "zero_and_contact", "label": "力值调零及挠度计接触确认", "type": "select",
+         "options": ["符合", "不符合"], "default": "符合", "actual": True},
+    ],
+    "hv": [
+        {"key": "surface_preparation_hv", "label": "测试面磨制/抛光及清洁状态", "type": "text",
+         "default": "表面平整清洁且不影响压痕", "actual": True},
+        {"key": "software_version_actual", "label": "本次硬度测量软件版本", "type": "text",
+         "default": "由设备配置核对", "actual": True},
+        {"key": "loading_unloading_confirmation", "label": "加载、保荷及卸载过程", "type": "select",
+         "options": ["正常", "异常"], "default": "正常", "actual": True},
+    ],
+    "thickness": [
+        {"key": "design_file_no", "label": "设计文件/图纸编号", "type": "text",
+         "default": "委托资料未提供", "actual": True},
+        {"key": "conditioning_start", "label": "恒温平衡开始时间", "type": "datetime",
+         "default": "按任务实际记录", "actual": True},
+        {"key": "conditioning_end", "label": "恒温平衡结束时间", "type": "datetime",
+         "default": "按任务实际记录", "actual": True},
+        {"key": "fixture_method_note", "label": "固定方式、测点布置及重复测量说明", "type": "text",
+         "default": "固定端/中点/自由端各测3点并重复3次", "actual": True},
+    ],
+    "color": [
+        {"key": "control_sample_confirmation", "label": "对照试样及编号确认", "type": "select",
+         "options": ["符合", "不符合"], "default": "符合", "actual": True},
+        {"key": "observer_identity_note", "label": "三名观察者身份及资格记录", "type": "text",
+         "default": "已核对三名观察者身份及颜色视觉资格", "actual": True},
+        {"key": "d65_environment_ready", "label": "D65灯箱、背景及观察环境", "type": "select",
+         "options": ["符合", "不符合"], "default": "符合", "actual": True},
+        {"key": "lamp_filter_service_note", "label": "光源/滤光片编号及使用时间核对", "type": "text",
+         "default": "已核对且在受控使用范围内", "actual": True},
+        {"key": "sample_position_note", "label": "试样位置、遮盖及水位说明", "type": "text",
+         "default": "位置、遮盖和水位符合方法要求", "actual": True},
+    ],
+}
+
+for _kind, _definition in SCHEMAS.items():
+    if _kind == "generic":
+        continue
+    _existing = {f["key"] for s in _definition["sections"] for f in s["fields"]}
+    _fields = [
+        dict(field)
+        for field in COMMON_PROCESS_OBSERVATIONS + SUPPLEMENTAL_PROCESS_FIELDS.get(_kind, [])
+        if field["key"] not in _existing
+    ]
+    if _fields:
+        _definition["sections"].append({"title": "母版补充现场观察", "fields": _fields})

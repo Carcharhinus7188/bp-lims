@@ -1717,7 +1717,7 @@ def accept_package(
     )
 
 
-def mark_task_experiment_time(task_no: str, actor: str, action: str) -> dict[str, Any]:
+def mark_task_experiment_time(task_no: str, actor: str, action: str, system_auto: bool = False) -> dict[str, Any]:
     """Record experiment start/end as immutable timeline events, not manual text."""
     item = task(task_no)
     if not item:
@@ -1736,7 +1736,7 @@ def mark_task_experiment_time(task_no: str, actor: str, action: str) -> dict[str
                    WHERE task_no=?""",
                 (ts, ts, task_no),
             )
-        audit("task", task_no, actor, "实验开始", new_value=ts)
+        audit("task", task_no, actor, "系统自动开始实验" if system_auto else "实验开始", new_value=ts)
     elif action == "结束":
         if not item.get("experiment_started_at"):
             raise ValueError("请先记录实验开始时间")
@@ -1973,6 +1973,43 @@ def audit_logs(entity_id: str | None = None) -> list[dict[str, Any]]:
     if entity_id:
         return rows("SELECT * FROM audit_logs WHERE entity_id=? ORDER BY id", (entity_id,))
     return rows("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 500")
+
+
+def modification_logs(entity_id: str | None = None) -> list[dict[str, Any]]:
+    """Return only business mutations, excluding ordinary workflow/read events."""
+    mutation_actions = (
+        "字段修改", "历史版本作废", "创建修改版", "报告作废", "启动报告更正",
+        "更正并重新签发", "直接作废", "更新", "修改", "替代旧照片",
+    )
+    clauses = ["(" + " OR ".join("action LIKE ?" for _ in mutation_actions) + ")"]
+    args: list[Any] = [f"%{action}%" for action in mutation_actions]
+    if entity_id:
+        clauses.append("entity_id=?")
+        args.append(entity_id)
+    result = rows(
+        "SELECT * FROM audit_logs WHERE " + " AND ".join(clauses) + " ORDER BY created_at,id",
+        args,
+    )
+    # Present the field in human language while retaining the exact technical path.
+    labels: dict[str, str] = {}
+    try:
+        from experiment_schemas import SCHEMAS
+        for definition in SCHEMAS.values():
+            for section in definition.get("sections", []):
+                for field in section.get("fields", []):
+                    labels[field.get("key", "")] = f"{section.get('title','')} / {field.get('label','')}"
+            for key, label, _type in definition.get("columns", []):
+                labels[key] = f"原始测量数据 / {label}"
+    except Exception:
+        labels = {}
+    for item in result:
+        path = str(item.get("field_name") or "")
+        match = re.search(r"(?:parameters|rows\[\d+\])\.([A-Za-z0-9_]+)$", path)
+        key = match.group(1) if match else path.rsplit(".", 1)[-1]
+        item["field_label"] = (
+            f"{labels.get(key, key or '单据级')}（{path}）" if path else "单据级"
+        )
+    return result
 
 
 # ---------------------- Return ----------------------
@@ -2556,6 +2593,11 @@ def add_report_delivery(data: dict[str, Any], actor: str) -> None:
     report_row = report(data["report_no"])
     if not report_row or report_row["status"] != "已发布":
         raise ValueError("只有已经签发的有效报告可以登记发放")
+    commission_row = commission(report_row["commission_no"]) or {}
+    recipient = data.get("recipient") or commission_row.get("contact", "")
+    recipient_contact = data.get("recipient_contact") or commission_row.get("phone", "")
+    if not recipient:
+        raise ValueError("委托单未填写委托联系人，不能登记报告发放")
     with connect() as c:
         c.execute(
             """INSERT INTO report_deliveries(
@@ -2564,8 +2606,8 @@ def add_report_delivery(data: dict[str, Any], actor: str) -> None:
                ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
             (
                 data["report_no"], data.get("client_name", ""),
-                data.get("delivery_method", ""), data.get("recipient", ""),
-                data.get("recipient_contact", ""), data.get("delivered_at", now()),
+                data.get("delivery_method", ""), recipient,
+                recipient_contact, data.get("delivered_at", now()),
                 data.get("receipt_status", ""), data.get("receipt_note", ""),
                 actor, now(),
             ),
