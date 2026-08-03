@@ -102,7 +102,11 @@ def report_delivery_document(report_no: str, delivery_rows: list[dict[str, Any]]
         }
         for index,value in values.items():
             _set_cell_existing(row.cells[index],value)
+        _set_cell_signature(
+            row.cells[13],item.get("operator"),item.get("delivered_at",""),width=.58,
+        )
     latest=ordered[-1] if ordered else {}
+    date_text=str(latest.get("delivered_at",""))[:10]
     manager_name=(one("SELECT display_name FROM users WHERE username=?",(latest.get("operator",""),)) or {}).get("display_name",latest.get("operator",""))
     approver_name=(one("SELECT display_name FROM users WHERE username=?",(report_row.get("approver",""),)) or {}).get("display_name",report_row.get("approver",""))
     _set_cell_existing(table.rows[8].cells[4],"☑审批签字完整  ☑报告编号一致  ☑页码完整  ☑专用章/电子章完整")
@@ -128,10 +132,9 @@ def report_delivery_document(report_no: str, delivery_rows: list[dict[str, Any]]
     else:
         handling="□收回  □作废  □无法收回已书面告知  □仅电子替换  ☑不适用"
     _set_cell_existing(table.rows[9].cells[16],handling)
-    _set_cell_existing(table.rows[10].cells[4],manager_name)
-    _set_cell_existing(table.rows[10].cells[9],approver_name)
+    _set_cell_signature(table.rows[10].cells[4],latest.get("operator"),date_text if ordered else "",width=.86)
+    _set_cell_signature(table.rows[10].cells[9],report_row.get("approver"),report_row.get("approver_signed_at",""),width=.86)
     _set_cell_existing(table.rows[10].cells[16],f"电子路径：系统单据中心/{report_no}")
-    date_text=str(latest.get("delivered_at",""))[:10]
     _set_cell_existing(table.rows[11].cells[4],date_text)
     _set_cell_existing(table.rows[11].cells[9],str(report_row.get("approver_signed_at",""))[:10])
     return _save(d)
@@ -261,6 +264,7 @@ def modification_log_pdf(log_rows: list[dict[str, Any]], scope: str = "全部单
 
 def hazardous_waste_document(item: dict[str, Any]):
     """Fill the controlled hazardous-waste template supplied by the laboratory."""
+    from lims_db import one
     d=Document(TEMPLATE_DIR/"FORM_HAZARDOUS_WASTE.docx")
     task_nos=json.loads(item.get("task_nos") or "[]")
     occurred=str(item.get("occurred_at",""))
@@ -306,7 +310,10 @@ def hazardous_waste_document(item: dict[str, Any]):
     _set_cell_existing(classification.rows[1].cells[1],option_line(classification.rows[1].cells[1].text,"液体" if "液" in waste_type else "固体"))
     _set_cell_existing(classification.rows[2].cells[1],option_line(classification.rows[2].cells[1].text,mapping.get(waste_type,"废弃样品/制样残余物")))
     _set_cell_existing(classification.rows[6].cells[1],item.get("hazard_category",""))
-    _set_cell_existing(classification.rows[7].cells[1],f"姓名：{item.get('handler','')}  部门/岗位：实验员  日期：{date_text}")
+    _set_signature_paragraph(
+        classification.rows[7].cells[1].paragraphs[0],
+        item.get("handler"),date_text,label="实验员：",width=.82,
+    )
     storage=d.tables[5]
     _set_cell_existing(storage.rows[0].cells[3],item.get("container_no",""))
     _set_cell_existing(storage.rows[1].cells[1],item.get("container_no",""))
@@ -317,14 +324,32 @@ def hazardous_waste_document(item: dict[str, Any]):
     _set_cell_existing(disposal.rows[4].cells[1],f"{item.get('quantity','')} {item.get('unit','')}")
     _set_cell_existing(disposal.rows[5].cells[1],f"☑ 已完成分类包装  状态：{item.get('status','')}")
     _set_cell_existing(disposal.rows[6].cells[1],item.get("note",""))
-    _set_cell_existing(disposal.rows[7].cells[1],f"姓名：{item.get('handler','')}  日期：{date_text}")
+    _set_signature_paragraph(
+        disposal.rows[7].cells[1].paragraphs[0],
+        item.get("handler"),date_text,label="执行人员：",width=.82,
+    )
     signatures=d.tables[8]
-    _set_cell_existing(signatures.rows[1].cells[1],item.get("handler",""))
+    first_task=task_nos[0] if task_nos else item.get("task_no","")
+    task_roles=one(
+        "SELECT reviewer FROM tasks WHERE task_no=?",(first_task,),
+    ) or {}
+    approver=one(
+        "SELECT username FROM users WHERE role='管理员' AND enabled=1 ORDER BY username LIMIT 1"
+    ) or {}
+    _set_cell_signature(signatures.rows[1].cells[1],item.get("handler"),date_text,width=.82)
     _set_cell_existing(signatures.rows[1].cells[2],date_text)
+    _set_cell_signature(signatures.rows[2].cells[1],task_roles.get("reviewer"),date_text,width=.82)
+    _set_cell_existing(signatures.rows[2].cells[2],date_text)
+    _set_cell_signature(signatures.rows[3].cells[1],approver.get("username"),date_text,width=.82)
+    _set_cell_existing(signatures.rows[3].cells[2],date_text)
     return _save(d)
 
 
-def _objection_form(title: str, form_no: str, sections: list[tuple[str, list[tuple[str, Any]]]]):
+def _objection_form(
+    title: str, form_no: str,
+    sections: list[tuple[str, list[tuple[str, Any]]]],
+    signers: list[tuple[str, str, str]] | None = None,
+):
     d=Document()
     section=d.sections[0]
     section.top_margin=Inches(0.55);section.bottom_margin=Inches(0.55)
@@ -339,6 +364,14 @@ def _objection_form(title: str, form_no: str, sections: list[tuple[str, list[tup
             cells[0].width=Inches(1.55);cells[1].width=Inches(5.65)
             cells[0].text=str(label);cells[1].text="" if value is None else str(value)
             for rr in cells[0].paragraphs[0].runs:rr.bold=True
+    if signers:
+        heading=d.add_paragraph();r=heading.add_run("电子签名");r.bold=True;r.font.size=Pt(11)
+        table=d.add_table(rows=0,cols=3);table.style="Table Grid"
+        for label,person,date_text in signers:
+            cells=table.add_row().cells
+            cells[0].text=label
+            _set_cell_signature(cells[1],person,date_text,width=.88)
+            cells[2].text=str(date_text or "")[:10]
     d.add_paragraph("系统留痕：本表内容与异议流程记录、追溯资料及修改日志关联保存。")
     return _save(d)
 
@@ -359,6 +392,9 @@ def objection_application_document(obj: dict[str, Any], report_row: dict[str, An
             ("登记人",obj.get("registered_by","")),("质量调查人",obj.get("quality_inspector","")),
             ("当前状态",obj.get("status","")),("登记时间",obj.get("created_at","")),
         ]),
+    ],[
+        ("样品管理员受理签名",obj.get("registered_by",""),obj.get("created_at","")),
+        ("质量负责人调查签名",obj.get("quality_inspector",""),obj.get("investigated_at","")),
     ])
 
 
@@ -379,6 +415,9 @@ def objection_response_document(obj: dict[str, Any], report_row: dict[str, Any],
             ("样品管理员",obj.get("sent_by","")),("发送时间",obj.get("sent_at","")),
             ("接收凭证/备注",obj.get("response_receipt","")),
         ]),
+    ],[
+        ("质量负责人调查签名",obj.get("quality_inspector",""),obj.get("investigated_at","")),
+        ("样品管理员回复签名",obj.get("sent_by","") or obj.get("registered_by",""),obj.get("sent_at","")),
     ])
 
 
@@ -420,6 +459,11 @@ def commission_document(c,groups,tests,receiver_name):
             paragraph.paragraph_format.keep_together=True
             for run in paragraph.runs:
                 run.font.size=Pt(8)
+    confirmation=d.tables[1].rows[0].cells[1]
+    if len(confirmation.paragraphs)>=4:
+        _set_signature_paragraph(
+            confirmation.paragraphs[3],receiver_name,c.get("commission_date",""),width=1.05,
+        )
     return _save(d)
 
 
@@ -459,6 +503,10 @@ def sample_register_document(c,groups,samples,tests,receiver_name):
             remarks,
         ])
     _fill(d.tables[0],data)
+    for row in d.tables[0].rows[1:1+len(data)]:
+        _set_cell_signature(
+            row.cells[8],receiver_name,c.get("commission_date",""),width=.72,
+        )
     return _save(d)
 
 
@@ -467,12 +515,59 @@ def loan_return_document(loans,user_names):
     for i,x in enumerate(loans,1):
         purpose=x.get("purpose") or "、".join(json.loads(x.get("experiments") or "[]"))
         data.append([i,x["sample_no"],user_names.get(x.get("borrower"),x.get("borrower","")),x.get("borrowed_at",""),purpose,x.get("returned_at",""),user_names.get(x.get("returned_by"),x.get("returned_by","")),x.get("return_note","") or x.get("issue_note","")])
-    _fill(d.tables[0],data);return _save(d)
+    _fill(d.tables[0],data)
+    for index,item in enumerate(loans,1):
+        row=d.tables[0].rows[index]
+        _set_cell_signature(
+            row.cells[2],item.get("borrower"),item.get("borrowed_at",""),width=.62,
+        )
+        if item.get("returned_by"):
+            _set_cell_signature(
+                row.cells[6],item.get("returned_by"),item.get("returned_at",""),width=.62,
+            )
+    return _save(d)
 
 
 def _sig(meta):
     if not meta or not meta.get("image_file"):return None
     p=SIGNATURE_DIR/meta["image_file"];return p if p.exists() else None
+
+
+def _signature_for_person(person):
+    """Resolve either a username or a display name to its controlled image."""
+    if not person:
+        return None
+    from lims_db import one, signature
+    user=one(
+        "SELECT username FROM users WHERE username=? OR display_name=? LIMIT 1",
+        (str(person),str(person)),
+    )
+    return _sig(signature(user["username"])) if user else None
+
+
+def _set_signature_paragraph(paragraph, person, date_text="", label="", width=0.92):
+    """Write a picture-only signature; no typed personal name is retained."""
+    paragraph.clear()
+    if label:
+        paragraph.add_run(label)
+    path=_signature_for_person(person)
+    if path:
+        try:
+            paragraph.add_run().add_picture(str(path),width=Inches(width))
+        except Exception:
+            paragraph.add_run("【签名图片读取失败】")
+    else:
+        paragraph.add_run("【未配置签名图片】")
+    if date_text:
+        paragraph.add_run(f"  {str(date_text)[:10]}")
+
+
+def _set_cell_signature(cell, person, date_text="", width=0.92):
+    paragraphs=list(cell.paragraphs)
+    paragraph=paragraphs[0] if paragraphs else cell.add_paragraph()
+    _set_signature_paragraph(paragraph,person,date_text,width=width)
+    for extra in paragraphs[1:]:
+        _set_existing_text(extra,"")
 
 
 def _set_existing_text(paragraph, text):
@@ -674,15 +769,15 @@ def report_document(c,groups,samples,tasks,records,report,user_names,signatures)
         _set_cell_existing(d.tables[2].rows[0].cells[2],standards)
         _fill_existing_rows(d.tables[2],result_rows,2)
     for label,field,signed in [("批 准 人","approver","approver_signed_at"),("核 验 员","verifier","verifier_signed_at"),("检 测 员","tester","tester_signed_at")]:
-        u=report.get(field);name=user_names.get(u,u or "")
+        u=report.get(field)
         for p in d.paragraphs:
             if p.text.strip().startswith(label):
                 signed_date=str(report.get(signed) or "")[:10]
-                _set_existing_text(p,f"{label}    {name}    {signed_date}")
                 if report.get(signed):
-                    path=_sig(signatures.get(u))
-                    if path:
-                        try:p.runs[0].add_picture(str(path),width=Inches(.85))
-                        except:pass
+                    _set_signature_paragraph(
+                        p,u,signed_date,label=f"{label}    ",width=.92,
+                    )
+                else:
+                    _set_existing_text(p,f"{label}    【待签名】")
                 break
     return _save(d)

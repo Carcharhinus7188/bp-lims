@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import base64
 from html import escape
 from io import BytesIO
 
 from docx import Document
+from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
@@ -17,8 +19,25 @@ def _blocks(document):
             yield Table(child, document)
 
 
+def _run_html(run) -> str:
+    content=escape(run.text or "").replace("\n","<br>")
+    for blip in run._r.xpath(".//a:blip"):
+        relationship=blip.get(qn("r:embed"))
+        part=run.part.related_parts.get(relationship) if relationship else None
+        if not part:
+            continue
+        mime=getattr(part,"content_type","image/png")
+        encoded=base64.b64encode(part.blob).decode("ascii")
+        content+=f'<img class="signature" src="data:{mime};base64,{encoded}" alt="电子签名">'
+    return content
+
+
+def _paragraph_inner(paragraph: Paragraph) -> str:
+    return "".join(_run_html(run) for run in paragraph.runs)
+
+
 def _paragraph_html(paragraph: Paragraph) -> str:
-    text = escape(paragraph.text or "").replace("\n", "<br>")
+    text = _paragraph_inner(paragraph)
     if not text:
         return '<div class="blank">&nbsp;</div>'
     style = (paragraph.style.name if paragraph.style else "").lower()
@@ -38,9 +57,7 @@ def _table_html(table: Table) -> str:
             seen.add(cell_id)
             grid_span = cell._tc.xpath("./w:tcPr/w:gridSpan/@w:val")
             colspan = int(grid_span[0]) if grid_span else 1
-            value = "<br>".join(
-                escape(paragraph.text or "") for paragraph in cell.paragraphs
-            ) or "&nbsp;"
+            value = "<br>".join(_paragraph_inner(paragraph) for paragraph in cell.paragraphs) or "&nbsp;"
             cells.append(f'<td colspan="{colspan}">{value}</td>')
         rows.append("<tr>" + "".join(cells) + "</tr>")
     return '<table class="controlled-form">' + "".join(rows) + "</table>"
@@ -62,6 +79,7 @@ h2{{text-align:center;margin:8px 0 14px;font-size:21px}}
 .blank{{height:7px}}
 table.controlled-form{{width:100%;border-collapse:collapse;table-layout:fixed;margin:8px 0 12px;font-size:12px}}
 table.controlled-form td{{border:1px solid #222;padding:5px 6px;vertical-align:top;white-space:pre-wrap;word-break:break-word}}
+.signature{{display:inline-block;max-width:130px;max-height:42px;object-fit:contain;vertical-align:middle;margin:0 5px}}
 @media(max-width:900px){{.page{{width:calc(100% - 20px);margin:10px;padding:18px}}}}
 </style></head><body>
 <div class="toolbar">{escape(title)}｜DOCX 在线审核阅读器</div>

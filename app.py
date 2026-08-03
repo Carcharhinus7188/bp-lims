@@ -365,7 +365,7 @@ def show_pdf_preview(title, sections):
         st.image(image,caption=f"{title}｜第 {index} 页",use_container_width=True)
 
 
-def show_controlled_docx_review(title, docx_content):
+def show_controlled_docx_review(title, docx_content, allow_download=True):
     st.markdown("#### 受控 DOCX 审核文件")
     st.caption("下方阅读器直接解析受控DOCX，不经过PDF转换；复核通过后单据中心使用同一DOCX数据。")
     components.html(
@@ -373,14 +373,15 @@ def show_controlled_docx_review(title, docx_content):
         height=920,
         scrolling=True,
     )
-    st.download_button(
-        "打开审核用DOCX",
-        docx_content,
-        f"{title}.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        key=f"review_docx_{hashlib.sha256(docx_content).hexdigest()[:16]}",
-        use_container_width=True,
-    )
+    if allow_download:
+        st.download_button(
+            "打开审核用DOCX",
+            docx_content,
+            f"{title}.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key=f"review_docx_{hashlib.sha256(docx_content).hexdigest()[:16]}",
+            use_container_width=True,
+        )
 
 
 def preview_rows(kind, rows0):
@@ -867,7 +868,7 @@ elif page=="实验记录":
             "sample_nos":sample_ids,
             "sample_quantity":len(sample_ids),
             "received_date":commission0.get("commission_date",""),
-            "report_no":t.get("commission_no",""),
+            "report_no":report_no_for_task(tn),
             "task_no":tn,
             "test_date":str(china_today()),
             "detection_location":t.get("detection_location") or package0.get("detection_location",""),
@@ -892,7 +893,10 @@ elif page=="实验记录":
         if start_at:business["parameters"]["test_date"]=str(start_at)[:10]
         all_checkpoints=photo_checkpoints(t["experiment"])
         checkpoint_groups=[all_checkpoints[index::4] for index in range(4)]
-        tabs=st.tabs(["①任务确认","②设备与实验前检查","③环境与参数","④原始数据","⑤异常与设备文件","⑥保存提交"])
+        tabs=st.tabs([
+            "①任务确认","②设备与实验前检查","③环境与参数","④原始数据",
+            "⑤母版过程确认","⑥异常与设备文件","⑦保存提交",
+        ])
         if version>1:
             focus_returned_step(correction_fields,f"returned_focus_{tn}_{version}")
         with tabs[0]:
@@ -910,6 +914,27 @@ elif page=="实验记录":
             business["rows"]=render_sample_data(kind,business,key_prefix)
             render_inline_camera(t,sample_ids,checkpoint_groups[3],username,user["display_name"],key_prefix,"检测数据与结果照片")
         with tabs[4]:
+            business=calculate_business_record(kind,business)
+            context["test_date"]=(business.get("parameters") or {}).get("test_date") or context["test_date"]
+            attachments=list_attachments(task_no=tn)
+            process_template_fields=business_to_template_fields(
+                template_name,kind,context,bound_devices,business,attachments,
+                prior.get("template_fields") or {},
+            )
+            process_requirements=template_supplement_requirements(
+                template_name,process_template_fields,
+            )
+            st.subheader("母版过程确认")
+            st.caption(
+                "这里仅显示前四步尚不能自动取得的现场观察和实际填空。"
+                "按原始记录表分区排列，可对明确的正常项一键确认。"
+            )
+            render_template_supplement(
+                process_requirements,
+                prior.get("template_supplement") or {},
+                f"{key_prefix}_template_supplement",
+            )
+        with tabs[5]:
             business=render_exception_and_summary(kind,business,key_prefix)
             photo_rows=camera_checkpoint_status(tn,all_checkpoints)
             show_df(photo_rows,["checkpoint_label","required","complete","photo_count","captured_at"])
@@ -936,7 +961,7 @@ elif page=="实验记录":
                     save_attachment({"commission_no":t["commission_no"],"package_no":t["package_no"],"task_no":tn,"sample_no":sample_no,"attachment_type":atype,"original_name":f.name,"captured_at":now(),"description":description,"is_original":True,"capture_source":"device_export"},f.getvalue(),username)
                 st.success("附件已保存并计算SHA-256校验值");st.rerun()
             photos_complete=mandatory_camera_complete(tn,all_checkpoints)
-        with tabs[5]:
+        with tabs[6]:
             business=calculate_business_record(kind,business)
             context["test_date"]=(business.get("parameters") or {}).get("test_date") or context["test_date"]
             attachments=list_attachments(task_no=tn)
@@ -944,12 +969,10 @@ elif page=="实验记录":
                 template_name,kind,context,bound_devices,business,attachments,prior.get("template_fields") or {}
             )
             supplement_requirements=template_supplement_requirements(template_name,template_fields)
-            st.subheader("受控原始记录补充字段核对")
-            template_supplement=render_template_supplement(
-                supplement_requirements,
+            template_supplement=dict(st.session_state.get(
+                f"{key_prefix}_template_supplement_values",
                 prior.get("template_supplement") or {},
-                f"{key_prefix}_template_supplement",
-            )
+            ))
             template_fields.update({
                 key:value for key,value in template_supplement.items() if value
             })
@@ -962,7 +985,7 @@ elif page=="实验记录":
                 st.info("实验尚未点击“记录实验结束时间”。结束前暂不显示未填写区域；可先保存草稿。")
             elif not st.session_state.get(validation_key,False):
                 st.info("请先点击“同步当前记录并检查”。系统会保存当前页面状态并重新核验，避免把刚填写但尚未同步的区域误报为未填写。")
-            st.caption("提交后，系统会把上述业务数据直接回填至受控Word母版的原位置；实验员界面不显示模板原文、表格坐标或无关选项。")
+            st.caption("提交后，系统会把七个步骤中的业务数据回填至受控Word母版原位置。")
             tester_self_check=st.checkbox(
                 "我已完成实验员自查：样品、设备、环境、原始数据、计算结果、照片和异常记录均已核对",
                 value=bool(prior.get("tester_self_check",False)),
@@ -972,7 +995,7 @@ elif page=="实验记录":
             tm_version=config_snapshot.get("record_template_version","") or "A/0"
             sm_version=config_snapshot.get("sop_version","") or "A/0"
             payload={
-                "common":{"record_no":tn,"task_no":tn,"commission_no":t["commission_no"],"report_no":t["commission_no"],"client":commission0["client_name"],"sample_name":group0["sample_name"],"sample_no":"、".join(sample_ids),"model":group0["model"],"material":t["material_name"],"method_code":t["method_code"],"standard":t["standard"],"test_date":context["test_date"],"operator":user["display_name"],"reviewer":display_user(t["reviewer"])},
+                "common":{"record_no":tn,"task_no":tn,"commission_no":t["commission_no"],"report_no":report_no_for_task(tn),"client":commission0["client_name"],"sample_name":group0["sample_name"],"sample_no":"、".join(sample_ids),"model":group0["model"],"material":t["material_name"],"method_code":t["method_code"],"standard":t["standard"],"test_date":context["test_date"],"operator":user["display_name"],"reviewer":display_user(t["reviewer"])},
                 "business_record":business,
                 "template_name":template_name,
                 "template_fields":template_fields,
@@ -1213,6 +1236,167 @@ elif page=="一键下载":
             "application/zip",type="primary",use_container_width=True,
         )
         st.caption("归档包包括：现场照片、设备原始文件、修改日志、内部追溯工作簿，以及当前审批状态允许下载的原始记录和正式报告。")
+
+elif page=="Word单据预览":
+    header("Word单据在线预览")
+    st.info("侧边栏预览直接读取系统实际生成的DOCX，与单据中心下载文件使用同一份数据和模板；本页不提供下载。")
+    preview_kind=st.radio(
+        "预览单据类型",["实验原始记录表","检验报告","其他业务单据"],
+        horizontal=True,key="word_preview_kind",
+    )
+    if preview_kind=="实验原始记录表":
+        record_rows=rows(
+            """SELECT r.record_no,r.version,r.experiment,r.owner,r.status,r.updated_at,
+                      t.assignee,t.reviewer,t.commission_no
+               FROM records r JOIN tasks t ON t.task_no=r.task_no
+               ORDER BY r.updated_at DESC,r.record_no,r.version DESC"""
+        )
+        if role=="实验员":
+            record_rows=[item for item in record_rows if item.get("owner")==username or item.get("assignee")==username]
+        elif role=="复核员":
+            record_rows=[item for item in record_rows if item.get("reviewer")==username]
+        show_df(record_rows,["record_no","version","experiment","status","owner","updated_at"])
+        if record_rows:
+            record_key=st.selectbox(
+                "选择记录与版本",
+                [f"{item['record_no']}|{item['version']}" for item in record_rows],
+                format_func=lambda value:next(
+                    f"{item['record_no']}｜V{int(item['version'])}.0｜{item['experiment']}｜{item['status']}"
+                    for item in record_rows
+                    if value==f"{item['record_no']}|{item['version']}"
+                ),
+                key="word_preview_record_key",
+            )
+            record_no,record_version=record_key.split("|")
+            selected_record=record(record_no,int(record_version))
+            snapshot=task_config_snapshot(record_no)
+            selected_record["kind"]=snapshot.get("kind") or "generic"
+            record_content=export_record(
+                selected_record,
+                snapshot.get("record_template_file",""),
+                audit_logs(record_no),
+            ).getvalue()
+            show_controlled_docx_review(
+                f"{record_no}_V{int(record_version)}.0_原始记录表",
+                record_content,
+                allow_download=False,
+            )
+    elif preview_kind=="检验报告":
+        report_rows=(
+            rows("SELECT * FROM reports ORDER BY updated_at DESC,report_no")
+            if role in ("管理员","样品管理员")
+            else list_reports(role,username)
+        )
+        show_df(report_rows,["report_no","commission_no","task_no","status","validity_status","updated_at"])
+        if report_rows:
+            selected_report_no=st.selectbox(
+                "选择检验报告",[item["report_no"] for item in report_rows],
+                key="word_preview_report_no",
+            )
+            selected_report=report(selected_report_no)
+            selected_commission=commission(selected_report["commission_no"])
+            selected_groups=commission_groups(selected_report["commission_no"])
+            selected_samples=commission_samples(selected_report["commission_no"])
+            selected_task=task(selected_report["task_no"])
+            selected_task["kind"]=task_config_snapshot(selected_task["task_no"]).get("kind") or "generic"
+            selected_group=next((item for item in selected_groups if item["id"]==selected_task["group_id"]),{})
+            selected_task["sample_name"]=selected_group.get("sample_name","")
+            preview_users=user_map()
+            report_content=report_document(
+                selected_commission,selected_groups,selected_samples,[selected_task],
+                report_records_for_report(selected_report_no),selected_report,
+                preview_users,{name:signature(name) for name in preview_users},
+            ).getvalue()
+            show_controlled_docx_review(
+                f"{selected_report_no}_检验报告",
+                report_content,
+                allow_download=False,
+            )
+    else:
+        commissions_for_preview=list_commissions()
+        if not commissions_for_preview:
+            st.info("暂无可预览业务单据。")
+        else:
+            preview_commission_no=st.selectbox(
+                "选择委托",[item["commission_no"] for item in commissions_for_preview],
+                key="word_preview_business_commission",
+            )
+            preview_commission=commission(preview_commission_no)
+            preview_groups=commission_groups(preview_commission_no)
+            preview_samples=commission_samples(preview_commission_no)
+            preview_tests=commission_tests(preview_commission_no)
+            preview_user_names=user_map()
+            business_types=["检验委托单","样品登记表","样品领用归还登记表"]
+            delivery_rows=rows(
+                """SELECT d.* FROM report_deliveries d JOIN reports r ON r.report_no=d.report_no
+                   WHERE r.commission_no=? ORDER BY d.delivered_at""",
+                (preview_commission_no,),
+            )
+            waste_rows=rows(
+                "SELECT * FROM hazardous_waste_records WHERE commission_no=? ORDER BY occurred_at",
+                (preview_commission_no,),
+            )
+            objection_rows=rows(
+                "SELECT * FROM objections WHERE commission_no=? ORDER BY created_at",
+                (preview_commission_no,),
+            )
+            if delivery_rows:business_types.append("报告发放登记表")
+            if waste_rows:business_types.append("危废处置登记表")
+            if objection_rows:business_types.extend(["客户异议申请表","客户异议回复单"])
+            business_type=st.selectbox(
+                "选择业务单据",business_types,key="word_preview_business_type",
+            )
+            receiver_name=display_user(preview_commission.get("created_by",""))
+            if business_type=="检验委托单":
+                title=f"{preview_commission_no}_检验委托单"
+                content=commission_document(
+                    preview_commission,preview_groups,preview_tests,receiver_name,
+                ).getvalue()
+            elif business_type=="样品登记表":
+                title=f"{preview_commission_no}_样品登记表"
+                content=sample_register_document(
+                    preview_commission,preview_groups,preview_samples,preview_tests,receiver_name,
+                ).getvalue()
+            elif business_type=="样品领用归还登记表":
+                title=f"{preview_commission_no}_样品领用归还登记表"
+                content=loan_return_document(
+                    commission_loans(preview_commission_no),preview_user_names,
+                ).getvalue()
+            elif business_type=="报告发放登记表":
+                report_numbers=list(dict.fromkeys(item["report_no"] for item in delivery_rows))
+                business_report=st.selectbox(
+                    "选择报告编号",report_numbers,key="word_preview_delivery_report",
+                )
+                title=f"{business_report}-D_报告发放登记表"
+                content=report_delivery_document(
+                    business_report,[x for x in delivery_rows if x["report_no"]==business_report],
+                ).getvalue()
+            elif business_type=="危废处置登记表":
+                waste_no=st.selectbox(
+                    "选择处置单",[item["disposal_no"] for item in waste_rows],
+                    key="word_preview_waste_no",
+                )
+                waste_item=next(item for item in waste_rows if item["disposal_no"]==waste_no)
+                title=f"{waste_no}_危废处置登记表"
+                content=hazardous_waste_document(waste_item).getvalue()
+            else:
+                objection_no=st.selectbox(
+                    "选择异议单",[item["objection_no"] for item in objection_rows],
+                    key="word_preview_objection_no",
+                )
+                objection_item=objection(objection_no)
+                objection_report=report(objection_item["report_no"]) or {}
+                if business_type=="客户异议申请表":
+                    title=f"{objection_no}_异议申请表"
+                    content=objection_application_document(
+                        objection_item,objection_report,preview_commission,
+                    ).getvalue()
+                else:
+                    title=f"{objection_no}-R_异议回复单"
+                    content=objection_response_document(
+                        objection_item,objection_report,preview_commission,
+                    ).getvalue()
+            show_controlled_docx_review(title,content,allow_download=False)
 
 elif page=="单据中心":
     header("检验委托单、样品登记、领用归还、原始记录和检验报告")

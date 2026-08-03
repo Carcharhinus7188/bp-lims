@@ -34,6 +34,7 @@ from lims_db import (
     list_attachments,
     list_organizations,
     now,
+    report_no_for_task,
     package_tasks,
     quality_review_report,
     report,
@@ -281,7 +282,7 @@ def create_pending_review_demo() -> dict[str, str]:
         "sample_nos": sample_ids,
         "sample_quantity": len(sample_ids),
         "received_date": str(china_today()),
-        "report_no": commission_no,
+        "report_no": report_no_for_task(task_row["task_no"]),
         "task_no": task_row["task_no"],
         "test_date": str(china_today()),
         "detection_location": task_row.get("detection_location") or "性能检测室",
@@ -300,7 +301,7 @@ def create_pending_review_demo() -> dict[str, str]:
         "common": {
             "record_no": task_row["task_no"], "task_no": task_row["task_no"],
             "commission_no": commission_no,
-            "report_no": commission_no,
+            "report_no": report_no_for_task(task_row["task_no"]),
             "client": client["org_name"], "sample_name": context["sample_name"],
             "sample_no": "、".join(sample_ids), "model": context["model"],
             "material": context["material"], "method_code": context["method_code"],
@@ -445,6 +446,8 @@ def create_full_document_demo() -> str:
         snapshot = task_config_snapshot(task_no)
         equipment = snapshot.get("equipment") or []
         kind = snapshot.get("kind") or "generic"
+        _add_demo_result_photos(task_row, sample_ids)
+        demo_attachments=list_attachments(task_no=task_no)
         business = _complete_business(kind, sample_ids, equipment)
         context = {
             "client_name": client["org_name"],
@@ -457,7 +460,7 @@ def create_full_document_demo() -> str:
             "sample_nos": sample_ids,
             "sample_quantity": len(sample_ids),
             "received_date": str(china_today()),
-            "report_no": DEMO_COMMISSION_NO,
+            "report_no": report_no_for_task(task_no),
             "task_no": task_no,
             "test_date": str(china_today()),
             "detection_location": task_row.get("detection_location") or "性能检测室",
@@ -468,7 +471,7 @@ def create_full_document_demo() -> str:
         }
         template_name = snapshot.get("record_template_file", "")
         template_fields = business_to_template_fields(
-            template_name, kind, context, equipment, business, [], {},
+            template_name, kind, context, equipment, business, demo_attachments, {},
         )
         completed_template=_complete_demo_template_fields(template_name,template_fields)
         template_fields=completed_template["template_fields"]
@@ -476,7 +479,7 @@ def create_full_document_demo() -> str:
             "common": {
                 "record_no": task_no, "task_no": task_no,
                 "commission_no": DEMO_COMMISSION_NO,
-                "report_no": DEMO_COMMISSION_NO,
+                "report_no": report_no_for_task(task_no),
                 "client": client["org_name"],
                 "sample_name": context["sample_name"],
                 "sample_no": "、".join(sample_ids),
@@ -517,7 +520,6 @@ def create_full_document_demo() -> str:
                     "完整单据演示自动生成", timestamp, timestamp, timestamp, timestamp,
                 ),
             )
-        _add_demo_result_photos(task_row, sample_ids)
         freeze_document_version(
             "record", task_no, 1, "完整演示锁定", payload, "reviewer",
         )

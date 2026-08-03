@@ -409,31 +409,107 @@ def _filled_checkbox_text(original: str, selected: list[str], note: str = "") ->
     return value
 
 
+def _normal_batch_choices(label: str, choices: list[str]) -> list[str]:
+    """Choose only unambiguous normal confirmations for one-click section checks."""
+    specific_tokens = (
+        "类别", "来源", "依据", "方向", "方法", "类型", "材质", "颜色",
+        "制样", "后处理", "成型", "编号", "名称", "规格", "型号",
+    )
+    if any(token in label for token in specific_tokens):
+        return []
+    negative_tokens = (
+        "不符合", "不合格", "异常", "不可", "暂停", "未完成", "无效",
+        "破损", "裂纹", "崩瓷", "污染", "锈蚀", "磨损", "偏离", "失败",
+    )
+    positive = [
+        choice for choice in choices
+        if not any(token in choice for token in negative_tokens)
+    ]
+    if not positive:
+        return []
+    # Several independent observations such as clean/flat/no-rust may all be true.
+    if len(choices) > 2 and len(positive) == len(choices):
+        return positive
+    preferred = (
+        "符合", "合格", "正常", "完好", "有效", "通过", "已完成", "已确认",
+        "清晰", "牢固", "平整", "清洁", "无", "是",
+    )
+    if any(token in label for token in ("附件", "照片", "图像", "文件", "曲线")):
+        preferred = ("有", "已归档", "已保存", "已导出", "是", "有效") + preferred
+    for token in preferred:
+        match = next((choice for choice in positive if token in choice), None)
+        if match:
+            return [match]
+    return [positive[0]] if len(positive) == 1 else []
+
+
 def render_template_supplement(
     requirements: list[dict[str, Any]],
     existing: dict[str, Any],
     key_prefix: str,
 ) -> dict[str, str]:
-    """Render only mother-template fields not covered by structured inputs."""
-    output = dict(existing or {})
+    """Render remaining mother-template observations as compact process checks."""
+    state_key=f"{key_prefix}_values"
+    if state_key not in st.session_state:
+        st.session_state[state_key]=dict(existing or {})
+    output = dict(st.session_state.get(state_key) or {})
     if not requirements:
         st.success("受控原始记录模板全部字段已由前序数据、实验记录或系统规则覆盖。")
         return output
-    st.warning(
-        f"受控原始记录模板仍有 {len(requirements)} 个实际确认/填空字段。"
-        "这些字段必须逐项完成，提交后会回填到母版原位置。"
+    completed=sum(bool(str(output.get(item["key"]) or "").strip()) for item in requirements)
+    st.info(
+        f"母版过程确认：已完成 {completed}/{len(requirements)} 项。"
+        "每个分区可一键确认明确的正常项；实际参数、类别和异常内容仍需本人填写。"
     )
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for field in requirements:
         grouped[str(field.get("section") or "其他补充字段")].append(field)
     for section, fields in grouped.items():
-        with st.expander(f"{section}（{len(fields)}项）", expanded=True):
+        section_missing=sum(not bool(str(output.get(item["key"]) or "").strip()) for item in fields)
+        with st.expander(
+            f"{section}｜{len(fields)-section_missing}/{len(fields)} 已完成",
+            expanded=bool(section_missing),
+        ):
+            batch_values={}
+            for field in fields:
+                original=str(field.get("template_text") or "")
+                choices=_checkbox_choices(original)
+                selected=_normal_batch_choices(str(field.get("label") or ""),choices) if choices else []
+                if selected:
+                    batch_values[field["key"]]=_filled_checkbox_text(original,selected)
+            if batch_values and st.button(
+                f"本区正常项一键确认（{len(batch_values)}项）",
+                key=f"{key_prefix}_{section}_normal_batch",
+                use_container_width=True,
+            ):
+                output.update(batch_values)
+                for field in fields:
+                    if field["key"] not in batch_values:
+                        continue
+                    original=str(field.get("template_text") or "")
+                    choices=_checkbox_choices(original)
+                    selected=_selected_checkbox_choices(original,batch_values[field["key"]])
+                    label=str(field.get("label") or "")
+                    exclusive_tokens=("类别","来源","依据","状态","结果","结论","方向","方法","是否","判定")
+                    multi=(
+                        len(choices)>2
+                        and not any(token in label for token in exclusive_tokens)
+                        and not any(token in choice for choice in choices for token in ("不符合","异常","不合格","不可","暂停","未完成"))
+                    )
+                    suffix="choices" if multi else "choice"
+                    st.session_state[f"{key_prefix}_{field['key']}_{suffix}"]=(
+                        selected if multi else (selected[0] if selected else "请选择")
+                    )
+                st.session_state[state_key]=output
+                st.rerun()
+            if batch_values:
+                st.caption("只批量确认含义明确的“正常/符合/无异常”项目；具体参数和类别不会被代填。")
             for field in fields:
                 field_key=field["key"]
                 label=str(field.get("label") or field.get("position") or field_key)
                 original=str(field.get("template_text") or "")
                 current=str(output.get(field_key) or "")
-                st.caption(f"{label}｜{field.get('position','')}")
+                st.markdown(f"**{label}**")
                 if "□" in original or "☐" in original:
                     choices=_checkbox_choices(original)
                     prior_selected=_selected_checkbox_choices(original,current)
@@ -446,20 +522,24 @@ def render_template_supplement(
                         and not any(token in choice for choice in choices for token in ("不符合","异常","不合格","不可","暂停","未完成"))
                     )
                     if multi:
+                        widget_key=f"{key_prefix}_{field_key}_choices"
+                        if widget_key not in st.session_state:
+                            st.session_state[widget_key]=[x for x in prior_selected if x in choices]
                         selected=st.multiselect(
                             "选择所有实际符合的项目",
                             choices,
-                            default=[x for x in prior_selected if x in choices],
-                            key=f"{key_prefix}_{field_key}_choices",
+                            key=widget_key,
                         )
                     else:
                         options=["请选择"]+choices
                         prior=prior_selected[0] if prior_selected else "请选择"
+                        widget_key=f"{key_prefix}_{field_key}_choice"
+                        if widget_key not in st.session_state:
+                            st.session_state[widget_key]=prior if prior in options else "请选择"
                         choice=st.selectbox(
                             "选择实际记录值",
                             options,
-                            index=options.index(prior) if prior in options else 0,
-                            key=f"{key_prefix}_{field_key}_choice",
+                            key=widget_key,
                         )
                         selected=[] if choice=="请选择" else [choice]
                     needs_note=any(
@@ -468,20 +548,25 @@ def render_template_supplement(
                     )
                     note=""
                     if needs_note or (BLANK_RE.search(original) and prior_selected):
+                        note_key=f"{key_prefix}_{field_key}_note"
+                        if note_key not in st.session_state:
+                            st.session_state[note_key]=""
                         note=st.text_input(
                             "补充说明",
-                            value="" if BLANK_RE.search(current) else current,
-                            key=f"{key_prefix}_{field_key}_note",
+                            key=note_key,
                         )
                     output[field_key]=_filled_checkbox_text(original,selected,note) if selected else ""
                 else:
                     prior="" if not current or BLANK_RE.search(current) else current
+                    text_key=f"{key_prefix}_{field_key}_text"
+                    if text_key not in st.session_state:
+                        st.session_state[text_key]=prior
                     raw=st.text_input(
                         "填写实际记录",
-                        value=prior,
-                        help=f"母版原字段：{original or label}",
-                        key=f"{key_prefix}_{field_key}_text",
+                        help="请按本次实验的实际情况填写。",
+                        key=text_key,
                     )
                     output[field_key]=_compose_cell_text(original,raw) if raw.strip() else ""
                 st.divider()
+    st.session_state[state_key]=output
     return output

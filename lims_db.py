@@ -427,6 +427,26 @@ CREATE TABLE IF NOT EXISTS hazardous_waste_records(
                     "INSERT INTO users VALUES(?,?,?,?,1,?)",
                     (username, name, _password_hash(password), role, now()),
                 )
+        # The demo ships with one controlled handwritten signature per role.
+        # Existing user-uploaded signatures always win; these rows only seed a
+        # new GitHub/Streamlit database.
+        role_signature_files = {
+            "receiver": "receiver_signature.png",
+            "store": "receiver_signature.png",
+            "admin": "admin_signature.png",
+            "approver": "admin_signature.png",
+            "tester": "tester_signature.png",
+            "quality": "quality_signature.jpg",
+            "reviewer": "reviewer_signature.png",
+        }
+        for signature_user, signature_file in role_signature_files.items():
+            if (SIGNATURE_DIR / signature_file).exists():
+                c.execute(
+                    """INSERT OR IGNORE INTO signatures(
+                       username,source_file,image_file,uploaded_by,uploaded_at
+                       ) VALUES(?,?,?,?,?)""",
+                    (signature_user,signature_file,signature_file,"system",now()),
+                )
         c.execute(
             """INSERT INTO organizations(
                org_code,org_name,short_name,is_client,is_manufacturer,
@@ -2373,7 +2393,7 @@ def sample_group_timeline(group_id: int) -> list[dict[str, Any]]:
             package_row.get("accepted_at"),"实验员接收/领用","待接收 → 检测中",
             f"样品库 → {package_row.get('detection_location') or '检测区域'}",
             package_samples,package_row.get("assignee",""),
-            package_row.get("acceptance_result","")+"；"+str(package_row.get("acceptance_note") or ""),
+            str(package_row.get("acceptance_result") or "")+"；"+str(package_row.get("acceptance_note") or ""),
         )
         add(
             package_row.get("return_submitted_at"),"实验员提交归还","检测完成 → 待回库确认",
@@ -2440,18 +2460,15 @@ def dashboard_counts() -> dict[str, int]:
 
 
 # ---------------------- Report ----------------------
+def report_no_for_task(task_no: str) -> str:
+    """Apply the sole numbering rule: replace only the BP prefix with R."""
+    if not re.fullmatch(r"BP\d{11}-T\d{2}",str(task_no or "")):
+        raise ValueError("实验任务编号格式不正确，不能生成检验报告编号")
+    return "R"+str(task_no)[2:]
+
+
 def _next_report_no(task_no: str) -> str:
-    prefix = china_now().strftime("R%Y%m%d")
-    last = one(
-        "SELECT report_no FROM reports WHERE report_no LIKE ? ORDER BY report_no DESC LIMIT 1",
-        (prefix + "%",),
-    )
-    seq = 1
-    if last:
-        match = re.match(r"R\d{8}(\d{3})-", last["report_no"])
-        seq = int(match.group(1)) + 1 if match else 1
-    task_suffix = re.search(r"-(T\d{2})$", task_no)
-    return f"{prefix}{seq:03d}-{task_suffix.group(1) if task_suffix else 'T01'}"
+    return report_no_for_task(task_no)
 
 
 def ensure_report_for_task(task_no: str) -> str | None:

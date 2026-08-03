@@ -462,9 +462,20 @@ def _format_value(value: Any) -> str:
 
 
 def _attachment_reference(attachments: list[dict[str, Any]], sample_no: str = "") -> str:
-    ids = [x.get("attachment_id", "") for x in attachments if not sample_no or x.get("sample_no") in ("", sample_no)]
-    ids = [x for x in ids if x]
-    return "、".join(ids) if ids else "详见内部实验数据追溯Excel"
+    """Return the real controlled file names, never internal database IDs.
+
+    Live-camera names already follow ``任务编号_HHMMSS.扩展名``.  Device exports
+    retain the instrument's original file name because that is the auditable
+    source-file number.  Original/watermarked camera pairs are de-duplicated.
+    """
+    names = [
+        str(x.get("original_name") or "").strip()
+        for x in attachments
+        if (not sample_no or x.get("sample_no") in ("", sample_no))
+        and x.get("evidence_status") == "有效"
+    ]
+    names = list(dict.fromkeys(x for x in names if x))
+    return "、".join(names) if names else "详见内部实验数据追溯Excel"
 
 
 def _build_equipment_for_prefill(equipment: list[dict[str, Any]], checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
