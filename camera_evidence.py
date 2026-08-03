@@ -37,11 +37,11 @@ def _normalized_jpeg(content: bytes) -> bytes:
 def _watermarked(content: bytes, lines: list[str]) -> bytes:
     image = Image.open(BytesIO(content)).convert("RGB")
     width, height = image.size
-    font = _font(max(18, min(width, height) // 42))
-    padding = max(12, width // 90)
+    font = _font(max(12, min(22, min(width, height) // 72)))
+    padding = max(8, width // 150)
     draw = ImageDraw.Draw(image, "RGBA")
     line_boxes = [draw.textbbox((0, 0), line, font=font) for line in lines]
-    line_height = max(box[3] - box[1] for box in line_boxes) + max(6, padding // 2)
+    line_height = max(box[3] - box[1] for box in line_boxes) + max(3, padding // 3)
     box_width = max(box[2] - box[0] for box in line_boxes) + padding * 2
     box_height = line_height * len(lines) + padding * 2
     left = max(0, width - box_width - padding)
@@ -49,8 +49,8 @@ def _watermarked(content: bytes, lines: list[str]) -> bytes:
     draw.rounded_rectangle(
         (left, top, width - padding, height - padding),
         radius=max(8, padding),
-        fill=(0, 0, 0, 168),
-        outline=(255, 255, 255, 205),
+        fill=(0, 0, 0, 125),
+        outline=(255, 255, 255, 165),
         width=max(1, padding // 5),
     )
     for index, line in enumerate(lines):
@@ -104,12 +104,9 @@ def save_live_camera_photo(
     )
     lines = [
         captured_at.replace("T", " "),
-        f"Task: {task_no}",
-        f"Sample: {meta.get('sample_no') or 'group'}",
-        f"Step: {checkpoint_code} {checkpoint_label}",
-        f"Operator: {actor_name} ({actor})",
-        f"Device: {meta.get('device_id') or 'tablet'}",
-        f"Evidence: {original_id}",
+        f"{task_no} | {meta.get('sample_no') or '任务级'}",
+        f"{checkpoint_code} | {checkpoint_label}",
+        f"{actor_name} | {meta.get('device_id') or 'tablet'}",
     ]
     derivative = _watermarked(normalized, lines)
     watermarked_id = save_attachment(

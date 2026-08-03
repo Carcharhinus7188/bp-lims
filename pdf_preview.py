@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from io import BytesIO
 import json
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 import textwrap
 from typing import Any
 
@@ -65,3 +69,28 @@ def pdf_page_images(content: bytes) -> list[BytesIO]:
         pixmap = page.get_pixmap(matrix=fitz.Matrix(1.45, 1.45), alpha=False)
         images.append(BytesIO(pixmap.tobytes("png")))
     return images
+
+
+def docx_to_pdf(content: bytes) -> bytes:
+    """Convert the exact generated DOCX to PDF with LibreOffice."""
+    executable = shutil.which("libreoffice") or shutil.which("soffice")
+    if not executable:
+        raise RuntimeError("服务器尚未安装LibreOffice，无法生成同版式PDF预览")
+    with tempfile.TemporaryDirectory(prefix="bplab-preview-") as temp_raw:
+        temp = Path(temp_raw)
+        source = temp / "preview.docx"
+        source.write_bytes(content)
+        result = subprocess.run(
+            [
+                executable, f"-env:UserInstallation={((temp / 'lo-profile').resolve()).as_uri()}",
+                "--headless", "--convert-to", "pdf",
+                "--outdir", str(temp), str(source),
+            ],
+            capture_output=True, text=True, timeout=90,
+        )
+        target = temp / "preview.pdf"
+        if result.returncode != 0 or not target.exists():
+            raise RuntimeError(
+                "正式单据PDF转换失败：" + (result.stderr or result.stdout or "未知错误")[-500:]
+            )
+        return target.read_bytes()

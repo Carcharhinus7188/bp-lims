@@ -18,7 +18,7 @@ from form_engine import commission_document, sample_register_document, loan_retu
 from report_rules import overall_conclusion, report_item
 from trace_excel_engine import build_internal_trace_workbook
 from camera_evidence import save_live_camera_photo
-from pdf_preview import build_preview_pdf, pdf_page_images
+from pdf_preview import build_preview_pdf, pdf_page_images, docx_to_pdf
 
 ROOT=Path(__file__).parent
 TEMPLATE_DIR=ROOT/"templates"
@@ -232,6 +232,23 @@ def show_pdf_preview(title, sections):
         st.image(image,caption=f"{title}｜第 {index} 页",use_container_width=True)
 
 
+@st.cache_data(show_spinner=False)
+def exact_document_preview_pages(docx_content):
+    return [image.getvalue() for image in pdf_page_images(docx_to_pdf(docx_content))]
+
+
+def show_exact_document_preview(title, docx_content):
+    st.markdown("#### 正式单据同版式 PDF 预览")
+    st.caption("预览由与单据中心相同的受控Word单据转换生成，不提供下载按钮。")
+    try:
+        with st.spinner("正在生成正式单据同版式预览…"):
+            pages=exact_document_preview_pages(docx_content)
+        for index,page in enumerate(pages,1):
+            st.image(page,caption=f"{title}｜第 {index} 页",use_container_width=True)
+    except Exception as error:
+        st.error(str(error))
+
+
 def preview_rows(kind, rows0):
     labels={key:label for key,label,_type in schema(kind).get("columns",[])}
     labels["sample_no"]="样品编号"
@@ -321,15 +338,15 @@ if pending_notices:
             st.write(notice["message"])
             st.caption(notice["created_at"])
             st.divider()
-        notice_ids=[x["id"] for x in pending_notices]
-        def acknowledge_notices():
-            mark_notifications_read(username, [x["id"] for x in pending_notices])
-            st.session_state.dismissed_notice_ids.extend(notice_ids)
-        def dismiss_notices():
-            st.session_state.dismissed_notice_ids.extend(notice_ids)
         a,b=st.columns(2)
-        a.button("我已查看", type="primary", use_container_width=True, on_click=acknowledge_notices)
-        b.button("稍后处理并关闭", use_container_width=True, on_click=dismiss_notices)
+        notice_ids=[x["id"] for x in pending_notices]
+        if a.button("我已查看", type="primary", use_container_width=True):
+            mark_notifications_read(username,notice_ids)
+            st.session_state.dismissed_notice_ids.extend(notice_ids)
+            st.rerun(scope="app")
+        if b.button("稍后处理并关闭", use_container_width=True):
+            st.session_state.dismissed_notice_ids.extend(notice_ids)
+            st.rerun(scope="app")
     task_notice_dialog()
 
 if page=="首页看板":
@@ -748,18 +765,9 @@ elif page=="原始记录复核":
         st.subheader("设备使用确认");show_df(business.get("equipment_checks") or [])
         st.subheader("异常与结果")
         st.write("实验状态：",business.get("overall_status",""));st.write("异常/偏离：",business.get("deviation","无"));st.write("复测/重制：",business.get("retest","否"));st.write("结果摘要：",business.get("report_summary",""));st.write("单项结论：",business.get("report_conclusion",""))
-        show_pdf_preview(
+        show_exact_document_preview(
             f"{rn}_V{v}_实验原始记录表",
-            [
-                ("任务与样品", {"任务编号":rn,"实验":t0["experiment"],"样品":"、".join(t0["sample_nos_list"])}),
-                ("环境与实验参数", business.get("parameters") or {}),
-                ("设备使用确认", business.get("equipment_checks") or []),
-                ("原始测量数据", preview_rows(kind,business.get("rows") or [])),
-                ("异常与结果", {
-                    "状态":business.get("overall_status",""),"偏离":business.get("deviation","无"),
-                    "结果摘要":business.get("report_summary",""),"结论":business.get("report_conclusion",""),
-                }),
-            ],
+            export_record(r,template_name,audit_logs(rn)).getvalue(),
         )
         show_report_photo_preview(r["task_no"])
         st.info("原始记录由实验员提交并完成自查，复核员通过后立即锁定并开放正式文件下载。")
@@ -982,19 +990,22 @@ elif page=="报告中心":
         }])
         task0=task(r["task_no"]);record0=latest_record(r["task_no"]) or {}
         payload0=record0.get("payload") or {}
-        show_pdf_preview(
-            f"{rn}_检验报告预览",
-            [
-                ("报告基本信息", {
-                    "报告编号":rn,"委托编号":r["commission_no"],"任务编号":r["task_no"],
-                    "检验项目":task0.get("experiment",""),"检测依据":task0.get("standard",""),
-                }),
-                ("检验结果", preview_rows(
-                    task_config_snapshot(r["task_no"]).get("kind") or "generic",
-                    payload0.get("business_record",{}).get("rows") or [],
-                )),
-                ("结论", {"结果摘要":r.get("notes",""),"检验结论":r.get("conclusion","")}),
-            ],
+        commission0=commission(r["commission_no"])
+        report_groups=commission_groups(r["commission_no"])
+        report_samples=commission_samples(r["commission_no"])
+        task_preview=dict(task0)
+        task_preview["kind"]=task_config_snapshot(r["task_no"]).get("kind") or "generic"
+        task_preview["sample_name"]=next(
+            (item["sample_name"] for item in report_groups if item["id"]==task_preview["group_id"]),""
+        )
+        preview_users=user_map()
+        preview_signatures={name:signature(name) for name in preview_users}
+        show_exact_document_preview(
+            f"{rn}_检验报告",
+            report_document(
+                commission0,report_groups,report_samples,[task_preview],
+                report_records_for_report(rn),r,preview_users,preview_signatures,
+            ).getvalue(),
         )
         show_report_photo_preview(r["task_no"])
         if r["status"]=="待质量审核" and role=="质量检测员" and username==r["quality_inspector"]:
