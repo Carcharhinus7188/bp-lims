@@ -432,6 +432,25 @@ CREATE TABLE IF NOT EXISTS hazardous_waste_records(
                     "INSERT INTO users VALUES(?,?,?,?,1,?)",
                     (username, name, _password_hash(password), role, now()),
                 )
+        # Restore the quality-review inbox for older databases that were
+        # created before a quality owner was stored on every task/report.
+        quality_user = c.execute(
+            "SELECT username FROM users WHERE role='质量负责人' AND enabled=1 ORDER BY username LIMIT 1"
+        ).fetchone()
+        if quality_user:
+            quality_username = quality_user["username"]
+            c.execute(
+                "UPDATE task_packages SET quality_inspector=? WHERE COALESCE(quality_inspector,'')=''",
+                (quality_username,),
+            )
+            c.execute(
+                "UPDATE tasks SET quality_inspector=? WHERE COALESCE(quality_inspector,'')=''",
+                (quality_username,),
+            )
+            c.execute(
+                "UPDATE reports SET quality_inspector=? WHERE COALESCE(quality_inspector,'')=''",
+                (quality_username,),
+            )
         # The demo ships with one controlled handwritten signature per role.
         # Existing user-uploaded signatures always win; these rows only seed a
         # new GitHub/Streamlit database.
@@ -3226,6 +3245,45 @@ def save_signature(username: str, source_file: str, image_file: str | None, acto
 
 def signature(username: str) -> dict[str, Any] | None:
     return one("SELECT * FROM signatures WHERE username=?", (username,))
+
+
+def reset_business_history(actor: str) -> dict[str, int]:
+    """Clear transactional/demo history while preserving controlled master data."""
+    actor_row = one("SELECT role FROM users WHERE username=? AND enabled=1", (actor,)) or {}
+    if actor_row.get("role") != "管理员":
+        raise ValueError("只有管理员可以执行系统初始化")
+    transactional_tables = [
+        "objection_actions", "objections", "report_deliveries", "report_actions",
+        "reports", "reviews", "records", "package_loans", "hazardous_waste_records",
+        "attachments", "sample_events", "document_versions", "task_config_snapshots",
+        "tasks", "task_packages", "requested_tests", "samples", "sample_groups",
+        "commissions", "notifications", "audit_logs",
+    ]
+    deleted: dict[str, int] = {}
+    with connect() as c:
+        for table in transactional_tables:
+            deleted[table] = int(c.execute(f"SELECT COUNT(*) n FROM {table}").fetchone()["n"])
+            c.execute(f"DELETE FROM {table}")
+        placeholders = ",".join("?" for _ in transactional_tables)
+        c.execute(
+            f"DELETE FROM sqlite_sequence WHERE name IN ({placeholders})",
+            transactional_tables,
+        )
+    if ATTACHMENT_DIR.exists():
+        for path in sorted(ATTACHMENT_DIR.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+            if path.is_file() or path.is_symlink():
+                path.unlink(missing_ok=True)
+            elif path.is_dir():
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
+    ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
+    audit(
+        "system", "business_history", actor, "系统初始化",
+        reason="管理员清空全部业务历史，保留用户、签名、样品基础库、设备、实验配置及受控模板",
+    )
+    return deleted
 
 
 # ---------------------- Document helpers ----------------------

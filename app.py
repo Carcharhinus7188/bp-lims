@@ -31,54 +31,60 @@ st.set_page_config(page_title="BPLab Trace",page_icon="🧪",layout="wide",initi
 st.markdown("""
 <style>
 :root{
-  --lab-navy:#123047;--lab-blue:#176b87;--lab-cyan:#21a2b8;
-  --lab-ink:#182a35;--lab-muted:#60727d;--lab-line:#d8e2e8;
-  --lab-bg:#f3f6f8;--lab-panel:#ffffff;--lab-soft:#eaf3f6;
+  --lab-navy:#0f1a2f;--lab-blue:#3478f6;--lab-cyan:#21b3a8;
+  --lab-ink:#172033;--lab-muted:#6b7485;--lab-line:#e7ebf1;
+  --lab-bg:#f6f8fb;--lab-panel:#ffffff;--lab-soft:#edf3ff;
 }
 html,body,.stApp,[data-testid=stAppViewContainer]{
   background:var(--lab-bg);color:var(--lab-ink);font-family:"Inter","PingFang SC","Microsoft YaHei",sans-serif;
 }
 .block-container{max-width:1480px;padding:1.25rem 2rem 4rem}
 [data-testid=stSidebar]{
-  background:#102c3d;border-right:1px solid #274657;min-width:275px;
+  background:#0f1a2f;border-right:1px solid #182744;min-width:260px;
 }
 [data-testid=stSidebar] h1,[data-testid=stSidebar] h2,[data-testid=stSidebar] h3,
 [data-testid=stSidebar] p,[data-testid=stSidebar] label{color:#eef7fa!important}
 [data-testid=stSidebar] [role=radiogroup]{gap:3px}
 [data-testid=stSidebar] [role=radio]{
-  background:transparent;border:1px solid transparent;border-radius:6px;
-  padding:9px 11px;margin:1px 0;transition:none;
+  background:transparent;border:1px solid transparent;border-radius:8px;
+  padding:10px 12px;margin:2px 0;transition:none;
 }
 [data-testid=stSidebar] [role=radio]:has(input:checked){
-  background:#1b5269;border-color:#34768f;
+  background:#192b4d;border-color:#28436f;box-shadow:inset 3px 0 0 #4b84ff;
+}
+.lab-topbar{
+  display:flex;align-items:center;justify-content:space-between;background:#fff;
+  border:1px solid var(--lab-line);border-radius:10px 10px 0 0;padding:10px 18px;
+  color:var(--lab-muted);font-size:.8rem;
 }
 .lab-header{
-  background:var(--lab-panel);border:1px solid var(--lab-line);border-top:4px solid var(--lab-blue);
-  padding:19px 22px;margin-bottom:20px;box-shadow:0 2px 8px rgba(20,48,64,.05);
+  background:var(--lab-panel);border:1px solid var(--lab-line);border-top:0;
+  padding:20px 22px;margin-bottom:20px;border-radius:0 0 10px 10px;
+  box-shadow:0 4px 16px rgba(15,26,47,.04);
 }
-.lab-kicker{color:var(--lab-blue);font-size:.78rem;font-weight:800;letter-spacing:.14em;text-transform:uppercase}
-.lab-header h2{font-size:1.55rem;margin:.2rem 0;color:var(--lab-navy);font-weight:760}
-.lab-meta{color:var(--lab-muted);font-size:.84rem}
+.lab-kicker{color:var(--lab-blue);font-size:.75rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase}
+.lab-header h2{font-size:1.5rem;margin:.25rem 0;color:var(--lab-ink);font-weight:760}
+.lab-meta{color:var(--lab-muted);font-size:.82rem}
 .card,.timeline,[data-testid=stMetric],div[data-testid=stVerticalBlockBorderWrapper]{
-  background:var(--lab-panel);border:1px solid var(--lab-line)!important;border-radius:7px!important;
-  box-shadow:0 2px 7px rgba(20,48,64,.045);
+  background:var(--lab-panel);border:1px solid var(--lab-line)!important;border-radius:11px!important;
+  box-shadow:0 4px 14px rgba(15,26,47,.035);
 }
 .card{padding:16px}.timeline{border-left:4px solid var(--lab-blue)!important;padding:12px 15px;margin:8px 0}
 .notice{background:#fff9e9;border:1px solid #eadba6;padding:12px;border-radius:6px}
 [data-testid=stMetric]{padding:14px}
 .stButton>button,.stDownloadButton>button{
-  border-radius:5px;font-weight:700;min-height:40px;box-shadow:none;
+  border-radius:7px;font-weight:700;min-height:40px;box-shadow:none;
 }
 .stButton>button[kind=primary]{background:var(--lab-blue);border-color:var(--lab-blue)}
 [data-baseweb=tab-list]{
-  gap:0;background:var(--lab-panel);border:1px solid var(--lab-line);padding:0;border-radius:6px;
+  gap:0;background:var(--lab-panel);border:1px solid var(--lab-line);padding:0;border-radius:9px;
   overflow-x:auto;
 }
 [data-baseweb=tab]{border-radius:0;padding:10px 15px;border-right:1px solid var(--lab-line)}
 [data-baseweb=tab][aria-selected=true]{background:var(--lab-soft);color:var(--lab-navy);box-shadow:inset 0 -3px 0 var(--lab-blue)}
 [data-testid=stExpander]{background:var(--lab-panel);border-color:var(--lab-line);border-radius:6px}
 div[data-testid=stForm]{border-color:var(--lab-line)!important;border-radius:7px}
-input,textarea,[data-baseweb=select]>div{border-radius:4px!important}
+input,textarea,[data-baseweb=select]>div{border-radius:7px!important}
 [data-testid=stNumberInput] button{min-width:38px;min-height:38px;font-size:1rem}
 hr{border-color:var(--lab-line)}
 .locked-field{border-left:3px solid #8fa3ad;background:#f4f6f7;padding:9px 12px;color:#536873;margin:6px 0}
@@ -88,10 +94,13 @@ hr{border-color:var(--lab-line)}
 
 
 def header(title:str):
+    current_date=china_now().strftime("%Y年%m月%d日")
     st.markdown(
-        f'<section class="lab-header"><div class="lab-kicker">BPLAB · CONTROLLED WORKSPACE</div>'
+        f'<div class="lab-topbar"><span>BPLab Trace · 实验室全过程追溯系统</span>'
+        f'<span>{current_date} · {TIMEZONE_NAME}</span></div>'
+        f'<section class="lab-header"><div class="lab-kicker">CONTROLLED LABORATORY WORKSPACE</div>'
         f'<h2>{title}</h2><div class="lab-meta">{COMPANY_CN} · {COMPANY_EN}　|　'
-        f'{APP_VERSION}　|　{TIMEZONE_NAME}（UTC+8）</div></section>',
+        f'{APP_VERSION}</div></section>',
         unsafe_allow_html=True,
     )
 
@@ -598,8 +607,8 @@ if goto_page in ROLE_MENUS[role]:
     st.session_state["main_navigation"]=goto_page
     del st.query_params["goto"]
 with st.sidebar:
-    st.markdown("## BPLAB")
-    st.caption("LABORATORY CONTROL SYSTEM")
+    st.markdown("## 🧪 BPLab Trace")
+    st.caption("LABORATORY MANAGEMENT")
     st.markdown(f"**{user['display_name']}**")
     st.caption(f"{role} · 受控工作台")
     st.divider()
@@ -1673,9 +1682,32 @@ elif page=="单据中心":
 
 elif page=="报告中心":
     header("报告审核：质量负责人预览确认 → 管理员（授权签字人）签发")
-    rs=list_reports(role,username);show_df(rs,["report_no","commission_no","task_no","status","validity_status","tester","verifier","quality_inspector","approver","updated_at"])
+    rs=list_reports(role,username)
+    pending_quality=[
+        item for item in rs
+        if item.get("status")=="待质量审核" and item.get("quality_inspector")==username
+    ]
+    if role=="质量负责人":
+        m1,m2,m3=st.columns(3)
+        m1.metric("待审核报告",len(pending_quality))
+        m2.metric("全部负责报告",len(rs))
+        m3.metric("已完成确认",len([item for item in rs if item.get("status") in ("待管理员签发","已发布")]))
+        if pending_quality:
+            st.success("下方“质量负责人报告审核入口”已有待办，请选择报告后完成预览确认或退回整改。")
+        else:
+            st.info("当前没有待质量审核报告。原始记录经复核员通过后，报告会自动进入这里。")
+    show_df(rs,["report_no","commission_no","task_no","status","validity_status","tester","verifier","quality_inspector","approver","updated_at"])
     if rs:
-        rn=st.selectbox("报告",[x["report_no"] for x in rs]);r=report(rn);st.info("当前状态："+r["status"])
+        ordered_reports=pending_quality+[item for item in rs if item not in pending_quality]
+        rn=st.selectbox(
+            "质量负责人报告审核入口" if role=="质量负责人" else "选择报告",
+            [x["report_no"] for x in ordered_reports],
+            format_func=lambda value:next(
+                f"{item['report_no']}｜{item['status']}｜任务 {item.get('task_no','')}"
+                for item in ordered_reports if item["report_no"]==value
+            ),
+        )
+        r=report(rn);st.info("当前状态："+r["status"])
         st.markdown("**报告初稿内容（系统根据已锁定记录自动形成）**")
         show_df([{
             "检验类别":r.get("report_category",""),"样品说明":r.get("sample_statement",""),
@@ -2216,3 +2248,58 @@ elif page=="审计追踪":
     header("不可无痕修改的审计记录")
     if role!="管理员":st.stop()
     show_df(audit_logs(),["entity_type","entity_id","actor","action","field_name","old_value","new_value","reason","created_at"])
+
+elif page=="系统初始化":
+    header("管理员系统初始化")
+    if role!="管理员":st.stop()
+    st.error("此操作会永久清空委托、样品流转、实验、照片、报告、异议和历史日志，执行后不能撤销。")
+    st.success("保留内容：用户与权限、五角色电子签名、单位信息库、样品基础库、检测方法、设备台账、实验配置、SOP和受控模板。")
+    history_counts={
+        "委托":one("SELECT COUNT(*) n FROM commissions")["n"],
+        "实验任务":one("SELECT COUNT(*) n FROM tasks")["n"],
+        "原始记录版本":one("SELECT COUNT(*) n FROM records")["n"],
+        "检验报告":one("SELECT COUNT(*) n FROM reports")["n"],
+        "照片/附件":one("SELECT COUNT(*) n FROM attachments")["n"],
+        "客户异议":one("SELECT COUNT(*) n FROM objections")["n"],
+    }
+    cols=st.columns(3)
+    for index,(label,value) in enumerate(history_counts.items()):
+        cols[index%3].metric(label,int(value or 0))
+    backup=io.BytesIO()
+    with zipfile.ZipFile(backup,"w",zipfile.ZIP_DEFLATED) as archive:
+        if DB_PATH.exists():
+            archive.writestr("data/bplab_trace_v56.db",DB_PATH.read_bytes())
+        if ATTACHMENT_DIR.exists():
+            for path in ATTACHMENT_DIR.rglob("*"):
+                if path.is_file():
+                    archive.writestr(
+                        "data/attachments/"+str(path.relative_to(ATTACHMENT_DIR)),
+                        path.read_bytes(),
+                    )
+    st.download_button(
+        "初始化前下载数据库与附件备份",
+        backup.getvalue(),
+        f"BPLab_初始化前备份_{china_now().strftime('%Y%m%d_%H%M%S')}.zip",
+        "application/zip",
+        use_container_width=True,
+    )
+    st.divider()
+    confirm_check=st.checkbox("我确认已经完成必要备份，并理解该操作不可撤销")
+    confirm_text=st.text_input(
+        "请输入确认文字：清空全部业务历史",
+        placeholder="清空全部业务历史",
+    )
+    if st.button(
+        "执行初始化并清空历史记录",
+        type="primary",
+        use_container_width=True,
+        disabled=not confirm_check or confirm_text.strip()!="清空全部业务历史",
+    ):
+        try:
+            deleted=reset_business_history(username)
+            st.session_state.flash_message=(
+                "系统初始化完成：业务历史已清空，基础库、配置、模板和电子签名已保留。"
+            )
+            st.rerun()
+        except Exception as error:
+            st.error(str(error))

@@ -5,7 +5,7 @@ COMPANY_CN = "大连标普检测有限公司"
 COMPANY_EN = "DALIAN BIAOPU TESTING CO., LTD."
 SYSTEM_CN = "大连标普实验室样品全过程追溯系统"
 SYSTEM_EN = "BPLab Sample Lifecycle Tracking System"
-APP_VERSION = "BPLab Trace V9.0 实验室工作台版"
+APP_VERSION = "BPLab Trace V9.1 现代实验室工作台版"
 TIMEZONE_NAME = "Asia/Shanghai"
 
 STORAGE_AREAS = ["A区域", "B区域"]
@@ -227,7 +227,7 @@ ROLE_MENUS = {
         "首页看板", "单位信息库", "检测项目与方法库", "样品资料库",
         "委托与样品管理", "附件与内部追溯", "一键下载", "单据中心", "报告中心",
         "客户异议", "报告发放登记", "修改中心", "修改日志", "SOP与模板版本",
-        "实验配置版本", "设备库", "电子签名", "用户与权限", "审计追踪",
+        "实验配置版本", "设备库", "电子签名", "用户与权限", "审计追踪", "系统初始化",
     ],
     "样品管理员": [
         "首页看板", "单位信息库", "样品资料库", "新建委托与入库",
