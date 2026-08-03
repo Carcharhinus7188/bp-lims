@@ -49,7 +49,7 @@ def _fill(table,data,header_rows=1):
 
 def group_range(g):
     q=int(g.get("quantity") or 1)
-    return f"{g['group_no']}-01" if q==1 else f"{g['group_no']}-01～{g['group_no']}-{q:02d}"
+    return f"{g['group_no']}-S01" if q==1 else f"{g['group_no']}-S01～{g['group_no']}-S{q:02d}"
 
 
 def commission_document(c,groups,tests,receiver_name):

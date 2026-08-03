@@ -69,6 +69,7 @@ def save_live_camera_photo(
 ) -> tuple[str, str]:
     """Persist an immutable original and a server-watermarked derivative."""
     captured_at = now()
+    time_code = captured_at[11:19].replace(":", "")
     normalized = _normalized_jpeg(content)
     task_no = str(meta["task_no"])
     checkpoint_code = str(meta["checkpoint_code"])
@@ -86,7 +87,7 @@ def save_live_camera_photo(
     original_id = save_attachment(
         {
             **base,
-            "original_name": f"{task_no}_{checkpoint_code}_原始照片.jpg",
+            "original_name": f"{task_no}_{time_code}.jpg",
             "is_original": True,
         },
         normalized,
@@ -105,7 +106,7 @@ def save_live_camera_photo(
     watermarked_id = save_attachment(
         {
             **base,
-            "original_name": f"{task_no}_{checkpoint_code}_时间戳留档.jpg",
+            "original_name": f"{task_no}_{time_code}.jpg",
             "is_original": False,
             "parent_attachment_id": original_id,
         },

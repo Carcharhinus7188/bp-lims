@@ -255,7 +255,12 @@ def render_sample_data(kind: str, record: dict[str, Any], key_prefix: str) -> li
     st.subheader("原始测量数据")
     st.caption("按样品逐个填写。所有数值既可键盘直接输入，也可用＋/－按字段精度微调；平均值、计算结果和符合性会实时刷新。")
     rows = [dict(x) for x in record.get("rows") or []]
-    fields = visible_row_fields(kind)
+    fields = [
+        field for field in visible_row_fields(kind)
+        if field[0] != "retest_mean"
+        or record.get("overall_status") == "存在异常"
+        or record.get("retest") == "是"
+    ]
     groups: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
     for index, row in enumerate(rows):
         groups[str(row.get("sample_no") or f"第{index+1}条")].append((index, row))
@@ -325,12 +330,18 @@ def render_exception_and_summary(kind: str, record: dict[str, Any], key_prefix: 
     status_options = ["正常完成", "存在异常"]
     status = output.get("overall_status", "正常完成")
     output["overall_status"] = st.radio("实验完成状态", status_options, index=status_options.index(status) if status in status_options else 0, horizontal=True, key=f"{key_prefix}_overall_status")
-    if output["overall_status"] == "存在异常" or output.get("fixed_parameter_mode") == "存在偏离":
+    has_exception = (
+        output["overall_status"] == "存在异常"
+        or output.get("fixed_parameter_mode") == "存在偏离"
+    )
+    if has_exception:
         output["deviation"] = st.text_area("异常、偏离、影响评估及处理措施", value=str(output.get("deviation", "")), key=f"{key_prefix}_deviation")
+        retest_options = ["否", "是"]
+        output["retest"] = st.radio("是否复测/重制", retest_options, index=1 if output.get("retest") == "是" else 0, horizontal=True, key=f"{key_prefix}_retest")
     else:
-        output["deviation"] = output.get("deviation") or "无"
-    retest_options = ["否", "是"]
-    output["retest"] = st.radio("是否复测/重制", retest_options, index=1 if output.get("retest") == "是" else 0, horizontal=True, key=f"{key_prefix}_retest")
+        output["deviation"] = "无"
+        output["retest"] = "否"
+        st.success("实验无异常，无需复测；复测数据和复测平均值字段不显示。")
     output = calculate_business_record(kind, output)
     st.markdown("**系统生成的报告结果**")
     st.text_area("实际检验结果摘要", value=str(output.get("report_summary", "")), disabled=True, key=f"{key_prefix}_summary")
