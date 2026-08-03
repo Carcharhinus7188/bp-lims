@@ -885,11 +885,38 @@ elif page=="实验记录":
                 save_record(tn,version,payload,username,"草稿",tm_version,sm_version,reason,compare)
                 st.session_state[validation_key]=True
                 st.rerun()
-            if end_at and st.session_state.get(validation_key,False):
-                render_completion(summary0)
-            if b.button("提交复核",type="primary",use_container_width=True,disabled=not st.session_state.get(validation_key,False) or not tester_self_check or not end_at or not summary0["complete"] or not photos_complete,key=f"{key_prefix}_submit"):
-                save_record(tn,version,payload,username,"更正待复核" if version>1 else "待复核",tm_version,sm_version,reason,compare)
-                navigate_to("首页看板","已提交复核，当前实验窗口已关闭")
+            validation_ready=bool(st.session_state.get(validation_key,False))
+            final_sections=dict(summary0.get("sections") or {})
+            final_sections.update({
+                "实验结束时间已记录":bool(end_at),
+                "实验员自查已确认":bool(tester_self_check),
+                "强制拍照节点已完成":bool(photos_complete),
+            })
+            final_issues=list(summary0.get("issues") or [])
+            if not end_at:final_issues.append("尚未记录实验结束时间")
+            if not tester_self_check:final_issues.append("尚未勾选实验员自查确认")
+            if not photos_complete:
+                missing_photo_labels=[
+                    x["checkpoint_label"] for x in camera_checkpoint_status(tn,all_checkpoints)
+                    if x["required"] and not x["complete"]
+                ]
+                final_issues.append("强制拍照节点未完成："+("、".join(missing_photo_labels) or "请检查照片留档"))
+            final_complete=bool(summary0["complete"] and end_at and tester_self_check and photos_complete)
+            if validation_ready:
+                render_completion({
+                    "sections":final_sections,"issues":final_issues,"complete":final_complete,
+                })
+            submit_clicked=b.button(
+                "提交复核",type="primary",use_container_width=True,
+                disabled=not validation_ready,key=f"{key_prefix}_submit",
+                help="同步检查完成后按钮即可点击；若仍有缺项，系统会明确提示具体原因。",
+            )
+            if submit_clicked:
+                if not final_complete:
+                    st.error("当前不能提交复核，请先完成："+ "；".join(final_issues))
+                else:
+                    save_record(tn,version,payload,username,"更正待复核" if version>1 else "待复核",tm_version,sm_version,reason,compare)
+                    navigate_to("首页看板","已提交复核，当前实验窗口已关闭")
 
 elif page=="原始记录复核":
     header("按实验流程复核原始记录")
