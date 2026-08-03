@@ -8,6 +8,7 @@ from typing import Any
 
 from experiment_engine import initial_parameters, initial_rows, calculate_rows, result_summary, schema
 from template_record_engine import (
+    BLANK_RE,
     template_manifest,
     prefill_template_fields,
     _compose_cell_text,
@@ -634,7 +635,76 @@ def business_to_template_fields(
         business_record,
         _attachment_reference(attachments),
     )
+    # Mark genuinely unused rows and normal-path exception blocks as not
+    # applicable before asking the experimenter for supplementary fields.
+    row_count = len(rows)
+    normal_path = (
+        business_record.get("overall_status") != "存在异常"
+        and business_record.get("retest") != "是"
+        and business_record.get("fixed_parameter_mode") != "存在偏离"
+    )
+    for field in manifest:
+        key = field["key"]
+        section = str(field.get("section", ""))
+        label = str(field.get("label", ""))
+        original = str(field.get("template_text", "") or "")
+        current = str(values.get(key, "") or "")
+        occurrence = re.search(r"第(\d+)条", label)
+        data_section = any(token in section for token in (
+            "原始数据", "原始结果", "试样尺寸", "试样制备", "色泽观察",
+            "单样", "逐颗", "测量记录",
+        ))
+        if occurrence and data_section and int(occurrence.group(1)) > row_count:
+            values[key] = "/"
+            continue
+        if normal_path and any(token in section for token in ("偏离", "异常", "复测", "复检")):
+            if ("□" in original or "☐" in original) and "☑" not in current:
+                values[key] = "/"
+                continue
+        combined = f"{section} {label} {field.get('row_label','')} {field.get('col_header','')}"
+        if attachments and ("□" in original or "☐" in original) and "☑" not in current:
+            if any(token in combined for token in ("照片", "附件", "数据文件", "导出报告", "图像归档", "是否归档")):
+                values[key] = _select_checkbox_value(original, ["有", "是", "已归档", "已导出"])
     return {k: str(v if v is not None else "") for k, v in values.items()}
+
+
+def template_supplement_requirements(
+    template_name: str,
+    mapped_values: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Fields still visibly incomplete after workflow/business auto-fill."""
+    requirements: list[dict[str, Any]] = []
+    for field in template_manifest(template_name):
+        original = str(field.get("template_text", "") or "")
+        current = str(mapped_values.get(field["key"], "") or "").strip()
+        if current in {"/", "不适用"}:
+            continue
+        checkbox_missing = (
+            ("□" in original or "☐" in original)
+            and "☑" not in current
+        )
+        text_missing = bool(BLANK_RE.search(current)) and "☑" not in current
+        if checkbox_missing or text_missing:
+            requirements.append(field)
+    return requirements
+
+
+def template_supplement_missing(
+    requirements: list[dict[str, Any]],
+    supplement: dict[str, Any],
+) -> list[str]:
+    missing: list[str] = []
+    for field in requirements:
+        value = str(supplement.get(field["key"], "") or "").strip()
+        original = str(field.get("template_text", "") or "")
+        complete = bool(value)
+        if complete and ("□" in original or "☐" in original):
+            complete = "☑" in value
+        elif complete:
+            complete = not bool(BLANK_RE.search(value))
+        if not complete:
+            missing.append(f"{field.get('section','')}｜{field.get('label','')}")
+    return missing
 
 
 def business_completion_summary(kind: str, record: dict[str, Any], required_equipment: list[dict[str, Any]] | None = None) -> dict[str, Any]:

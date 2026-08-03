@@ -77,11 +77,20 @@ class Writer:
             original = str(field.get("template_text", "") or "")
             value = str(self.values.get(key, "") or "")
             if "□" in original or "☐" in original:
+                # Rows explicitly marked unused must stay unused. Replacing "/"
+                # with the original unchecked choices made empty sample rows look
+                # as if the experimenter had forgotten to complete them.
+                if value.strip() in {"/", "不适用"}:
+                    continue
                 # Never manufacture a positive observation. A checkbox is
                 # selected only when an explicit UI value or calculation was
                 # written through Writer.put(..., checkbox=True).
                 if "☑" not in value:
                     self.values[key] = original.replace("☐", "□").replace("☑", "□")
+                else:
+                    # A selected normal option does not require the blank text
+                    # attached to an unselected "异常/其他" alternative.
+                    self.values[key] = BLANK_RE.sub("/", value)
                 continue
             if not value:
                 self.values[key] = _compose_cell_text(original, "/")

@@ -11,8 +11,8 @@ from constants import *
 from lims_db import *
 from experiment_engine import schema, initial_parameters, initial_rows, calculate_rows, dataframe, columns_for_editor
 from record_word_engine import export_record
-from business_record_engine import initialize_business_record, calculate_business_record, business_to_template_fields, business_completion_summary
-from business_record_ui import render_readonly_summary, render_task_confirmations, render_equipment_confirmation, render_prechecks, render_parameters, render_sample_data, render_exception_and_summary, render_completion
+from business_record_engine import initialize_business_record, calculate_business_record, business_to_template_fields, business_completion_summary, template_supplement_requirements, template_supplement_missing
+from business_record_ui import render_readonly_summary, render_task_confirmations, render_equipment_confirmation, render_prechecks, render_parameters, render_sample_data, render_exception_and_summary, render_completion, render_template_supplement
 from equipment_registry import EQUIPMENT_BINDING_ROLES
 from experiment_schemas import SCHEMAS
 from form_engine import commission_document, sample_register_document, loan_return_document, report_document, report_delivery_document, hazardous_waste_document, modification_log_pdf, objection_application_document, objection_response_document
@@ -943,6 +943,19 @@ elif page=="实验记录":
             template_fields=business_to_template_fields(
                 template_name,kind,context,bound_devices,business,attachments,prior.get("template_fields") or {}
             )
+            supplement_requirements=template_supplement_requirements(template_name,template_fields)
+            st.subheader("受控原始记录补充字段核对")
+            template_supplement=render_template_supplement(
+                supplement_requirements,
+                prior.get("template_supplement") or {},
+                f"{key_prefix}_template_supplement",
+            )
+            template_fields.update({
+                key:value for key,value in template_supplement.items() if value
+            })
+            supplement_missing=template_supplement_missing(
+                supplement_requirements,template_supplement,
+            )
             summary0=business_completion_summary(kind,business,bound_devices)
             validation_key=f"{key_prefix}_validation_ready"
             if not end_at:
@@ -970,6 +983,7 @@ elif page=="实验记录":
                 "report_conclusion":business.get("report_conclusion",""),
                 "configuration_snapshot":config_snapshot,
                 "tester_self_check":tester_self_check,
+                "template_supplement":template_supplement,
                 "photo_attachment_ids":[
                     item["attachment_id"] for item in list_attachments(task_no=tn)
                     if item.get("capture_source")=="live_camera"
@@ -987,6 +1001,7 @@ elif page=="实验记录":
                 "实验结束时间已记录":bool(end_at),
                 "实验员自查已确认":bool(tester_self_check),
                 "强制拍照节点已完成":bool(photos_complete),
+                "受控模板补充字段已完成":not supplement_missing,
             })
             final_issues=list(summary0.get("issues") or [])
             if not end_at:final_issues.append("尚未记录实验结束时间")
@@ -997,7 +1012,16 @@ elif page=="实验记录":
                     if x["required"] and not x["complete"]
                 ]
                 final_issues.append("强制拍照节点未完成："+("、".join(missing_photo_labels) or "请检查照片留档"))
-            final_complete=bool(summary0["complete"] and end_at and tester_self_check and photos_complete)
+            if supplement_missing:
+                final_issues.append(
+                    "受控模板补充字段未完成："+
+                    "、".join(supplement_missing[:8])+
+                    (f"等共{len(supplement_missing)}项" if len(supplement_missing)>8 else "")
+                )
+            final_complete=bool(
+                summary0["complete"] and end_at and tester_self_check
+                and photos_complete and not supplement_missing
+            )
             if validation_ready:
                 render_completion({
                     "sections":final_sections,"issues":final_issues,"complete":final_complete,
@@ -1251,20 +1275,29 @@ elif page=="单据中心":
                 report_delivery_document(delivery_report_no,selected_deliveries),
                 f"{delivery_report_no}-D_报告发放登记表.docx",
             )
-        locked=[]
+        record_history=[]
         for task_row in commission_tasks(cn):
-            locked_versions=[r for r in record_versions(task_row["task_no"]) if r["status"]=="已锁定"]
-            if locked_versions:
-                locked.append(locked_versions[-1])
-        if locked:
-            key=st.selectbox("下载锁定原始记录",[f"{r['record_no']}|{r['version']}" for r in locked])
+            record_history.extend(record_versions(task_row["task_no"]))
+        if record_history:
+            st.subheader("实验原始记录历史版本")
+            st.caption("退回版本、二次编辑草稿和最终锁定版本分别保留。版本之间不会互相覆盖。")
+            show_df(record_history,["record_no","version","experiment","owner","status","change_reason","created_at","updated_at"])
+            key=st.selectbox(
+                "选择原始记录版本",
+                [f"{r['record_no']}|{r['version']}" for r in record_history],
+                format_func=lambda value:next(
+                    f"{item['record_no']}｜V{int(item['version'])}.0｜{item['status']}｜{item.get('experiment','')}"
+                    for item in record_history
+                    if value==f"{item['record_no']}|{item['version']}"
+                ),
+            )
             rn,v=key.split("|");r=record(rn,int(v));t=task(rn);snap=task_config_snapshot(rn)
             r["kind"]=snap.get("kind") or "generic";template_name=snap.get("record_template_file","")
             changes=audit_logs(rn)
             record_docx=export_record(r,template_name,changes).getvalue()
             st.download_button(
-                "下载选定原始记录表DOCX",record_docx,
-                f"{rn}_V{v}_原始记录表.docx",
+                f"下载 V{int(v)}.0 原始记录表DOCX",record_docx,
+                f"{rn}_V{int(v)}.0_原始记录表.docx",
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
         report_rows=rows("SELECT * FROM reports WHERE commission_no=? ORDER BY report_no",(cn,))

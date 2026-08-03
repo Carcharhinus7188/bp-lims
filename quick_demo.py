@@ -7,11 +7,13 @@ from io import BytesIO
 from PIL import Image, ImageDraw
 
 from business_record_engine import (
+    _select_checkbox_value,
     business_to_template_fields,
     calculate_business_record,
     fixed_and_manual_fields,
     initialize_business_record,
     visible_row_fields,
+    template_supplement_requirements,
 )
 from experiment_engine import calculate_rows
 from lims_db import (
@@ -40,12 +42,36 @@ from lims_db import (
 )
 from camera_evidence import save_live_camera_photo
 from constants import REPORT_DECISIVE_PHOTO_CODES, SAMPLE_LEVEL_PHOTO_CODES, photo_checkpoints
+from template_record_engine import BLANK_RE
 
 
 DEMO_COMMISSION_NO = "WT20990101001"
 DEMO_GROUP_NO = "BP20990101001"
 PENDING_DEMO_COMMISSION_NO = "WT20990101002"
 PENDING_DEMO_GROUP_NO = "BP20990101002"
+
+
+def _complete_demo_template_fields(
+    template_name: str, template_fields: dict[str, str],
+) -> dict[str, str]:
+    """Populate remaining explicit mother-template confirmations for Demo records."""
+    values=dict(template_fields)
+    supplement={}
+    positive=[
+        "符合","是","正常","合格","无","已确认","已完成","通过","清晰",
+        "有效","牢固","允许检测","可以开始试验","有","已归档","已导出",
+        "委托方提供","产品标准","Z轴","原始状态","未涉及","不适用",
+    ]
+    for field in template_supplement_requirements(template_name,values):
+        original=str(field.get("template_text") or "")
+        if "□" in original or "☐" in original:
+            filled=_select_checkbox_value(original,positive)
+            filled=BLANK_RE.sub("Demo确认",filled)
+        else:
+            filled=BLANK_RE.sub("Demo确认",original) if original else "Demo确认"
+        values[field["key"]]=filled
+        supplement[field["key"]]=filled
+    return {"template_fields":values,"template_supplement":supplement}
 
 
 def _add_demo_result_photos(
@@ -268,6 +294,8 @@ def create_pending_review_demo() -> dict[str, str]:
     template_fields = business_to_template_fields(
         template_name, kind, context, equipment, business, demo_attachments, {},
     )
+    completed_template=_complete_demo_template_fields(template_name,template_fields)
+    template_fields=completed_template["template_fields"]
     payload = {
         "common": {
             "record_no": task_row["task_no"], "task_no": task_row["task_no"],
@@ -288,6 +316,7 @@ def create_pending_review_demo() -> dict[str, str]:
         "report_conclusion": business["report_conclusion"],
         "configuration_snapshot": snapshot,
         "tester_self_check": True,
+        "template_supplement": completed_template["template_supplement"],
         "photo_attachment_ids": [
             item["attachment_id"] for item in demo_attachments
             if item.get("capture_source") == "live_camera"
@@ -441,6 +470,8 @@ def create_full_document_demo() -> str:
         template_fields = business_to_template_fields(
             template_name, kind, context, equipment, business, [], {},
         )
+        completed_template=_complete_demo_template_fields(template_name,template_fields)
+        template_fields=completed_template["template_fields"]
         payload = {
             "common": {
                 "record_no": task_no, "task_no": task_no,
@@ -464,6 +495,7 @@ def create_full_document_demo() -> str:
             "report_conclusion": business["report_conclusion"],
             "configuration_snapshot": snapshot,
             "tester_self_check": True,
+            "template_supplement": completed_template["template_supplement"],
         }
         with connect() as connection:
             connection.execute(

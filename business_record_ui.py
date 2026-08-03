@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date
+import re
 from typing import Any
 
 import streamlit as st
@@ -15,6 +16,7 @@ from business_record_engine import (
     visible_row_fields,
 )
 from experiment_engine import schema
+from template_record_engine import BLANK_RE, _compose_cell_text
 
 
 def _safe_number(value: Any, default: float | None = None) -> float | None:
@@ -371,3 +373,115 @@ def render_completion(summary: dict[str, Any]):
             st.write("- " + item)
     else:
         st.success("实验记录已完整，可提交复核。")
+
+
+def _checkbox_choices(original: str) -> list[str]:
+    choices = []
+    for item in re.split(r"[□☐☑]", str(original or ""))[1:]:
+        value = BLANK_RE.sub("", item)
+        value = re.split(r"[；;，,]", value, maxsplit=1)[0].strip(" ：:")
+        if value:
+            choices.append(value)
+    return list(dict.fromkeys(choices))
+
+
+def _selected_checkbox_choices(original: str, current: str) -> list[str]:
+    selected = []
+    for choice in _checkbox_choices(original):
+        if re.search(r"☑\s*" + re.escape(choice), str(current or "")):
+            selected.append(choice)
+    return selected
+
+
+def _filled_checkbox_text(original: str, selected: list[str], note: str = "") -> str:
+    value = str(original or "").replace("☐", "□").replace("☑", "□")
+    for choice in selected:
+        value = re.sub(
+            r"□\s*" + re.escape(choice),
+            lambda match: "☑" + match.group(0)[1:],
+            value,
+            count=1,
+        )
+    if note:
+        value = BLANK_RE.sub(note, value, count=1)
+    else:
+        value = BLANK_RE.sub("/", value)
+    return value
+
+
+def render_template_supplement(
+    requirements: list[dict[str, Any]],
+    existing: dict[str, Any],
+    key_prefix: str,
+) -> dict[str, str]:
+    """Render only mother-template fields not covered by structured inputs."""
+    output = dict(existing or {})
+    if not requirements:
+        st.success("受控原始记录模板全部字段已由前序数据、实验记录或系统规则覆盖。")
+        return output
+    st.warning(
+        f"受控原始记录模板仍有 {len(requirements)} 个实际确认/填空字段。"
+        "这些字段必须逐项完成，提交后会回填到母版原位置。"
+    )
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for field in requirements:
+        grouped[str(field.get("section") or "其他补充字段")].append(field)
+    for section, fields in grouped.items():
+        with st.expander(f"{section}（{len(fields)}项）", expanded=True):
+            for field in fields:
+                field_key=field["key"]
+                label=str(field.get("label") or field.get("position") or field_key)
+                original=str(field.get("template_text") or "")
+                current=str(output.get(field_key) or "")
+                st.caption(f"{label}｜{field.get('position','')}")
+                if "□" in original or "☐" in original:
+                    choices=_checkbox_choices(original)
+                    prior_selected=_selected_checkbox_choices(original,current)
+                    # Multi-confirmation cells contain several simultaneous
+                    # positive observations; category/result cells remain single choice.
+                    exclusive_tokens=("类别","来源","依据","状态","结果","结论","方向","方法","是否","判定")
+                    multi=(
+                        len(choices)>2
+                        and not any(token in label for token in exclusive_tokens)
+                        and not any(token in choice for choice in choices for token in ("不符合","异常","不合格","不可","暂停","未完成"))
+                    )
+                    if multi:
+                        selected=st.multiselect(
+                            "选择所有实际符合的项目",
+                            choices,
+                            default=[x for x in prior_selected if x in choices],
+                            key=f"{key_prefix}_{field_key}_choices",
+                        )
+                    else:
+                        options=["请选择"]+choices
+                        prior=prior_selected[0] if prior_selected else "请选择"
+                        choice=st.selectbox(
+                            "选择实际记录值",
+                            options,
+                            index=options.index(prior) if prior in options else 0,
+                            key=f"{key_prefix}_{field_key}_choice",
+                        )
+                        selected=[] if choice=="请选择" else [choice]
+                    needs_note=any(
+                        token in choice for choice in selected
+                        for token in ("其他","异常","不符合","不合格","有","调整","维修","无效")
+                    )
+                    note=""
+                    if needs_note or (BLANK_RE.search(original) and prior_selected):
+                        note=st.text_input(
+                            "补充说明",
+                            value="" if BLANK_RE.search(current) else current,
+                            key=f"{key_prefix}_{field_key}_note",
+                        )
+                    output[field_key]=_filled_checkbox_text(original,selected,note) if selected else ""
+                else:
+                    prior="" if not current or BLANK_RE.search(current) else current
+                    raw=st.text_input(
+                        "填写实际记录",
+                        value=prior,
+                        help=f"母版原字段：{original or label}",
+                        key=f"{key_prefix}_{field_key}_text",
+                    )
+                    output[field_key]=_compose_cell_text(original,raw) if raw.strip() else ""
+                st.divider()
+    return output

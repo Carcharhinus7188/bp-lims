@@ -1833,12 +1833,27 @@ def save_record(task_no: str, version: int, payload: dict[str, Any], owner: str,
         raise ValueError("任务不存在")
     if "待复核" in status:
         from constants import photo_checkpoints
+        from business_record_engine import template_supplement_requirements
         if not bool(payload.get("tester_self_check")):
             raise ValueError("实验员必须完成提交前自查确认")
         if not t.get("experiment_started_at") or not t.get("experiment_ended_at"):
             raise ValueError("请先在实验记录顶部完成实验开始和结束时间记录")
         if not mandatory_camera_complete(task_no, photo_checkpoints(t["experiment"])):
             raise ValueError("强制现场照片尚未完成，不能提交复核")
+        missing_template_fields = template_supplement_requirements(
+            str(payload.get("template_name") or ""),
+            payload.get("template_fields") or {},
+        )
+        if missing_template_fields:
+            labels = [
+                f"{item.get('section','')}｜{item.get('label','')}"
+                for item in missing_template_fields[:8]
+            ]
+            raise ValueError(
+                "受控原始记录模板仍有未完成字段："+
+                "、".join(labels)+
+                (f"等共{len(missing_template_fields)}项" if len(missing_template_fields)>8 else "")
+            )
     ts = now()
     existing = record(task_no, version)
     audit_base = existing["payload"] if existing else compare_payload
