@@ -418,9 +418,14 @@ CREATE TABLE IF NOT EXISTS hazardous_waste_records(
             ("store", "样品管理员赵工", "store123", "样品管理员"),
             ("tester", "实验员张工", "test123", "实验员"),
             ("reviewer", "复核员李工", "review123", "复核员"),
-            ("quality", "质量检测员周工", "quality123", "质量检测员"),
+            ("quality", "质量负责人周工", "quality123", "质量负责人"),
             ("approver", "管理员刘工", "approve123", "管理员"),
         ]
+        c.execute(
+            """UPDATE users SET role='质量负责人',
+               display_name=REPLACE(display_name,'质量检测员','质量负责人')
+               WHERE role='质量检测员'"""
+        )
         for username, name, password, role in demo_users:
             if not c.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
                 c.execute(
@@ -1536,7 +1541,7 @@ def create_task_package(
         raise ValueError("部分实验已分配或不属于该样品组")
     package_no = _next_package_no(g["group_no"])
     reviewer = reviewer or _auto_match_user("复核员", {assignee})
-    quality_inspector = _auto_match_user("质量检测员", {assignee, reviewer})
+    quality_inspector = _auto_match_user("质量负责人", {assignee, reviewer})
     sample_nos = [x["sample_no"] for x in group_samples(group_id)]
     selected = [available[key] for key in experiment_codes]
     config_snapshots = {x["experiment_code"]: build_experiment_config_snapshot(x["experiment_code"]) for x in selected}
@@ -1643,7 +1648,7 @@ def list_packages(role: str | None = None, username: str | None = None, statuses
         q += " AND assignee=?"; args.append(username)
     elif role == "复核员" and username:
         q += " AND reviewer=?"; args.append(username)
-    elif role == "质量检测员" and username:
+    elif role == "质量负责人" and username:
         q += " AND quality_inspector=?"; args.append(username)
     if statuses:
         q += " AND status IN (" + ",".join("?" * len(statuses)) + ")"; args.extend(statuses)
@@ -2026,7 +2031,7 @@ def quality_review_record(
     if not item or item.get("status") != "待质量确认":
         raise ValueError("该原始记录当前不在质量确认阶段")
     if not task_row or task_row.get("quality_inspector") != inspector:
-        raise ValueError("当前人员不是该任务的质量检测员")
+        raise ValueError("当前人员不是该任务的质量负责人")
     ts = now()
     passed = decision == "通过"
     with connect() as c:
@@ -2052,7 +2057,7 @@ def quality_review_record(
     else:
         create_notification(
             task_row.get("assignee", ""), "原始记录质量确认退回",
-            f"{record_no} V{version} 已由质量检测员退回，请进入修改中心处理。",
+            f"{record_no} V{version} 已由质量负责人退回，请进入修改中心处理。",
             "record", record_no,
         )
 
@@ -2567,7 +2572,7 @@ def list_reports(role: str, username: str) -> list[dict[str, Any]]:
         return rows("SELECT * FROM reports WHERE tester=? ORDER BY updated_at DESC", (username,))
     if role == "复核员":
         return rows("SELECT * FROM reports WHERE verifier=? ORDER BY updated_at DESC", (username,))
-    if role == "质量检测员":
+    if role == "质量负责人":
         return rows("SELECT * FROM reports WHERE quality_inspector=? ORDER BY updated_at DESC", (username,))
     return rows("SELECT * FROM reports ORDER BY updated_at DESC")
 
@@ -2614,7 +2619,7 @@ def reviewer_review_report(report_no: str, actor: str, decision: str, comment: s
 def quality_review_report(report_no: str, actor: str, decision: str, comment: str) -> None:
     r = report(report_no)
     if not r or r["quality_inspector"] != actor or r["status"] != "待质量审核":
-        raise ValueError("当前报告不能由该质量检测员审核")
+        raise ValueError("当前报告不能由该质量负责人审核")
     status = "待管理员签发" if decision == "通过" else "质量退回"
     with connect() as c:
         c.execute(
@@ -2896,7 +2901,7 @@ def register_objection(data: dict[str, Any], actor: str) -> str:
     if any(item not in allowed_items for item in disputed_items):
         raise ValueError("争议检测项目必须来自该委托当时选择的实验项目")
     objection_no = _next_objection_no()
-    inspector = report_row.get("quality_inspector") or _auto_match_user("质量检测员")
+    inspector = report_row.get("quality_inspector") or _auto_match_user("质量负责人")
     ts = now()
     with connect() as c:
         c.execute(
@@ -2933,7 +2938,7 @@ def register_objection(data: dict[str, Any], actor: str) -> str:
 
 
 def objections_for_user(role: str, username: str) -> list[dict[str, Any]]:
-    if role == "质量检测员":
+    if role == "质量负责人":
         return rows("SELECT * FROM objections WHERE quality_inspector=? ORDER BY updated_at DESC", (username,))
     return rows("SELECT * FROM objections ORDER BY updated_at DESC")
 
@@ -2952,7 +2957,7 @@ def quality_submit_objection(
 ) -> None:
     row = objection(objection_no)
     if not row or row["quality_inspector"] != actor or row["status"] != "调查中":
-        raise ValueError("当前异议不能由该质量检测员提交调查")
+        raise ValueError("当前异议不能由该质量负责人提交调查")
     if pathway not in ("是我方问题", "样品问题"):
         raise ValueError("必须选择两条规定路径之一")
     if not investigation.strip() or not trace_conclusion.strip():
@@ -3048,7 +3053,7 @@ def dispatch_retained_sample_retest(
     if not samples or all(x["status"] == "全部消耗，记录归档" for x in samples):
         raise ValueError("没有可用于重测的留样；请按重新送样流程建立新委托和新样品组")
     reviewer = _auto_match_user("复核员", {assignee})
-    quality_inspector = _auto_match_user("质量检测员", {assignee, reviewer})
+    quality_inspector = _auto_match_user("质量负责人", {assignee, reviewer})
     package_no = _next_package_no(g["group_no"])
     task_count = one("SELECT COUNT(*) n FROM tasks WHERE group_no=?", (g["group_no"],))["n"]
     task_no = f"{g['group_no']}-T{task_count + 1:02d}"

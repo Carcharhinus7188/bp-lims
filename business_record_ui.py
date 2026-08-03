@@ -48,7 +48,7 @@ def _number_profile(key: str, label: str) -> tuple[float, str]:
     return 0.01, "%.2f"
 
 
-def _number_input(label: str, value: Any, key: str, field_key: str, help_text: str | None = None, default: Any = None):
+def _number_input(label: str, value: Any, key: str, field_key: str, help_text: str | None = None, default: Any = None, disabled: bool = False):
     step, number_format = _number_profile(field_key, label)
     guidance = f"可直接用键盘输入；点击＋/－每次调整 {step:g}。"
     return st.number_input(
@@ -59,16 +59,17 @@ def _number_input(label: str, value: Any, key: str, field_key: str, help_text: s
         key=key,
         help=f"{help_text}；{guidance}" if help_text else guidance,
         placeholder="请填写实测值",
+        disabled=disabled,
     )
 
 
-def _widget(field: dict[str, Any], value: Any, key: str):
+def _widget(field: dict[str, Any], value: Any, key: str, disabled: bool = False):
     typ = field.get("type", "text")
     label = field.get("label", field.get("key", "字段"))
     help_text = field.get("help")
     if typ == "number":
         default = field.get("default") if field.get("default") not in ("", None) else None
-        return _number_input(label, value, key, field.get("key", ""), help_text, default)
+        return _number_input(label, value, key, field.get("key", ""), help_text, default, disabled)
     if typ == "date":
         parsed = value
         if isinstance(value, str) and value:
@@ -78,22 +79,22 @@ def _widget(field: dict[str, Any], value: Any, key: str):
                 parsed = date.today()
         if not parsed:
             parsed = date.today()
-        return str(st.date_input(label, value=parsed, key=key, help=help_text))
+        return str(st.date_input(label, value=parsed, key=key, help=help_text, disabled=disabled))
     if typ == "datetime":
-        return st.text_input(label, value=str(value or ""), key=key, help=help_text or "格式：YYYY-MM-DD HH:MM")
+        return st.text_input(label, value=str(value or ""), key=key, help=help_text or "格式：YYYY-MM-DD HH:MM", disabled=disabled)
     if typ == "select":
         options = field.get("options") or [""]
         selected = value if value in options else options[0]
-        return st.selectbox(label, options, index=options.index(selected), key=key, help=help_text)
+        return st.selectbox(label, options, index=options.index(selected), key=key, help=help_text, disabled=disabled)
     if typ == "multiselect":
         options = field.get("options") or []
         default = value if isinstance(value, list) else []
-        return st.multiselect(label, options, default=default, key=key, help=help_text)
+        return st.multiselect(label, options, default=default, key=key, help=help_text, disabled=disabled)
     if typ == "checkbox":
-        return st.checkbox(label, value=bool(value), key=key, help=help_text)
+        return st.checkbox(label, value=bool(value), key=key, help=help_text, disabled=disabled)
     if typ in ("textarea",):
-        return st.text_area(label, value=str(value or ""), key=key, help=help_text)
-    return st.text_input(label, value=str(value or ""), key=key, help=help_text)
+        return st.text_area(label, value=str(value or ""), key=key, help=help_text, disabled=disabled)
+    return st.text_input(label, value=str(value or ""), key=key, help=help_text, disabled=disabled)
 
 
 def render_readonly_summary(task: dict[str, Any], group: dict[str, Any], commission: dict[str, Any], package: dict[str, Any], config: dict[str, Any]):
@@ -116,7 +117,7 @@ def render_readonly_summary(task: dict[str, Any], group: dict[str, Any], commiss
     st.caption(f"实验配置版本：{config.get('config_version','')}｜原始记录模板：{config.get('record_template_file','')}。以上信息来自委托、入库、任务和配置快照，实验员不可修改。")
 
 
-def render_task_confirmations(record: dict[str, Any], key_prefix: str) -> dict[str, bool]:
+def render_task_confirmations(record: dict[str, Any], key_prefix: str, editable: bool = True) -> dict[str, bool]:
     st.subheader("样品接收确认")
     st.caption("正常情况下保持默认选中；发现问题时取消对应项，并在异常说明中记录。")
     current = record.get("task_confirmations") or {}
@@ -129,11 +130,11 @@ def render_task_confirmations(record: dict[str, Any], key_prefix: str) -> dict[s
     ]
     for i, (key, label) in enumerate(labels):
         with cols[i]:
-            output[key] = st.checkbox(label, value=bool(current.get(key, True)), key=f"{key_prefix}_confirm_{key}")
+            output[key] = st.checkbox(label, value=bool(current.get(key, True)), key=f"{key_prefix}_confirm_{key}", disabled=not editable)
     return output
 
 
-def render_equipment_confirmation(equipment: list[dict[str, Any]], existing: list[dict[str, Any]], key_prefix: str) -> list[dict[str, Any]]:
+def render_equipment_confirmation(equipment: list[dict[str, Any]], existing: list[dict[str, Any]], key_prefix: str, editable: bool = True) -> list[dict[str, Any]]:
     st.subheader("设备确认")
     st.caption("设备由任务配置自动带入，不需要重新选择。正常情况下仅确认状态；选择异常后才填写说明。")
     existing_map = {x.get("management_no") or x.get("管理编号"): x for x in existing}
@@ -157,10 +158,10 @@ def render_equipment_confirmation(equipment: list[dict[str, Any]], existing: lis
             status_options = ["正常", "异常"]
             status = prior.get("status") or prior.get("使用前状态") or "正常"
             with c:
-                status = st.radio("使用前状态", status_options, index=status_options.index(status) if status in status_options else 0, horizontal=True, key=f"{key_prefix}_eq_{index}")
+                status = st.radio("使用前状态", status_options, index=status_options.index(status) if status in status_options else 0, horizontal=True, key=f"{key_prefix}_eq_{index}", disabled=not editable)
             note = prior.get("note") or prior.get("异常说明") or ""
             if status == "异常":
-                note = st.text_area("异常说明及处理", value=str(note), key=f"{key_prefix}_eq_note_{index}")
+                note = st.text_area("异常说明及处理", value=str(note), key=f"{key_prefix}_eq_note_{index}", disabled=not editable)
             output.append({
                 "management_no": no,
                 "equipment_name": item.get("equipment_name") or item.get("设备名称", ""),
@@ -176,7 +177,7 @@ def render_equipment_confirmation(equipment: list[dict[str, Any]], existing: lis
     return output
 
 
-def render_prechecks(kind: str, record: dict[str, Any], key_prefix: str) -> tuple[list[str], str]:
+def render_prechecks(kind: str, record: dict[str, Any], key_prefix: str, editable: bool = True) -> tuple[list[str], str]:
     st.subheader("实验前检查")
     all_items = record.get("all_prechecks") or []
     selected = record.get("prechecks") or list(all_items)
@@ -186,16 +187,17 @@ def render_prechecks(kind: str, record: dict[str, Any], key_prefix: str) -> tupl
         default=[x for x in selected if x in all_items],
         key=f"{key_prefix}_prechecks",
         help="默认全部选中。取消任一项时，系统会要求填写说明。",
+        disabled=not editable,
     )
     note = record.get("precheck_note", "")
     if set(selected) != set(all_items):
-        note = st.text_area("未通过项目说明及处理", value=str(note), key=f"{key_prefix}_precheck_note")
+        note = st.text_area("未通过项目说明及处理", value=str(note), key=f"{key_prefix}_precheck_note", disabled=not editable)
     else:
         st.success("实验前检查默认全部正常。")
     return selected, note
 
 
-def render_parameters(kind: str, record: dict[str, Any], key_prefix: str) -> tuple[dict[str, Any], str]:
+def render_parameters(kind: str, record: dict[str, Any], key_prefix: str, editable_labels: set[str] | None = None) -> tuple[dict[str, Any], str]:
     params = dict(record.get("parameters") or {})
     fixed_fields, manual_fields = fixed_and_manual_fields(kind)
     st.subheader("环境与实验参数")
@@ -210,7 +212,7 @@ def render_parameters(kind: str, record: dict[str, Any], key_prefix: str) -> tup
         cols = st.columns(min(3, len(env_fields)))
         for index, field in enumerate(env_fields):
             with cols[index % len(cols)]:
-                params[field["key"]] = _widget(field, params.get(field["key"]), f"{key_prefix}_param_{field['key']}")
+                params[field["key"]] = _widget(field, params.get(field["key"]), f"{key_prefix}_param_{field['key']}", editable_labels is not None and field["label"] not in editable_labels)
 
     fixed_mode = record.get("fixed_parameter_mode", "按默认参数执行")
     if fixed_fields:
@@ -219,13 +221,13 @@ def render_parameters(kind: str, record: dict[str, Any], key_prefix: str) -> tup
         for index, field in enumerate(fixed_fields):
             with summary_cols[index % 3]:
                 st.text_input(field["label"], value=str(params.get(field["key"], field.get("default", ""))), disabled=True, key=f"{key_prefix}_fixed_display_{field['key']}")
-        fixed_mode = st.radio("固定参数执行情况", ["按默认参数执行", "存在偏离"], index=0 if fixed_mode != "存在偏离" else 1, horizontal=True, key=f"{key_prefix}_fixed_mode")
+        fixed_mode = st.radio("固定参数执行情况", ["按默认参数执行", "存在偏离"], index=0 if fixed_mode != "存在偏离" else 1, horizontal=True, key=f"{key_prefix}_fixed_mode", disabled=editable_labels is not None and "固定参数执行情况" not in editable_labels)
         if fixed_mode == "存在偏离":
             st.warning("仅修改实际发生偏离的参数，并在异常与偏离说明中记录原因。")
             cols = st.columns(3)
             for index, field in enumerate(fixed_fields):
                 with cols[index % 3]:
-                    params[field["key"]] = _widget(field, params.get(field["key"]), f"{key_prefix}_fixed_edit_{field['key']}")
+                    params[field["key"]] = _widget(field, params.get(field["key"]), f"{key_prefix}_fixed_edit_{field['key']}", editable_labels is not None and field["label"] not in editable_labels)
 
     process_prefixes = ("iqi_gray_", "monitor_", "color_monitor_")
     process_manual = [field for field in other_manual if field["key"].startswith(process_prefixes)]
@@ -236,35 +238,35 @@ def render_parameters(kind: str, record: dict[str, Any], key_prefix: str) -> tup
             cols = st.columns(3)
             for index, field in enumerate(core_manual):
                 with cols[index % 3]:
-                    params[field["key"]] = _widget(field, params.get(field["key"]), f"{key_prefix}_manual_{field['key']}")
+                    params[field["key"]] = _widget(field, params.get(field["key"]), f"{key_prefix}_manual_{field['key']}", editable_labels is not None and field["label"] not in editable_labels)
     if process_manual:
         with st.expander("过程监测明细（按原始记录母版）", expanded=False):
             st.caption("母版要求的重复核查和过程监测集中在这里；正常状态已预设，只需填写本次实际读数与时间。")
             cols = st.columns(3)
             for index, field in enumerate(process_manual):
                 with cols[index % 3]:
-                    params[field["key"]] = _widget(field, params.get(field["key"]), f"{key_prefix}_process_{field['key']}")
+                    params[field["key"]] = _widget(field, params.get(field["key"]), f"{key_prefix}_process_{field['key']}", editable_labels is not None and field["label"] not in editable_labels)
     return params, fixed_mode
 
 
-def _render_row_field(kind: str, field: tuple[str, str, str], row: dict[str, Any], key_prefix: str):
+def _render_row_field(kind: str, field: tuple[str, str, str], row: dict[str, Any], key_prefix: str, disabled: bool = False):
     key, label, typ = field
     value = row.get(key)
     if typ == "calc":
         st.metric(label, value if value not in (None, "") else "—")
         return value
     if typ == "number":
-        return _number_input(label, value, f"{key_prefix}_{key}", key)
+        return _number_input(label, value, f"{key_prefix}_{key}", key, disabled=disabled)
     if typ.startswith("select:"):
         options = typ.split(":", 1)[1].split("|")
         selected = value if value in options else options[0]
-        return st.selectbox(label, options, index=options.index(selected), key=f"{key_prefix}_{key}")
+        return st.selectbox(label, options, index=options.index(selected), key=f"{key_prefix}_{key}", disabled=disabled)
     if key == "note":
-        return st.text_area(label, value=str(value or ""), key=f"{key_prefix}_{key}")
-    return st.text_input(label, value=str(value or ""), key=f"{key_prefix}_{key}")
+        return st.text_area(label, value=str(value or ""), key=f"{key_prefix}_{key}", disabled=disabled)
+    return st.text_input(label, value=str(value or ""), key=f"{key_prefix}_{key}", disabled=disabled)
 
 
-def render_sample_data(kind: str, record: dict[str, Any], key_prefix: str) -> list[dict[str, Any]]:
+def render_sample_data(kind: str, record: dict[str, Any], key_prefix: str, editable_labels: set[str] | None = None) -> list[dict[str, Any]]:
     st.subheader("原始测量数据")
     st.caption("按样品逐个填写。所有数值既可键盘直接输入，也可用＋/－按字段精度微调；平均值、计算结果和符合性会实时刷新。")
     rows = [dict(x) for x in record.get("rows") or []]
@@ -300,13 +302,13 @@ def render_sample_data(kind: str, record: dict[str, Any], key_prefix: str) -> li
                                 repeat_cols = st.columns(3)
                                 for field_index, field in enumerate(repeat_fields):
                                     with repeat_cols[field_index % 3]:
-                                        row[field[0]] = _render_row_field(kind, field, row, f"{key_prefix}_row_{row_index}")
+                                        row[field[0]] = _render_row_field(kind, field, row, f"{key_prefix}_row_{row_index}", editable_labels is not None and field[1] not in editable_labels)
                         row["_design_thickness"] = (record.get("parameters") or {}).get("design_thickness")
                     cols = st.columns(3)
                     abnormal = False
                     for field_index, field in enumerate(input_fields):
                         with cols[field_index % 3]:
-                            row[field[0]] = _render_row_field(kind, field, row, f"{key_prefix}_row_{row_index}")
+                            row[field[0]] = _render_row_field(kind, field, row, f"{key_prefix}_row_{row_index}", editable_labels is not None and field[1] not in editable_labels)
                         if str(row.get(field[0], "")) in {"异常", "有", "无效", "不符合", "不合格", "需复检", "超出适用范围", "无法判定"}:
                             abnormal = True
 
@@ -331,26 +333,27 @@ def render_sample_data(kind: str, record: dict[str, Any], key_prefix: str) -> li
                         elif conclusion:
                             st.info(f"实时判定：{conclusion}")
                     # Notes stay hidden for normal data and appear only when needed.
-                    if abnormal or st.checkbox("补充说明", value=bool(row.get("note")), key=f"{key_prefix}_row_note_toggle_{row_index}"):
-                        row["note"] = st.text_area("备注/异常说明", value=str(row.get("note", "")), key=f"{key_prefix}_row_note_{row_index}")
+                    note_locked=editable_labels is not None and "备注/异常说明" not in editable_labels
+                    if abnormal or st.checkbox("补充说明", value=bool(row.get("note")), key=f"{key_prefix}_row_note_toggle_{row_index}", disabled=note_locked):
+                        row["note"] = st.text_area("备注/异常说明", value=str(row.get("note", "")), key=f"{key_prefix}_row_note_{row_index}", disabled=note_locked)
                     output[row_index] = row
     return output
 
 
-def render_exception_and_summary(kind: str, record: dict[str, Any], key_prefix: str) -> dict[str, Any]:
+def render_exception_and_summary(kind: str, record: dict[str, Any], key_prefix: str, editable_labels: set[str] | None = None) -> dict[str, Any]:
     output = dict(record)
     st.subheader("异常与结果")
     status_options = ["正常完成", "存在异常"]
     status = output.get("overall_status", "正常完成")
-    output["overall_status"] = st.radio("实验完成状态", status_options, index=status_options.index(status) if status in status_options else 0, horizontal=True, key=f"{key_prefix}_overall_status")
+    output["overall_status"] = st.radio("实验完成状态", status_options, index=status_options.index(status) if status in status_options else 0, horizontal=True, key=f"{key_prefix}_overall_status", disabled=editable_labels is not None and "实验完成状态" not in editable_labels)
     has_exception = (
         output["overall_status"] == "存在异常"
         or output.get("fixed_parameter_mode") == "存在偏离"
     )
     if has_exception:
-        output["deviation"] = st.text_area("异常、偏离、影响评估及处理措施", value=str(output.get("deviation", "")), key=f"{key_prefix}_deviation")
+        output["deviation"] = st.text_area("异常、偏离、影响评估及处理措施", value=str(output.get("deviation", "")), key=f"{key_prefix}_deviation", disabled=editable_labels is not None and "异常、偏离、影响评估及处理措施" not in editable_labels)
         retest_options = ["否", "是"]
-        output["retest"] = st.radio("是否复测/重制", retest_options, index=1 if output.get("retest") == "是" else 0, horizontal=True, key=f"{key_prefix}_retest")
+        output["retest"] = st.radio("是否复测/重制", retest_options, index=1 if output.get("retest") == "是" else 0, horizontal=True, key=f"{key_prefix}_retest", disabled=editable_labels is not None and "是否复测/重制" not in editable_labels)
     else:
         output["deviation"] = "无"
         output["retest"] = "否"
@@ -447,6 +450,7 @@ def render_template_supplement(
     requirements: list[dict[str, Any]],
     existing: dict[str, Any],
     key_prefix: str,
+    editable_labels: set[str] | None = None,
 ) -> dict[str, str]:
     """Render remaining mother-template observations as compact process checks."""
     state_key=f"{key_prefix}_values"
@@ -481,6 +485,7 @@ def render_template_supplement(
                 f"本区正常项一键确认（{len(batch_values)}项）",
                 key=f"{key_prefix}_{section}_normal_batch",
                 use_container_width=True,
+                disabled=editable_labels is not None,
             ):
                 output.update(batch_values)
                 for field in fields:
@@ -529,6 +534,7 @@ def render_template_supplement(
                             "选择所有实际符合的项目",
                             choices,
                             key=widget_key,
+                            disabled=editable_labels is not None and label not in editable_labels,
                         )
                     else:
                         options=["请选择"]+choices
@@ -540,6 +546,7 @@ def render_template_supplement(
                             "选择实际记录值",
                             options,
                             key=widget_key,
+                            disabled=editable_labels is not None and label not in editable_labels,
                         )
                         selected=[] if choice=="请选择" else [choice]
                     needs_note=any(
@@ -554,6 +561,7 @@ def render_template_supplement(
                         note=st.text_input(
                             "补充说明",
                             key=note_key,
+                            disabled=editable_labels is not None and label not in editable_labels,
                         )
                     output[field_key]=_filled_checkbox_text(original,selected,note) if selected else ""
                 else:
@@ -565,6 +573,7 @@ def render_template_supplement(
                         "填写实际记录",
                         help="请按本次实验的实际情况填写。",
                         key=text_key,
+                        disabled=editable_labels is not None and label not in editable_labels,
                     )
                     output[field_key]=_compose_cell_text(original,raw) if raw.strip() else ""
                 st.divider()

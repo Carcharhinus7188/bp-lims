@@ -30,30 +30,70 @@ SIG_DIR=ROOT/"data"/"signatures";SIG_DIR.mkdir(parents=True,exist_ok=True)
 st.set_page_config(page_title="BPLab Trace",page_icon="🧪",layout="wide",initial_sidebar_state="expanded")
 st.markdown("""
 <style>
-:root{--navy:#12364a;--blue:#176b87;--cyan:#3aa6b9;--line:#d7e3ea;--bg:#f6f9fb}
-html,body,.stApp,[data-testid=stAppViewContainer]{background:var(--bg);color:#172a35}
-.block-container{max-width:1580px;padding-top:1rem;padding-bottom:4rem}
-[data-testid=stSidebar]{background:linear-gradient(180deg,#102f42,#174e66)}
-[data-testid=stSidebar] *{color:white}
-.hero{background:linear-gradient(135deg,#12364a,#176b87 65%,#3aa6b9);color:white;padding:24px 28px;border-radius:20px;margin-bottom:18px;box-shadow:0 14px 30px rgba(18,54,74,.2)}
-.card{background:white;border:1px solid var(--line);padding:16px;border-radius:14px;box-shadow:0 5px 16px rgba(18,54,74,.06)}
-.timeline{border-left:5px solid var(--blue);background:white;padding:12px 16px;margin:8px 0;border-radius:10px}
-.notice{background:#fff8e1;border:1px solid #ead99a;padding:12px;border-radius:10px}
-.stButton>button,.stDownloadButton>button{border-radius:10px;font-weight:700;min-height:42px}
-[data-testid=stMetric]{background:white;border:1px solid var(--line);padding:14px;border-radius:14px;box-shadow:0 5px 16px rgba(18,54,74,.05)}
-[data-baseweb=tab-list]{gap:8px;background:white;border:1px solid var(--line);padding:6px;border-radius:14px}
-[data-baseweb=tab]{border-radius:9px;padding:8px 14px}
-[data-baseweb=tab][aria-selected=true]{background:#e8f5f8;color:var(--navy)}
-[data-testid=stExpander]{background:white;border-color:var(--line);border-radius:12px}
-div[data-testid=stForm],div[data-testid=stVerticalBlockBorderWrapper]{border-color:var(--line)!important;border-radius:14px}
-input,textarea{border-radius:9px!important}
-[data-testid=stNumberInput] button{min-width:40px;min-height:40px;font-size:1.05rem}
+:root{
+  --lab-navy:#123047;--lab-blue:#176b87;--lab-cyan:#21a2b8;
+  --lab-ink:#182a35;--lab-muted:#60727d;--lab-line:#d8e2e8;
+  --lab-bg:#f3f6f8;--lab-panel:#ffffff;--lab-soft:#eaf3f6;
+}
+html,body,.stApp,[data-testid=stAppViewContainer]{
+  background:var(--lab-bg);color:var(--lab-ink);font-family:"Inter","PingFang SC","Microsoft YaHei",sans-serif;
+}
+.block-container{max-width:1480px;padding:1.25rem 2rem 4rem}
+[data-testid=stSidebar]{
+  background:#102c3d;border-right:1px solid #274657;min-width:275px;
+}
+[data-testid=stSidebar] h1,[data-testid=stSidebar] h2,[data-testid=stSidebar] h3,
+[data-testid=stSidebar] p,[data-testid=stSidebar] label{color:#eef7fa!important}
+[data-testid=stSidebar] [role=radiogroup]{gap:3px}
+[data-testid=stSidebar] [role=radio]{
+  background:transparent;border:1px solid transparent;border-radius:6px;
+  padding:9px 11px;margin:1px 0;transition:none;
+}
+[data-testid=stSidebar] [role=radio]:has(input:checked){
+  background:#1b5269;border-color:#34768f;
+}
+.lab-header{
+  background:var(--lab-panel);border:1px solid var(--lab-line);border-top:4px solid var(--lab-blue);
+  padding:19px 22px;margin-bottom:20px;box-shadow:0 2px 8px rgba(20,48,64,.05);
+}
+.lab-kicker{color:var(--lab-blue);font-size:.78rem;font-weight:800;letter-spacing:.14em;text-transform:uppercase}
+.lab-header h2{font-size:1.55rem;margin:.2rem 0;color:var(--lab-navy);font-weight:760}
+.lab-meta{color:var(--lab-muted);font-size:.84rem}
+.card,.timeline,[data-testid=stMetric],div[data-testid=stVerticalBlockBorderWrapper]{
+  background:var(--lab-panel);border:1px solid var(--lab-line)!important;border-radius:7px!important;
+  box-shadow:0 2px 7px rgba(20,48,64,.045);
+}
+.card{padding:16px}.timeline{border-left:4px solid var(--lab-blue)!important;padding:12px 15px;margin:8px 0}
+.notice{background:#fff9e9;border:1px solid #eadba6;padding:12px;border-radius:6px}
+[data-testid=stMetric]{padding:14px}
+.stButton>button,.stDownloadButton>button{
+  border-radius:5px;font-weight:700;min-height:40px;box-shadow:none;
+}
+.stButton>button[kind=primary]{background:var(--lab-blue);border-color:var(--lab-blue)}
+[data-baseweb=tab-list]{
+  gap:0;background:var(--lab-panel);border:1px solid var(--lab-line);padding:0;border-radius:6px;
+  overflow-x:auto;
+}
+[data-baseweb=tab]{border-radius:0;padding:10px 15px;border-right:1px solid var(--lab-line)}
+[data-baseweb=tab][aria-selected=true]{background:var(--lab-soft);color:var(--lab-navy);box-shadow:inset 0 -3px 0 var(--lab-blue)}
+[data-testid=stExpander]{background:var(--lab-panel);border-color:var(--lab-line);border-radius:6px}
+div[data-testid=stForm]{border-color:var(--lab-line)!important;border-radius:7px}
+input,textarea,[data-baseweb=select]>div{border-radius:4px!important}
+[data-testid=stNumberInput] button{min-width:38px;min-height:38px;font-size:1rem}
+hr{border-color:var(--lab-line)}
+.locked-field{border-left:3px solid #8fa3ad;background:#f4f6f7;padding:9px 12px;color:#536873;margin:6px 0}
+@media(max-width:900px){.block-container{padding:1rem .8rem 3rem}[data-testid=stSidebar]{min-width:245px}}
 </style>
 """,unsafe_allow_html=True)
 
 
 def header(title:str):
-    st.markdown(f'<div class="hero"><h2>{COMPANY_CN}</h2><div>{COMPANY_EN}</div><h3>{title}</h3><small>{APP_VERSION}｜中国大陆时区 {TIMEZONE_NAME}（UTC+8）</small></div>',unsafe_allow_html=True)
+    st.markdown(
+        f'<section class="lab-header"><div class="lab-kicker">BPLAB · CONTROLLED WORKSPACE</div>'
+        f'<h2>{title}</h2><div class="lab-meta">{COMPANY_CN} · {COMPANY_EN}　|　'
+        f'{APP_VERSION}　|　{TIMEZONE_NAME}（UTC+8）</div></section>',
+        unsafe_allow_html=True,
+    )
 
 
 def show_df(data,columns=None):
@@ -111,7 +151,7 @@ def quality_evidence_choices(commission_no,selected_task_nos):
     return list(dict.fromkeys(photo_options)),list(dict.fromkeys(record_options)),other_options
 
 
-def review_correction_field_options(kind, business):
+def review_correction_field_options(kind, business, template_name="", template_fields=None):
     """Return reviewer-facing Chinese field labels grouped by experiment step."""
     definition=SCHEMAS.get(kind) or SCHEMAS["generic"]
     options=[
@@ -132,14 +172,21 @@ def review_correction_field_options(kind, business):
         value=f"④原始测量数据｜{label}"
         if value not in seen:
             options.append(value);seen.add(value)
+    for item in template_supplement_requirements(
+        template_name,
+        template_fields or {},
+    ):
+        value=f"⑤母版过程确认｜{item.get('label') or item.get('position') or item.get('key')}"
+        if value not in seen:
+            options.append(value);seen.add(value)
     options.extend([
-        "⑤异常与设备文件｜实验完成状态",
-        "⑤异常与设备文件｜异常、偏离、影响评估及处理措施",
-        "⑤异常与设备文件｜是否复测/重制",
-        "⑤异常与设备文件｜结果摘要或单项结论",
-        "⑤异常与设备文件｜照片留档",
-        "⑤异常与设备文件｜设备原始文件",
-        "⑥保存提交｜实验员自查确认或修改原因",
+        "⑥异常与设备文件｜实验完成状态",
+        "⑥异常与设备文件｜异常、偏离、影响评估及处理措施",
+        "⑥异常与设备文件｜是否复测/重制",
+        "⑥异常与设备文件｜结果摘要或单项结论",
+        "⑥异常与设备文件｜照片留档",
+        "⑥异常与设备文件｜设备原始文件",
+        "⑦保存提交｜实验员自查确认或修改原因",
     ])
     return options
 
@@ -147,7 +194,17 @@ def review_correction_field_options(kind, business):
 def returned_fields(review_row):
     try:
         value=json.loads((review_row or {}).get("correction_fields") or "[]")
-        return value if isinstance(value,list) else []
+        if not isinstance(value,list):
+            return []
+        migrated=[]
+        for item in value:
+            text=str(item)
+            if text.startswith("⑤异常与设备文件"):
+                text="⑥"+text[1:]
+            elif text.startswith("⑥保存提交"):
+                text="⑦"+text[1:]
+            migrated.append(text)
+        return migrated
     except (TypeError,json.JSONDecodeError):
         return []
 
@@ -158,7 +215,7 @@ def focus_returned_step(fields, focus_key):
         return
     first=str(fields[0])
     step=next(
-        (index for index,marker in enumerate(("①","②","③","④","⑤","⑥"),1) if first.startswith(marker)),
+        (index for index,marker in enumerate(("①","②","③","④","⑤","⑥","⑦"),1) if first.startswith(marker)),
         1,
     )
     components.html(
@@ -173,6 +230,87 @@ def focus_returned_step(fields, focus_key):
         height=0,
     )
     st.session_state[focus_key]=True
+
+
+def returned_step_labels(fields, marker):
+    """Labels the reviewer explicitly allowed for one second-edit step."""
+    return {
+        str(item).split("｜",1)[1]
+        for item in fields or []
+        if str(item).startswith(marker+"") and "｜" in str(item)
+    }
+
+
+def enforce_secondary_edit_scope(payload, prior, correction_fields, kind, supplement_requirements):
+    """Server-side guard: keep every non-returned business field byte-for-byte."""
+    if not prior:
+        return payload
+    base=json.loads(json.dumps(prior,ensure_ascii=False))
+    incoming=json.loads(json.dumps(payload,ensure_ascii=False))
+    old_business=base.get("business_record") or {}
+    new_business=incoming.get("business_record") or {}
+    merged=json.loads(json.dumps(old_business,ensure_ascii=False))
+    labels_by_step={marker:returned_step_labels(correction_fields,marker) for marker in ("①","②","③","④","⑤","⑥","⑦")}
+    if labels_by_step["①"]:
+        merged["task_confirmations"]=new_business.get("task_confirmations")
+    if labels_by_step["②"]:
+        for key in ("equipment_checks","prechecks","precheck_note"):
+            merged[key]=new_business.get(key)
+    definition=SCHEMAS.get(kind) or SCHEMAS["generic"]
+    parameter_keys={
+        field.get("label"):field.get("key")
+        for section in definition.get("sections",[])
+        for field in section.get("fields",[])
+    }
+    for label in labels_by_step["③"]:
+        key=parameter_keys.get(label)
+        if key:
+            merged.setdefault("parameters",{})[key]=(new_business.get("parameters") or {}).get(key)
+    row_keys={label:key for key,label,_typ in definition.get("columns",[])}
+    allowed_row_keys={row_keys[label] for label in labels_by_step["④"] if label in row_keys}
+    if allowed_row_keys:
+        old_rows=merged.get("rows") or []
+        new_rows=new_business.get("rows") or []
+        for index,old_row in enumerate(old_rows):
+            if index>=len(new_rows):continue
+            for key in allowed_row_keys:
+                old_row[key]=new_rows[index].get(key)
+    exception_map={
+        "实验完成状态":"overall_status",
+        "异常、偏离、影响评估及处理措施":"deviation",
+        "是否复测/重制":"retest",
+        "结果摘要或单项结论":"report_summary",
+    }
+    for label,key in exception_map.items():
+        if label in labels_by_step["⑥"]:
+            merged[key]=new_business.get(key)
+            if label=="结果摘要或单项结论":
+                merged["report_conclusion"]=new_business.get("report_conclusion")
+    incoming["business_record"]=calculate_business_record(kind,merged)
+    old_supplement=base.get("template_supplement") or {}
+    new_supplement=incoming.get("template_supplement") or {}
+    allowed_supplement={
+        item.get("key") for item in supplement_requirements
+        if (item.get("label") or item.get("position") or item.get("key")) in labels_by_step["⑤"]
+    }
+    incoming["template_supplement"]={
+        key:(new_supplement.get(key) if key in allowed_supplement else value)
+        for key,value in old_supplement.items()
+    }
+    for key in allowed_supplement:
+        incoming["template_supplement"][key]=new_supplement.get(key)
+    if "实验员自查确认或修改原因" not in labels_by_step["⑦"]:
+        incoming["tester_self_check"]=base.get("tester_self_check",True)
+    incoming["photo_attachment_ids"]=(
+        incoming.get("photo_attachment_ids")
+        if "照片留档" in labels_by_step["⑥"]
+        else base.get("photo_attachment_ids",[])
+    )
+    incoming["deviation"]=incoming["business_record"].get("deviation","")
+    incoming["retest"]=incoming["business_record"].get("retest","否")
+    incoming["report_summary"]=incoming["business_record"].get("report_summary","")
+    incoming["report_conclusion"]=incoming["business_record"].get("report_conclusion","")
+    return incoming
 
 
 def increment_base(base,n):
@@ -449,7 +587,7 @@ if "user" not in st.session_state:
             u=authenticate(username,password)
             if u:st.session_state.user=u;st.query_params["session"]=create_session(username);st.rerun()
             else:st.error("用户名或密码错误")
-        st.caption("管理员 admin/admin123｜样品管理员 receiver/receive123｜实验员 tester/test123｜复核员 reviewer/review123｜质量检测员 quality/quality123")
+        st.caption("管理员 admin/admin123｜样品管理员 receiver/receive123｜实验员 tester/test123｜复核员 reviewer/review123｜质量负责人 quality/quality123")
     st.stop()
 
 user=st.session_state.user;role=user["role"];username=user["username"]
@@ -460,7 +598,11 @@ if goto_page in ROLE_MENUS[role]:
     st.session_state["main_navigation"]=goto_page
     del st.query_params["goto"]
 with st.sidebar:
-    st.title("BPLab Trace");st.write(user["display_name"]);st.caption(role)
+    st.markdown("## BPLAB")
+    st.caption("LABORATORY CONTROL SYSTEM")
+    st.markdown(f"**{user['display_name']}**")
+    st.caption(f"{role} · 受控工作台")
+    st.divider()
     page=st.radio("导航",ROLE_MENUS[role],label_visibility="collapsed",key="main_navigation")
     st.divider();st.caption("系统时间：中国大陆 UTC+8")
     if st.button("退出登录",use_container_width=True,key="logout_button"):delete_session(st.query_params.get("session",""));st.session_state.clear();st.query_params.clear();st.rerun()
@@ -749,7 +891,7 @@ elif page=="任务包分配":
         st.caption("检测项目已在收样入库阶段确定。本任务包自动包含该样品组全部待分配实验，收样员无需再次选择。")
         testers=role_users("实验员")
         assignee=st.selectbox("选择实验员",[x["username"] for x in testers],format_func=display_user)
-        st.info("复核员和质量检测员由系统按授权有效性、人员独立性和当前工作量自动匹配。")
+        st.info("复核员和质量负责人由系统按授权有效性、人员独立性和当前工作量自动匹配。")
         if st.button("下发任务包并提醒实验员",type="primary"):
             try:
                 package_no=create_task_package(gid,experiment_codes,assignee,username)
@@ -893,6 +1035,18 @@ elif page=="实验记录":
         if start_at:business["parameters"]["test_date"]=str(start_at)[:10]
         all_checkpoints=photo_checkpoints(t["experiment"])
         checkpoint_groups=[all_checkpoints[index::4] for index in range(4)]
+        secondary_edit=bool(version>1 and latest and latest.get("status")!="已锁定")
+        step1_labels=returned_step_labels(correction_fields,"①") if secondary_edit else None
+        step2_labels=returned_step_labels(correction_fields,"②") if secondary_edit else None
+        step3_labels=returned_step_labels(correction_fields,"③") if secondary_edit else None
+        step4_labels=returned_step_labels(correction_fields,"④") if secondary_edit else None
+        step5_labels=returned_step_labels(correction_fields,"⑤") if secondary_edit else None
+        step6_labels=returned_step_labels(correction_fields,"⑥") if secondary_edit else None
+        step7_labels=returned_step_labels(correction_fields,"⑦") if secondary_edit else None
+        photo_edit_allowed=not secondary_edit or "照片留档" in (step6_labels or set())
+        device_file_edit_allowed=not secondary_edit or "设备原始文件" in (step6_labels or set())
+        if secondary_edit:
+            st.info("二次编辑采用字段级锁定：只有复核员指定退回的字段可修改，其余数据仅供查看。")
         tabs=st.tabs([
             "①任务确认","②设备与实验前检查","③环境与参数","④原始数据",
             "⑤母版过程确认","⑥异常与设备文件","⑦保存提交",
@@ -901,18 +1055,22 @@ elif page=="实验记录":
             focus_returned_step(correction_fields,f"returned_focus_{tn}_{version}")
         with tabs[0]:
             render_readonly_summary(t,group0,commission0,package0,config_snapshot)
-            business["task_confirmations"]=render_task_confirmations(business,key_prefix)
-            render_inline_camera(t,sample_ids,checkpoint_groups[0],username,user["display_name"],key_prefix,"任务确认阶段照片")
+            business["task_confirmations"]=render_task_confirmations(business,key_prefix,not secondary_edit or bool(step1_labels))
+            if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[0],username,user["display_name"],key_prefix,"任务确认阶段照片")
+            elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
         with tabs[1]:
-            business["equipment_checks"]=render_equipment_confirmation(bound_devices,business.get("equipment_checks") or [],key_prefix)
-            business["prechecks"],business["precheck_note"]=render_prechecks(kind,business,key_prefix)
-            render_inline_camera(t,sample_ids,checkpoint_groups[1],username,user["display_name"],key_prefix,"设备与实验前检查照片")
+            business["equipment_checks"]=render_equipment_confirmation(bound_devices,business.get("equipment_checks") or [],key_prefix,not secondary_edit or bool(step2_labels))
+            business["prechecks"],business["precheck_note"]=render_prechecks(kind,business,key_prefix,not secondary_edit or bool(step2_labels))
+            if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[1],username,user["display_name"],key_prefix,"设备与实验前检查照片")
+            elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
         with tabs[2]:
-            business["parameters"],business["fixed_parameter_mode"]=render_parameters(kind,business,key_prefix)
-            render_inline_camera(t,sample_ids,checkpoint_groups[2],username,user["display_name"],key_prefix,"环境与参数照片")
+            business["parameters"],business["fixed_parameter_mode"]=render_parameters(kind,business,key_prefix,step3_labels)
+            if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[2],username,user["display_name"],key_prefix,"环境与参数照片")
+            elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
         with tabs[3]:
-            business["rows"]=render_sample_data(kind,business,key_prefix)
-            render_inline_camera(t,sample_ids,checkpoint_groups[3],username,user["display_name"],key_prefix,"检测数据与结果照片")
+            business["rows"]=render_sample_data(kind,business,key_prefix,step4_labels)
+            if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[3],username,user["display_name"],key_prefix,"检测数据与结果照片")
+            elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
         with tabs[4]:
             business=calculate_business_record(kind,business)
             context["test_date"]=(business.get("parameters") or {}).get("test_date") or context["test_date"]
@@ -933,9 +1091,10 @@ elif page=="实验记录":
                 process_requirements,
                 prior.get("template_supplement") or {},
                 f"{key_prefix}_template_supplement",
+                step5_labels,
             )
         with tabs[5]:
-            business=render_exception_and_summary(kind,business,key_prefix)
+            business=render_exception_and_summary(kind,business,key_prefix,step6_labels)
             photo_rows=camera_checkpoint_status(tn,all_checkpoints)
             show_df(photo_rows,["checkpoint_label","required","complete","photo_count","captured_at"])
             incomplete=[x for x in photo_rows if x["required"] and not x["complete"]]
@@ -948,13 +1107,14 @@ elif page=="实验记录":
             st.caption("这里只允许上传设备导出的原始数据、曲线或校准文件；图片和截图必须通过上面的现场相机取得。")
             attachments=list_attachments(task_no=tn)
             show_df(attachments,["attachment_id","checkpoint_label","capture_source","evidence_status","sample_no","attachment_type","original_name","sha256","server_captured_at","uploader"])
-            atype=st.selectbox("原始文件类型",ATTACHMENT_TYPES,key=f"{key_prefix}_atype")
-            sample_no=st.selectbox("文件关联样品编号",[""]+sample_ids,key=f"{key_prefix}_attach_sample")
-            description=st.text_area("原始文件内容说明",key=f"{key_prefix}_attach_desc")
+            atype=st.selectbox("原始文件类型",ATTACHMENT_TYPES,key=f"{key_prefix}_atype",disabled=not device_file_edit_allowed)
+            sample_no=st.selectbox("文件关联样品编号",[""]+sample_ids,key=f"{key_prefix}_attach_sample",disabled=not device_file_edit_allowed)
+            description=st.text_area("原始文件内容说明",key=f"{key_prefix}_attach_desc",disabled=not device_file_edit_allowed)
             files=st.file_uploader(
                 "上传设备原始文件",
                 type=["csv","xlsx","xls","pdf","txt","dat","xml","json","zip"],
                 accept_multiple_files=True,key=f"{key_prefix}_files",
+                disabled=not device_file_edit_allowed,
             )
             if files and st.button("保存设备原始文件",key=f"{key_prefix}_save_attach"):
                 for f in files:
@@ -990,6 +1150,7 @@ elif page=="实验记录":
                 "我已完成实验员自查：样品、设备、环境、原始数据、计算结果、照片和异常记录均已核对",
                 value=bool(prior.get("tester_self_check",False)),
                 key=f"{key_prefix}_tester_self_check",
+                disabled=secondary_edit and "实验员自查确认或修改原因" not in (step7_labels or set()),
             )
             reason=st.text_area("修改原因（首次记录可不填）",latest.get("change_reason","") if latest else "",key=f"{key_prefix}_reason")
             tm_version=config_snapshot.get("record_template_version","") or "A/0"
@@ -1013,6 +1174,10 @@ elif page=="实验记录":
                     and item.get("evidence_status")=="有效"
                 ],
             }
+            if secondary_edit:
+                payload=enforce_secondary_edit_scope(
+                    payload,prior,correction_fields,kind,supplement_requirements,
+                )
             a,b=st.columns(2)
             if a.button("同步当前记录并检查",use_container_width=True,key=f"{key_prefix}_draft"):
                 save_record(tn,version,payload,username,"草稿",tm_version,sm_version,reason,compare)
@@ -1086,7 +1251,9 @@ elif page=="原始记录复核":
         st.info("原始记录由实验员提交并完成自查，复核员通过后立即锁定并开放正式文件下载。")
         st.subheader("附件索引（独立追溯）");show_df(list_attachments(task_no=rn),["attachment_id","attachment_type","original_name","sha256","description"])
         comment=st.text_area("复核意见")
-        correction_options=review_correction_field_options(kind,business)
+        correction_options=review_correction_field_options(
+            kind,business,template_name,r["payload"].get("template_fields") or {},
+        )
         correction_fields=st.multiselect(
             "退回时指定需要修改的字段",
             correction_options,
@@ -1218,7 +1385,7 @@ elif page=="一键下载":
         query+=" AND assignee=?";args.append(username)
     elif role=="复核员":
         query+=" AND reviewer=?";args.append(username)
-    elif role=="质量检测员":
+    elif role=="质量负责人":
         query+=" AND quality_inspector=?";args.append(username)
     task_rows=rows(query+" ORDER BY updated_at DESC",args)
     show_df(task_rows,["task_no","commission_no","experiment","status","assignee","reviewer","quality_inspector","updated_at"])
@@ -1536,7 +1703,7 @@ elif page=="报告中心":
             report_docx,
         )
         show_report_photo_preview(r["task_no"])
-        if r["status"]=="待质量审核" and role=="质量检测员" and username==r["quality_inspector"]:
+        if r["status"]=="待质量审核" and role=="质量负责人" and username==r["quality_inspector"]:
             st.info("质量负责人仅对报告进行预览确认，不形成电子签字。")
             comment=st.text_area("质量预览确认意见");a,b=st.columns(2)
             if a.button("预览确认通过",type="primary"):
@@ -1711,7 +1878,7 @@ elif page=="客户异议":
         commission_row=commission(obj["commission_no"]) or {}
         st.download_button("下载客户异议申请表",objection_application_document(obj,report_row,commission_row),f"{objection_no}_客户异议申请表.docx",use_container_width=True)
         show_df(objection_actions(objection_no),["created_at","actor","action","comment"])
-        if role=="质量检测员" and obj["status"]=="调查中" and obj["quality_inspector"]==username:
+        if role=="质量负责人" and obj["status"]=="调查中" and obj["quality_inspector"]==username:
             st.subheader("质量调查工作台")
             st.download_button("下载异议调查追溯Excel",build_internal_trace_workbook(obj["commission_no"]),f"{objection_no}_异议调查追溯表.xlsx",use_container_width=True)
             related={obj["commission_no"],obj["report_no"],objection_no}

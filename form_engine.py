@@ -768,12 +768,25 @@ def report_document(c,groups,samples,tasks,records,report,user_names,signatures)
         standards="；".join(dict.fromkeys(item["standard"] for item in report_items if item["standard"]))
         _set_cell_existing(d.tables[2].rows[0].cells[2],standards)
         _fill_existing_rows(d.tables[2],result_rows,2)
-    for label,field,signed in [("批 准 人","approver","approver_signed_at"),("核 验 员","verifier","verifier_signed_at"),("检 测 员","tester","tester_signed_at")]:
-        u=report.get(field)
+    source_records=[item for item in records.values() if item]
+    record_tester_signed=max(
+        (str(item.get("tester_signed_at") or "") for item in source_records),default="",
+    )
+    record_reviewer_signed=max(
+        (str(item.get("reviewer_signed_at") or "") for item in source_records),default="",
+    )
+    signature_rows=[
+        ("批 准 人",report.get("approver"),report.get("approver_signed_at")),
+        # 报告首页的“核验员”就是原始记录复核员。
+        ("核 验 员",report.get("verifier"),report.get("verifier_signed_at") or record_reviewer_signed),
+        # 报告首页的“检测员”就是执行该实验的实验员。
+        ("检 测 员",report.get("tester"),report.get("tester_signed_at") or record_tester_signed),
+    ]
+    for label,u,signed_value in signature_rows:
         for p in d.paragraphs:
             if p.text.strip().startswith(label):
-                signed_date=str(report.get(signed) or "")[:10]
-                if report.get(signed):
+                signed_date=str(signed_value or "")[:10]
+                if signed_value and u:
                     _set_signature_paragraph(
                         p,u,signed_date,label=f"{label}    ",width=.92,
                     )

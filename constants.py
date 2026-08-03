@@ -5,7 +5,7 @@ COMPANY_CN = "大连标普检测有限公司"
 COMPANY_EN = "DALIAN BIAOPU TESTING CO., LTD."
 SYSTEM_CN = "大连标普实验室样品全过程追溯系统"
 SYSTEM_EN = "BPLab Sample Lifecycle Tracking System"
-APP_VERSION = "BPLab Trace V8.8 全角色手写签名与Word预览版"
+APP_VERSION = "BPLab Trace V9.0 实验室工作台版"
 TIMEZONE_NAME = "Asia/Shanghai"
 
 STORAGE_AREAS = ["A区域", "B区域"]
@@ -220,13 +220,12 @@ def experiment_display(experiment_name: str) -> str:
     method = cfg.get("method", "")
     return f"{experiment_name}｜{method}" if method else experiment_name
 
-ROLES = ["管理员", "样品管理员", "实验员", "复核员", "质量检测员"]
+ROLES = ["管理员", "样品管理员", "实验员", "复核员", "质量负责人"]
 
 ROLE_MENUS = {
     "管理员": [
         "首页看板", "单位信息库", "检测项目与方法库", "样品资料库",
         "委托与样品管理", "附件与内部追溯", "一键下载", "单据中心", "报告中心",
-        "Word单据预览",
         "客户异议", "报告发放登记", "修改中心", "修改日志", "SOP与模板版本",
         "实验配置版本", "设备库", "电子签名", "用户与权限", "审计追踪",
     ],
@@ -234,21 +233,17 @@ ROLE_MENUS = {
         "首页看板", "单位信息库", "样品资料库", "新建委托与入库",
         "委托与样品管理", "任务包分配", "回库确认",
         "附件与内部追溯", "一键下载", "单据中心", "报告发放登记", "客户异议",
-        "Word单据预览",
     ],
     "实验员": [
         "首页看板", "我的任务包", "实验记录", "样品归还",
         "危废处理", "附件与内部追溯", "一键下载", "单据中心", "修改中心", "修改日志",
-        "Word单据预览",
     ],
     "复核员": [
         "首页看板", "原始记录复核", "附件与内部追溯",
         "一键下载", "单据中心", "修改中心", "修改日志",
-        "Word单据预览",
     ],
-    "质量检测员": [
+    "质量负责人": [
         "首页看板", "报告中心", "客户异议", "附件与内部追溯",
         "一键下载", "单据中心", "修改中心", "修改日志",
-        "Word单据预览",
     ],
 }
