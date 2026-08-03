@@ -5,6 +5,7 @@ from pathlib import Path
 import csv, hashlib, io, json, re, uuid, zipfile
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from constants import *
 from lims_db import *
@@ -19,7 +20,8 @@ from report_rules import overall_conclusion, report_item
 from trace_excel_engine import build_internal_trace_workbook
 from camera_evidence import save_live_camera_photo
 from pdf_preview import build_preview_pdf, pdf_page_images
-from quick_demo import create_full_document_demo
+from docx_preview import docx_review_html
+from quick_demo import create_pending_review_demo
 
 ROOT=Path(__file__).parent
 TEMPLATE_DIR=ROOT/"templates"
@@ -243,7 +245,12 @@ def show_pdf_preview(title, sections):
 
 def show_controlled_docx_review(title, docx_content):
     st.markdown("#### 受控 DOCX 审核文件")
-    st.caption("当前暂时停用PDF转换。此文件与复核通过后进入单据中心的DOCX为同一受控模板输出。")
+    st.caption("下方阅读器直接解析受控DOCX，不经过PDF转换；复核通过后单据中心使用同一DOCX数据。")
+    components.html(
+        docx_review_html(docx_content,title),
+        height=920,
+        scrolling=True,
+    )
     st.download_button(
         "打开审核用DOCX",
         docx_content,
@@ -356,6 +363,15 @@ if pending_notices:
 
 if page=="首页看板":
     header("委托、样品、任务包和报告状态看板");counts=dashboard_counts();cols=st.columns(7)
+    if role=="管理员":
+        st.info("临时测试入口：生成一个已经完成实验并提交、正在等待复核员审核的表面粗糙度任务。")
+        if st.button("生成待复核实验Demo",type="primary",key="create_pending_review_demo_home"):
+            try:
+                demo=create_pending_review_demo()
+                st.success(f"已生成：{demo['commission_no']}｜{demo['task_no']}。请使用 reviewer / review123 登录查看复核预览。")
+                st.rerun()
+            except Exception as error:
+                st.error("生成演示数据失败："+str(error))
     metrics=[("委托",counts["commissions"]),("在册样品",counts["samples"]),("待接收任务包",counts["packages"]),("检测中",counts["testing"]),("待复核",counts["reviews"]),("待回库",counts["returns"]),("待发布报告",counts["reports"])]
     for col,(label,value) in zip(cols,metrics):col.metric(label,value)
     show_df(list_samples(),["sample_no","commission_no","group_no","sample_name","model","material_name","status","current_location","current_holder","updated_at"])
@@ -924,12 +940,12 @@ elif page=="一键下载":
 elif page=="单据中心":
     header("检验委托单、样品登记、领用归还、原始记录和检验报告")
     if role=="管理员":
-        st.info("临时演示工具：一次生成全部十种实验、完整设备快照、已锁定原始记录和已签发报告。")
-        if st.button("生成完整单据演示并直接查看",type="primary",key="create_full_document_demo"):
+        st.info("临时演示工具：生成一个样品已入库、实验已完成、正在等待复核的任务。委托单和样品表可立即下载，原始记录复核通过前不会进入单据中心。")
+        if st.button("生成待复核实验Demo并查看委托单",type="primary",key="create_pending_review_demo_documents"):
             try:
-                demo_commission=create_full_document_demo()
-                st.session_state["document_commission_no"]=demo_commission
-                st.toast("完整演示单据已生成")
+                demo=create_pending_review_demo()
+                st.session_state["document_commission_no"]=demo["commission_no"]
+                st.toast("待复核演示任务已生成")
                 st.rerun()
             except Exception as error:
                 st.error("生成演示数据失败："+str(error))
