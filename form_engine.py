@@ -52,6 +52,62 @@ def group_range(g):
     return f"{g['group_no']}-S01" if q==1 else f"{g['group_no']}-S01～{g['group_no']}-S{q:02d}"
 
 
+def report_delivery_document(report_no: str, delivery_rows: list[dict[str, Any]]):
+    d=Document()
+    title=d.add_paragraph()
+    title.alignment=1
+    run=title.add_run("检验报告发放登记表")
+    run.bold=True;run.font.size=Pt(16)
+    d.add_paragraph(f"报告编号：{report_no}")
+    table=d.add_table(rows=1,cols=8)
+    table.style="Table Grid"
+    headers=["序号","客户名称","发放方式","接收人","联系方式","发放时间","签收状态","操作人/备注"]
+    for index,label in enumerate(headers):
+        table.rows[0].cells[index].text=label
+    for index,item in enumerate(delivery_rows,1):
+        cells=table.add_row().cells
+        values=[
+            index,item.get("client_name",""),item.get("delivery_method",""),
+            item.get("recipient",""),item.get("recipient_contact",""),
+            item.get("delivered_at",""),item.get("receipt_status",""),
+            f"{item.get('operator','')} / {item.get('receipt_note','')}",
+        ]
+        for column,value in enumerate(values):
+            cells[column].text=str(value)
+    d.add_paragraph("本表由系统依据报告发放记录自动生成。")
+    return _save(d)
+
+
+def hazardous_waste_document(item: dict[str, Any]):
+    d=Document()
+    title=d.add_paragraph()
+    title.alignment=1
+    run=title.add_run("实验废液及废弃样品分类处置登记表")
+    run.bold=True;run.font.size=Pt(16)
+    fields=[
+        ("处置编号",item.get("disposal_no","")),
+        ("委托编号",item.get("commission_no","")),
+        ("关联实验任务","、".join(json.loads(item.get("task_nos") or "[]"))),
+        ("废物类型",item.get("waste_type","")),
+        ("废物名称",item.get("waste_name","")),
+        ("数量",f"{item.get('quantity','')} {item.get('unit','')}"),
+        ("危废类别/特性",item.get("hazard_category","")),
+        ("分类处置方式",item.get("disposal_method","")),
+        ("收集容器编号",item.get("container_no","")),
+        ("经办人",item.get("handler","")),
+        ("处置时间",item.get("occurred_at","")),
+        ("状态",item.get("status","")),
+        ("备注",item.get("note","")),
+    ]
+    table=d.add_table(rows=0,cols=2)
+    table.style="Table Grid"
+    for label,value in fields:
+        cells=table.add_row().cells
+        cells[0].text=label;cells[1].text=str(value or "")
+    d.add_paragraph("本表由系统依据危废处置记录自动生成，修改痕迹进入审计日志。")
+    return _save(d)
+
+
 def commission_document(c,groups,tests,receiver_name):
     d=Document(TEMPLATE_DIR/"FORM_COMMISSION.docx")
     methods=json.loads(c.get("method_choices") or "[]")

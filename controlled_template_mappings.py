@@ -28,15 +28,15 @@ def _box(original: str, selected: Any) -> str:
     options = [x.strip() for x in re.split(r"[□☐☑]", result)[1:] if x.strip()]
     for option in options:
         clean = re.sub(r"[_＿…]+.*$", "", option).strip(" ：:；;，,")
-        if any(
-            choice
-            and (
-                choice == clean
-                or (len(choice) > 1 and choice in clean)
-                or (len(clean) > 1 and clean in choice)
-            )
-            for choice in choices
-        ):
+        def matches(choice: str) -> bool:
+            choice = choice.strip()
+            if choice == clean:
+                return True
+            for word in ("符合", "合格", "正常", "有效", "通过"):
+                if word in choice and word in clean and (("不" + word) in choice) != (("不" + word) in clean):
+                    return False
+            return len(choice) > 1 and len(clean) > 1 and (choice in clean or clean in choice)
+        if any(choice and matches(choice) for choice in choices):
             result = re.sub(r"□\s*" + re.escape(clean), lambda m: "☑" + m.group(0)[1:], result, count=1)
     return result
 

@@ -293,7 +293,7 @@ CREATE TABLE IF NOT EXISTS notifications(
   read_at TEXT, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS hazardous_waste_records(
-  disposal_no TEXT PRIMARY KEY, commission_no TEXT, task_no TEXT, sample_no TEXT,
+  disposal_no TEXT PRIMARY KEY, commission_no TEXT, task_no TEXT, task_nos TEXT DEFAULT '[]', sample_no TEXT,
   waste_type TEXT NOT NULL, waste_name TEXT NOT NULL, quantity REAL NOT NULL, unit TEXT,
   hazard_category TEXT, disposal_method TEXT NOT NULL, container_no TEXT,
   handler TEXT NOT NULL, occurred_at TEXT NOT NULL, status TEXT DEFAULT '已登记',
@@ -344,6 +344,9 @@ CREATE TABLE IF NOT EXISTS hazardous_waste_records(
         for column_name in ("process", "material_suffix", "source_sequence"):
             if column_name not in catalog_columns:
                 c.execute(f"ALTER TABLE sample_catalog ADD COLUMN {column_name} TEXT")
+        waste_columns = {item[1] for item in c.execute("PRAGMA table_info(hazardous_waste_records)").fetchall()}
+        if "task_nos" not in waste_columns:
+            c.execute("ALTER TABLE hazardous_waste_records ADD COLUMN task_nos TEXT DEFAULT '[]'")
         audit_columns = {item[1] for item in c.execute("PRAGMA table_info(audit_logs)").fetchall()}
         for column_name, column_type in (
             ("actor_name", "TEXT"), ("actor_role", "TEXT"), ("client_time", "TEXT"),
@@ -359,6 +362,18 @@ CREATE TABLE IF NOT EXISTS hazardous_waste_records(
         c.execute("UPDATE users SET role='实验员' WHERE role='实验人员'")
         c.execute("UPDATE users SET role='复核员' WHERE role='复核实验员'")
         c.execute("UPDATE users SET role='管理员' WHERE role='批准人'")
+        # V7.1 approval simplification: reviewer approval now locks the raw record;
+        # quality only previews the report and does not sign it.
+        c.execute("UPDATE records SET status='已锁定' WHERE status='待质量确认'")
+        c.execute(
+            """UPDATE tasks SET status='已复核'
+               WHERE status='待质量确认'
+               AND EXISTS(
+                 SELECT 1 FROM records r
+                 WHERE r.task_no=tasks.task_no AND r.status='已锁定'
+               )"""
+        )
+        c.execute("UPDATE reports SET status='待质量审核' WHERE status='待复核员审核'")
         demo_users = [
             ("admin", "系统管理员", "admin123", "管理员"),
             ("receiver", "样品管理员王工", "receive123", "样品管理员"),
@@ -1780,6 +1795,10 @@ def save_record(task_no: str, version: int, payload: dict[str, Any], owner: str,
         raise ValueError("任务不存在")
     if "待复核" in status:
         from constants import photo_checkpoints
+        if not bool(payload.get("tester_self_check")):
+            raise ValueError("实验员必须完成提交前自查确认")
+        if not t.get("experiment_started_at") or not t.get("experiment_ended_at"):
+            raise ValueError("请先在实验记录顶部完成实验开始和结束时间记录")
         if not mandatory_camera_complete(task_no, photo_checkpoints(t["experiment"])):
             raise ValueError("强制现场照片尚未完成，不能提交复核")
     ts = now()
@@ -1841,7 +1860,7 @@ def review_record(record_no: str, version: int, reviewer: str, decision: str, co
     if t and t["reviewer"] != reviewer:
         raise ValueError("当前人员不是该任务的复核人")
     ts = now()
-    status = "待质量确认" if decision == "通过" else "退回修改"
+    status = "已锁定" if decision == "通过" else "退回修改"
     with connect() as c:
         c.execute(
             """UPDATE records SET status=?,reviewer_signed_at=?,updated_at=?
@@ -1849,14 +1868,12 @@ def review_record(record_no: str, version: int, reviewer: str, decision: str, co
             (status, ts if decision == "通过" else None, ts, record_no, version),
         )
         c.execute("INSERT INTO reviews(record_no,version,reviewer,decision,comment,reviewed_at) VALUES(?,?,?,?,?,?)", (record_no, version, reviewer, decision, comment, ts))
-        c.execute("UPDATE tasks SET status=?,updated_at=? WHERE task_no=?", ("待质量确认" if decision == "通过" else "退回修改", ts, record_no))
+        c.execute("UPDATE tasks SET status=?,updated_at=? WHERE task_no=?", ("已复核" if decision == "通过" else "退回修改", ts, record_no))
     audit("record", record_no, reviewer, "复核" + decision, reason=comment)
     if decision == "通过" and t:
-        create_notification(
-            t.get("quality_inspector", ""), "原始记录待质量确认",
-            f"{record_no} V{version} 已通过复核员审核，请进行第三轮质量确认。",
-            "record", record_no,
-        )
+        freeze_document_version("record", record_no, version, "实验员自查及复核员审核锁定", r["payload"], reviewer)
+        ensure_report_for_task(record_no)
+        _refresh_package_and_report(t["package_no"], t["commission_no"])
     elif t:
         create_notification(
             t.get("assignee", ""), "原始记录已退回",
@@ -2186,7 +2203,7 @@ def ensure_report_for_task(task_no: str) -> str | None:
             payload = locked.get("payload") or {}
             with connect() as c:
                 c.execute(
-                    """UPDATE reports SET status='待复核员审核',source_versions=?,
+                    """UPDATE reports SET status='待质量审核',source_versions=?,
                        conclusion=?,notes=?,updated_at=? WHERE report_no=?""",
                     (
                         json.dumps(source_versions,ensure_ascii=False),
@@ -2215,7 +2232,7 @@ def ensure_report_for_task(task_no: str) -> str | None:
                report_no,commission_no,task_no,status,tester,verifier,quality_inspector,
                approver,source_versions,report_category,sample_statement,conclusion,notes,
                created_at,updated_at
-               ) VALUES(?,?,?,'待复核员审核',?,?,?,?,?,?,?,?,?,?,?)""",
+               ) VALUES(?,?,?,'待质量审核',?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 report_no, task_row["commission_no"], task_no, task_row["assignee"],
                 task_row["reviewer"], task_row.get("quality_inspector", ""),
@@ -2243,8 +2260,8 @@ def ensure_report_for_task(task_no: str) -> str | None:
             )
     audit("report", report_no, "system", "自动生成报告初稿", new_value=task_no, snapshot=source_versions)
     create_notification(
-        task_row.get("reviewer", ""), "检验报告待复核",
-        f"报告 {report_no} 已由三级签审后的原始记录自动生成，请进行第一轮报告审核。",
+        task_row.get("quality_inspector", ""), "检验报告待质量确认",
+        f"报告 {report_no} 已由完成自查和复核的原始记录自动形成，请在线预览并确认。",
         "report", report_no,
     )
     return report_no
@@ -2317,8 +2334,8 @@ def quality_review_report(report_no: str, actor: str, decision: str, comment: st
     status = "待管理员签发" if decision == "通过" else "质量退回"
     with connect() as c:
         c.execute(
-            "UPDATE reports SET status=?,quality_signed_at=?,updated_at=? WHERE report_no=?",
-            (status, now() if decision == "通过" else None, now(), report_no),
+            "UPDATE reports SET status=?,quality_signed_at=NULL,updated_at=? WHERE report_no=?",
+            (status, now(), report_no),
         )
         c.execute(
             "INSERT INTO report_actions(report_no,actor,action,comment,created_at) VALUES(?,?,?,?,?)",
@@ -2330,7 +2347,7 @@ def quality_review_report(report_no: str, actor: str, decision: str, comment: st
     if decision == "通过":
         create_notification(
             r.get("approver", ""), "检验报告待最终签发",
-            f"报告 {report_no} 已完成前两轮审核，请进行第三轮管理员最终签发。",
+            f"报告 {report_no} 已由质量负责人预览确认，请作为授权签字人最终审核签发。",
             "report", report_no,
         )
 
@@ -2340,20 +2357,30 @@ def approver_review_report(report_no: str, actor: str, decision: str, comment: s
     actor_row = one("SELECT role FROM users WHERE username=?", (actor,)) or {}
     if not r or actor_row.get("role") != "管理员" or r["status"] != "待管理员签发":
         raise ValueError("只有管理员可以最终审核、签发报告")
-    status = "已发布" if decision == "批准" else "质量退回"
+    status = "已发布" if decision == "批准" else "待质量审核"
     with connect() as c:
         c.execute(
             """UPDATE reports SET status=?,approver=?,approver_signed_at=?,
-               publish_date=?,updated_at=? WHERE report_no=?""",
+               publish_date=?,validity_status=?,updated_at=? WHERE report_no=?""",
             (
                 status, actor, now() if decision == "批准" else None,
-                str(china_today()) if decision == "批准" else None, now(), report_no,
+                str(china_today()) if decision == "批准" else None,
+                "有效" if decision == "批准" else r.get("validity_status","有效"),
+                now(), report_no,
             ),
         )
         c.execute("INSERT INTO report_actions(report_no,actor,action,comment,created_at) VALUES(?,?,?,?,?)", (report_no, actor, decision, comment, now()))
     if decision == "批准":
         source = json.loads(r.get("source_versions") or "{}")
-        freeze_document_version("report", report_no, 1, "最终有效", dict(r, source_versions=source), actor)
+        version_row = one(
+            """SELECT MAX(version) version FROM document_versions
+               WHERE entity_type='report' AND entity_id=?""",
+            (report_no,),
+        ) or {}
+        report_version = int(version_row.get("version") or 0) + 1
+        signed_report=report(report_no) or r
+        freeze_document_version("report", report_no, report_version, "最终有效", dict(signed_report, source_versions=source), actor)
+        obsolete_prior_versions("report", report_no, report_version, actor, "更正报告已正式签发")
         obsolete_prior_versions("record", r.get("task_no", ""), int(source.get(r.get("task_no", ""), 1)), actor, "最终报告已生成")
         with connect() as c:
             c.execute(
@@ -2361,7 +2388,60 @@ def approver_review_report(report_no: str, actor: str, decision: str, comment: s
                    WHERE replacement_report_no=? AND status='重测任务已下发'""",
                 (now(),report_no),
             )
+    else:
+        create_notification(
+            r.get("quality_inspector", ""), "报告被授权签字人退回",
+            f"报告 {report_no} 已退回质量预览确认，请根据意见处理。",
+            "report", report_no,
+        )
     audit("report", report_no, actor, decision, reason=comment)
+
+
+def start_report_void_or_correction(
+    report_no: str, actor: str, action: str, reason: str,
+) -> None:
+    item = report(report_no)
+    actor_row = one("SELECT role FROM users WHERE username=?", (actor,)) or {}
+    if actor_row.get("role") != "管理员":
+        raise ValueError("只有管理员（授权签字人）可以启动报告作废或更正")
+    if not item or item.get("status") != "已发布":
+        raise ValueError("只有已经签发的报告可以启动作废或更正")
+    if not reason.strip():
+        raise ValueError("作废或更正原因不能为空")
+    ts = now()
+    if action == "直接作废":
+        with connect() as c:
+            c.execute(
+                """UPDATE reports SET status='已作废',validity_status='已作废',
+                   notes=CASE WHEN notes='' THEN ? ELSE notes||? END,updated_at=?
+                   WHERE report_no=?""",
+                ("作废原因："+reason, "\n作废原因："+reason, ts, report_no),
+            )
+            c.execute(
+                "INSERT INTO report_actions(report_no,actor,action,comment,created_at) VALUES(?,?,?,?,?)",
+                (report_no,actor,"管理员启动报告作废",reason,ts),
+            )
+        audit("report",report_no,actor,"管理员启动报告作废",reason=reason)
+        return
+    if action != "更正并重新签发":
+        raise ValueError("未知的报告处理方式")
+    with connect() as c:
+        c.execute(
+            """UPDATE reports SET status='待质量审核',validity_status='更正中',
+               quality_signed_at=NULL,approver_signed_at=NULL,publish_date=NULL,
+               report_category='更正报告',updated_at=? WHERE report_no=?""",
+            (ts,report_no),
+        )
+        c.execute(
+            "INSERT INTO report_actions(report_no,actor,action,comment,created_at) VALUES(?,?,?,?,?)",
+            (report_no,actor,"管理员启动报告更正",reason,ts),
+        )
+    create_notification(
+        item.get("quality_inspector",""),"更正报告待预览确认",
+        f"管理员已启动报告 {report_no} 的更正流程，请按更正原因预览确认。原因：{reason}",
+        "report",report_no,
+    )
+    audit("report",report_no,actor,"管理员启动报告更正",reason=reason)
 
 
 def report_actions(report_no: str) -> list[dict[str, Any]]:
@@ -2380,9 +2460,19 @@ def next_hazardous_waste_no() -> str:
 
 
 def create_hazardous_waste_record(data: dict[str, Any], actor: str) -> str:
-    task_row = task(str(data.get("task_no", "")))
-    if not task_row or task_row.get("assignee") != actor:
-        raise ValueError("只能登记本人实验任务产生的危废")
+    task_nos = list(dict.fromkeys(
+        str(x).strip() for x in (data.get("task_nos") or [data.get("task_no", "")])
+        if str(x).strip()
+    ))
+    if not task_nos:
+        raise ValueError("至少选择一个产生该危废的实验任务")
+    task_rows = [task(number) for number in task_nos]
+    if any(not item or item.get("assignee") != actor for item in task_rows):
+        raise ValueError("只能关联本人负责的实验任务")
+    commissions = {item["commission_no"] for item in task_rows if item}
+    if len(commissions) != 1:
+        raise ValueError("同一条危废记录只能关联同一委托下的多个实验任务")
+    task_row = task_rows[0]
     waste_name = str(data.get("waste_name", "")).strip()
     method = str(data.get("disposal_method", "")).strip()
     quantity = float(data.get("quantity", 0) or 0)
@@ -2393,13 +2483,14 @@ def create_hazardous_waste_record(data: dict[str, Any], actor: str) -> str:
     with connect() as c:
         c.execute(
             """INSERT INTO hazardous_waste_records(
-               disposal_no,commission_no,task_no,sample_no,waste_type,waste_name,
+               disposal_no,commission_no,task_no,task_nos,sample_no,waste_type,waste_name,
                quantity,unit,hazard_category,disposal_method,container_no,handler,
                occurred_at,status,note,created_by,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'已登记',?,?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'已登记',?,?,?,?)""",
             (
                 disposal_no, task_row["commission_no"], task_row["task_no"],
-                data.get("sample_no", ""), data.get("waste_type", "实验废液"),
+                json.dumps(task_nos,ensure_ascii=False), "",
+                data.get("waste_type", "实验废液"),
                 waste_name, quantity, data.get("unit", "mL"),
                 data.get("hazard_category", ""), method, data.get("container_no", ""),
                 actor, data.get("occurred_at") or ts, data.get("note", ""),

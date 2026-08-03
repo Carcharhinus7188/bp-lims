@@ -166,7 +166,7 @@ def template_manifest(template_name: str) -> list[dict[str, Any]]:
 
 
 def _select_checkbox(text: str, preferred: str) -> str:
-    value = str(text or "")
+    value = str(text or "").replace("☑", "□")
     if not preferred or "□" not in value:
         return value
     # Handle optional spaces between the box and option text.

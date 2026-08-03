@@ -416,8 +416,19 @@ def _select_checkbox_value(original: str, preferred: Any) -> str:
         preferred_values = [str(x) for x in preferred]
     else:
         preferred_values = [str(preferred or "")]
+    def matches(value: str, option: str) -> bool:
+        value, option = value.strip(), option.strip()
+        if value == option:
+            return True
+        # Never let antonyms such as “符合/不符合” or “合格/不合格”
+        # match merely because one string contains the other.
+        for word in ("符合", "合格", "正常", "有效", "通过"):
+            if word in value and word in option and (("不" + word) in value) != (("不" + word) in option):
+                return False
+        return len(value) > 1 and len(option) > 1 and (value in option or option in value)
+
     for option in options:
-        if any(v and (v in option or option in v) for v in preferred_values):
+        if any(v and matches(v, option) for v in preferred_values):
             selected.append(option)
     if not selected:
         for positive in POSITIVE_OPTIONS:

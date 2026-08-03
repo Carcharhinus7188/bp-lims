@@ -14,10 +14,11 @@ from business_record_engine import initialize_business_record, calculate_busines
 from business_record_ui import render_readonly_summary, render_task_confirmations, render_equipment_confirmation, render_prechecks, render_parameters, render_sample_data, render_exception_and_summary, render_completion
 from equipment_registry import EQUIPMENT_BINDING_ROLES
 from experiment_schemas import SCHEMAS
-from form_engine import commission_document, sample_register_document, loan_return_document, report_document
+from form_engine import commission_document, sample_register_document, loan_return_document, report_document, report_delivery_document, hazardous_waste_document
 from report_rules import overall_conclusion, report_item
 from trace_excel_engine import build_internal_trace_workbook
 from camera_evidence import save_live_camera_photo
+from pdf_preview import build_preview_pdf, pdf_page_images
 
 ROOT=Path(__file__).parent
 TEMPLATE_DIR=ROOT/"templates"
@@ -135,10 +136,14 @@ def render_inline_camera(
         status = camera_checkpoint_status(task_row["task_no"], [(checkpoint_code, checkpoint_label, required)])[0]
         marker = "✅ 已留档" if status["complete"] else ("🔴 必拍" if required else "可选")
         with st.expander(f"{checkpoint_label}｜{marker}", expanded=required and not status["complete"]):
-            sample_no = st.selectbox(
-                "关联样品", [""] + sample_ids,
-                key=f"{key_prefix}_{checkpoint_code}_sample",
-            )
+            if checkpoint_code in SAMPLE_LEVEL_PHOTO_CODES:
+                sample_no = st.selectbox(
+                    "关联实体样品（按实际拍摄对象选择）", [""] + sample_ids,
+                    key=f"{key_prefix}_{checkpoint_code}_sample",
+                )
+            else:
+                sample_no = ""
+                st.info("该照片关联整个实验任务，仅需拍摄一次，不需要逐个样品重复拍照。")
             photo = st.camera_input(
                 f"现场拍摄：{checkpoint_label}",
                 key=f"{key_prefix}_{checkpoint_code}_camera",
@@ -179,7 +184,48 @@ def task_archive(task_no):
             f"{task_no}/{task_no}_修改日志.json",
             json.dumps(trace_rows,ensure_ascii=False,indent=2).encode("utf-8"),
         )
+        locked=latest_record(task_no)
+        if locked and locked.get("status")=="已锁定":
+            snapshot=task_config_snapshot(task_no)
+            template_name=snapshot.get("record_template_file","")
+            archive.writestr(
+                f"{task_no}/{task_no}_V{locked['version']}_原始记录表.docx",
+                export_record(locked,template_name,trace_rows).getvalue(),
+            )
+        report_row=one("SELECT * FROM reports WHERE task_no=?",(task_no,))
+        if report_row and report_row.get("status")=="已发布" and report_row.get("validity_status")=="有效":
+            task_row=task(task_no);commission_row=commission(task_row["commission_no"])
+            groups=commission_groups(task_row["commission_no"])
+            samples=commission_samples(task_row["commission_no"])
+            task_row["kind"]=task_config_snapshot(task_no).get("kind") or "generic"
+            task_row["sample_name"]=next(
+                (item["sample_name"] for item in groups if item["id"]==task_row["group_id"]),""
+            )
+            users0=user_map()
+            signatures0={name:signature(name) for name in users0}
+            archive.writestr(
+                f"{task_no}/{report_row['report_no']}_检验报告.docx",
+                report_document(
+                    commission_row,groups,samples,[task_row],
+                    report_records_for_report(report_row["report_no"]),
+                    report_row,users0,signatures0,
+                ).getvalue(),
+            )
+        task_row=task(task_no)
+        if task_row:
+            archive.writestr(
+                f"{task_no}/{task_row['commission_no']}_内部实验数据追溯工作簿.xlsx",
+                build_internal_trace_workbook(task_row["commission_no"]).getvalue(),
+            )
     return output.getvalue()
+
+
+def show_pdf_preview(title, sections):
+    st.markdown("#### PDF 在线预览")
+    st.caption("审核期间仅以页面图像方式预览，不提供PDF或Word下载按钮。")
+    content=build_preview_pdf(title,sections)
+    for index,image in enumerate(pdf_page_images(content),1):
+        st.image(image,caption=f"{title}｜第 {index} 页",use_container_width=True)
 
 
 init_db()
@@ -213,7 +259,11 @@ flash_message = st.session_state.pop("flash_message", None)
 if flash_message:
     st.toast(flash_message)
 
-pending_notices = unread_notifications(username)
+st.session_state.setdefault("dismissed_notice_ids", [])
+pending_notices = [
+    item for item in unread_notifications(username)
+    if item["id"] not in st.session_state.dismissed_notice_ids
+]
 if pending_notices:
     @st.dialog("您收到新的工作任务")
     def task_notice_dialog():
@@ -222,9 +272,15 @@ if pending_notices:
             st.write(notice["message"])
             st.caption(notice["created_at"])
             st.divider()
-        if st.button("我已查看", type="primary", use_container_width=True):
+        notice_ids=[x["id"] for x in pending_notices]
+        def acknowledge_notices():
             mark_notifications_read(username, [x["id"] for x in pending_notices])
-            st.rerun()
+            st.session_state.dismissed_notice_ids.extend(notice_ids)
+        def dismiss_notices():
+            st.session_state.dismissed_notice_ids.extend(notice_ids)
+        a,b=st.columns(2)
+        a.button("我已查看", type="primary", use_container_width=True, on_click=acknowledge_notices)
+        b.button("稍后处理并关闭", use_container_width=True, on_click=dismiss_notices)
     task_notice_dialog()
 
 if page=="首页看板":
@@ -585,8 +641,16 @@ elif page=="实验记录":
                 template_name,kind,context,bound_devices,business,attachments,prior.get("template_fields") or {}
             )
             summary0=business_completion_summary(kind,business,bound_devices)
-            render_completion(summary0)
+            if end_at:
+                render_completion(summary0)
+            else:
+                st.info("实验尚未点击“记录实验结束时间”。结束前暂不显示未填写区域；可先保存草稿。")
             st.caption("提交后，系统会把上述业务数据直接回填至受控Word母版的原位置；实验员界面不显示模板原文、表格坐标或无关选项。")
+            tester_self_check=st.checkbox(
+                "我已完成实验员自查：样品、设备、环境、原始数据、计算结果、照片和异常记录均已核对",
+                value=bool(prior.get("tester_self_check",False)),
+                key=f"{key_prefix}_tester_self_check",
+            )
             reason=st.text_area("修改原因（首次记录可不填）",latest.get("change_reason","") if latest else "",key=f"{key_prefix}_reason")
             tm_version=config_snapshot.get("record_template_version","") or "A/0"
             sm_version=config_snapshot.get("sop_version","") or "A/0"
@@ -601,11 +665,12 @@ elif page=="实验记录":
                 "report_summary":business.get("report_summary",""),
                 "report_conclusion":business.get("report_conclusion",""),
                 "configuration_snapshot":config_snapshot,
+                "tester_self_check":tester_self_check,
             }
             a,b=st.columns(2)
             if a.button("保存草稿",use_container_width=True,key=f"{key_prefix}_draft"):
                 save_record(tn,version,payload,username,"草稿",tm_version,sm_version,reason,compare);st.success("草稿已保存")
-            if b.button("提交复核",type="primary",use_container_width=True,disabled=not summary0["complete"] or not photos_complete,key=f"{key_prefix}_submit"):
+            if b.button("提交复核",type="primary",use_container_width=True,disabled=not tester_self_check or not end_at or not summary0["complete"] or not photos_complete,key=f"{key_prefix}_submit"):
                 save_record(tn,version,payload,username,"更正待复核" if version>1 else "待复核",tm_version,sm_version,reason,compare)
                 st.session_state.flash_message="已提交复核，当前实验窗口已关闭"
                 st.session_state.main_navigation="首页看板"
@@ -627,38 +692,30 @@ elif page=="原始记录复核":
         st.subheader("设备使用确认");show_df(business.get("equipment_checks") or [])
         st.subheader("异常与结果")
         st.write("实验状态：",business.get("overall_status",""));st.write("异常/偏离：",business.get("deviation","无"));st.write("复测/重制：",business.get("retest","否"));st.write("结果摘要：",business.get("report_summary",""));st.write("单项结论：",business.get("report_conclusion",""))
-        st.info("当前为系统内预览模式。原始记录完成实验员、复核员、质量检测员三轮签审后，才开放文件下载。")
+        show_pdf_preview(
+            f"{rn}_V{v}_实验原始记录表",
+            [
+                ("任务与样品", {"任务编号":rn,"实验":t0["experiment"],"样品":"、".join(t0["sample_nos_list"])}),
+                ("环境与实验参数", business.get("parameters") or {}),
+                ("设备使用确认", business.get("equipment_checks") or []),
+                ("原始测量数据", business.get("rows") or []),
+                ("异常与结果", {
+                    "状态":business.get("overall_status",""),"偏离":business.get("deviation","无"),
+                    "结果摘要":business.get("report_summary",""),"结论":business.get("report_conclusion",""),
+                }),
+            ],
+        )
+        st.info("原始记录由实验员提交并完成自查，复核员通过后立即锁定并开放正式文件下载。")
         st.subheader("附件索引（独立追溯）");show_df(list_attachments(task_no=rn),["attachment_id","attachment_type","original_name","sha256","description"])
         comment=st.text_area("复核意见")
         a,b=st.columns(2)
-        if a.button("复核通过并提交质量确认",type="primary",disabled=not summary0["complete"]):
+        if a.button("复核通过并锁定原始记录",type="primary",disabled=not summary0["complete"]):
             review_record(rn,int(v),username,"通过",comment)
-            st.session_state.flash_message="已提交质量确认，复核窗口已关闭"
+            st.session_state.flash_message="原始记录已通过复核并锁定，报告初稿已提交质量负责人预览"
             st.session_state.main_navigation="首页看板";st.rerun()
         if b.button("退回修改"):
             review_record(rn,int(v),username,"退回",comment)
             st.session_state.flash_message="已退回实验员修改，复核窗口已关闭"
-            st.session_state.main_navigation="首页看板";st.rerun()
-
-elif page=="原始记录质量确认":
-    header("原始记录第三轮签审：质量确认")
-    records0=pending_record_quality_reviews(username)
-    show_df(records0,["record_no","version","experiment","owner","reviewer_signed_at","status","updated_at"])
-    if records0:
-        selected=st.selectbox("选择待确认记录",[f"{x['record_no']}|{x['version']}" for x in records0])
-        rn,v=selected.split("|");r=record(rn,int(v));business=r["payload"].get("business_record") or {}
-        st.info("系统内预览模式：质量确认前不提供原始记录文件下载。")
-        show_df(business.get("rows") or [])
-        show_df(list_attachments(task_no=rn),["checkpoint_label","original_name","sha256","server_captured_at"])
-        comment=st.text_area("质量确认意见")
-        a,b=st.columns(2)
-        if a.button("质量确认通过并锁定",type="primary"):
-            quality_review_record(rn,int(v),username,"通过",comment)
-            st.session_state.flash_message="原始记录已完成三级签审并锁定"
-            st.session_state.main_navigation="首页看板";st.rerun()
-        if b.button("退回修改"):
-            quality_review_record(rn,int(v),username,"退回",comment)
-            st.session_state.flash_message="已退回实验员修改"
             st.session_state.main_navigation="首页看板";st.rerun()
 
 elif page=="样品归还":
@@ -690,12 +747,36 @@ elif page=="危废处理":
     )
     for item in my_tasks:
         item["sample_nos_list"]=json.loads(item.get("sample_nos") or "[]")
-    show_df(list_hazardous_waste_records(actor=username),["disposal_no","task_no","sample_no","waste_type","waste_name","quantity","unit","hazard_category","disposal_method","container_no","occurred_at","status"])
+    waste_rows=list_hazardous_waste_records(actor=username)
+    for item in waste_rows:
+        item["关联实验任务"]="、".join(json.loads(item.get("task_nos") or "[]"))
+    show_df(waste_rows,["disposal_no","关联实验任务","waste_type","waste_name","quantity","unit","hazard_category","disposal_method","container_no","occurred_at","status"])
+    if waste_rows:
+        selected_waste=st.selectbox(
+            "查看/下载危废处置登记表",
+            [x["disposal_no"] for x in waste_rows],
+            index=next(
+                (i for i,x in enumerate(waste_rows) if x["disposal_no"]==st.session_state.get("latest_waste_no")),
+                0,
+            ),
+        )
+        waste_item=next(x for x in waste_rows if x["disposal_no"]==selected_waste)
+        show_df([waste_item],["disposal_no","关联实验任务","waste_type","waste_name","quantity","unit","hazard_category","disposal_method","container_no","handler","occurred_at","status","note"])
+        st.download_button(
+            "下载危废处置登记表",
+            hazardous_waste_document(waste_item),
+            f"{selected_waste}_危废处置登记表.docx",
+            use_container_width=True,
+        )
     if my_tasks:
         with st.form("hazardous_waste_form",clear_on_submit=True):
-            task_no=st.selectbox("关联实验任务",[x["task_no"] for x in my_tasks])
-            task_row=next(x for x in my_tasks if x["task_no"]==task_no)
-            sample_no=st.selectbox("关联样品（可选）",[""]+task_row["sample_nos_list"])
+            task_nos=st.multiselect(
+                "关联产生该危废的实验任务（可多选）",
+                [x["task_no"] for x in my_tasks],
+                format_func=lambda number:next(
+                    f"{x['task_no']}｜{x['experiment']}" for x in my_tasks if x["task_no"]==number
+                ),
+            )
             a,b,c=st.columns(3)
             waste_type=a.selectbox("废物类型",["实验废液","废弃样品","沾染耗材","其他危废"])
             waste_name=b.text_input("废物名称（必填）")
@@ -708,13 +789,14 @@ elif page=="危废处理":
             if st.form_submit_button("完成危废登记",type="primary"):
                 try:
                     number=create_hazardous_waste_record({
-                        "task_no":task_no,"sample_no":sample_no,"waste_type":waste_type,
+                        "task_nos":task_nos,"waste_type":waste_type,
                         "waste_name":waste_name,"hazard_category":hazard,"quantity":quantity,
                         "unit":unit,"container_no":container,"disposal_method":method,
                         "occurred_at":now(),"note":note,
                     },username)
                     st.session_state.flash_message=f"危废处置 {number} 已登记"
-                    st.session_state.main_navigation="首页看板";st.rerun()
+                    st.session_state.latest_waste_no=number
+                    st.rerun()
                 except Exception as e:st.error(str(e))
 
 elif page=="附件与内部追溯":
@@ -744,12 +826,73 @@ elif page=="附件与内部追溯":
             if path.suffix.lower() in [".png",".jpg",".jpeg",".webp"]:st.image(str(path),caption=meta["description"] or meta["original_name"])
             st.download_button("下载原始附件",path.read_bytes(),meta["original_name"])
 
+elif page=="一键下载":
+    header("一键下载实验任务完整归档")
+    st.info("这里始终显示在左侧导航中，不需要先进入附件页面。原始记录复核通过后自动加入归档；正式报告经授权签字人签发后自动加入归档。")
+    query="SELECT * FROM tasks WHERE 1=1"
+    args=[]
+    if role=="实验员":
+        query+=" AND assignee=?";args.append(username)
+    elif role=="复核员":
+        query+=" AND reviewer=?";args.append(username)
+    elif role=="质量检测员":
+        query+=" AND quality_inspector=?";args.append(username)
+    task_rows=rows(query+" ORDER BY updated_at DESC",args)
+    show_df(task_rows,["task_no","commission_no","experiment","status","assignee","reviewer","quality_inspector","updated_at"])
+    if task_rows:
+        selected_task=st.selectbox(
+            "选择实验任务",[x["task_no"] for x in task_rows],
+            format_func=lambda number:next(
+                f"{x['task_no']}｜{x['experiment']}｜{x['status']}" for x in task_rows if x["task_no"]==number
+            ),
+        )
+        st.download_button(
+            "一键下载完整归档包",
+            task_archive(selected_task),
+            f"{selected_task}_实验任务完整归档.zip",
+            "application/zip",type="primary",use_container_width=True,
+        )
+        st.caption("归档包包括：现场照片、设备原始文件、修改日志、内部追溯工作簿，以及当前审批状态允许下载的原始记录和正式报告。")
+
 elif page=="单据中心":
     header("检验委托单、样品登记、领用归还、原始记录和检验报告")
     cs=list_commissions();show_df(cs,["commission_no","client_name","commission_date","due_date","status"])
     if cs:
         cn=st.selectbox("选择委托",[x["commission_no"] for x in cs]);c0=commission(cn);groups=commission_groups(cn);samples0=commission_samples(cn);tests=commission_tests(cn);users0=user_map();st.download_button("下载检验委托单",commission_document(c0,groups,tests,display_user(c0["created_by"])),f"{cn}_检验委托单.docx");st.download_button("下载样品登记表",sample_register_document(c0,groups,samples0,tests,display_user(c0["created_by"])),f"{cn}_样品登记表.docx");st.download_button("下载样品领用归还登记表",loan_return_document(commission_loans(cn),users0),f"{cn}_样品领用归还登记表.docx")
         st.download_button("下载内部实验数据追溯Excel",build_internal_trace_workbook(cn),f"{cn}_内部实验数据追溯工作簿.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.subheader("危废处置登记表")
+        waste_documents=rows(
+            "SELECT * FROM hazardous_waste_records WHERE commission_no=? ORDER BY occurred_at DESC",
+            (cn,),
+        )
+        show_df(waste_documents,["disposal_no","task_nos","waste_type","waste_name","quantity","unit","disposal_method","handler","occurred_at","status"])
+        if waste_documents:
+            waste_no=st.selectbox("选择危废处置登记表",[x["disposal_no"] for x in waste_documents],key="document_waste_no")
+            waste_item=next(x for x in waste_documents if x["disposal_no"]==waste_no)
+            st.download_button(
+                "下载选定危废处置登记表",
+                hazardous_waste_document(waste_item),
+                f"{waste_no}_危废处置登记表.docx",
+            )
+        st.subheader("报告发放登记表")
+        commission_deliveries=rows(
+            """SELECT d.* FROM report_deliveries d JOIN reports r ON r.report_no=d.report_no
+               WHERE r.commission_no=? ORDER BY d.delivered_at DESC""",
+            (cn,),
+        )
+        show_df(commission_deliveries,["report_no","client_name","delivery_method","recipient","recipient_contact","delivered_at","receipt_status","receipt_note","operator"])
+        if commission_deliveries:
+            delivery_report_no=st.selectbox(
+                "选择报告发放登记表",
+                list(dict.fromkeys(x["report_no"] for x in commission_deliveries)),
+                key="document_delivery_report",
+            )
+            selected_deliveries=[x for x in commission_deliveries if x["report_no"]==delivery_report_no]
+            st.download_button(
+                "下载选定报告发放登记表",
+                report_delivery_document(delivery_report_no,selected_deliveries),
+                f"{delivery_report_no}-D_报告发放登记表.docx",
+            )
         locked=[]
         for task_row in commission_tasks(cn):
             locked_versions=[r for r in record_versions(task_row["task_no"]) if r["status"]=="已锁定"]
@@ -764,17 +907,17 @@ elif page=="单据中心":
             task_row["kind"]=task_config_snapshot(task_row["task_no"]).get("kind") or "generic"
             task_row["sample_name"]=next(g["sample_name"] for g in groups if g["id"]==task_row["group_id"])
             sigs={u:signature(u) for u in users0}
-            if rp["status"]=="已发布":
+            if rp["status"]=="已发布" and rp.get("validity_status")=="有效":
                 st.download_button(
-                    "下载已完成三级签审的检验报告",
+                    "下载授权签字人已签发的检验报告",
                     report_document(c0,groups,samples0,[task_row],report_records_for_report(selected_report),rp,users0,sigs),
                     f"{selected_report}_检验报告.docx",
                 )
             else:
-                st.info("该报告尚未完成复核员、质量检测员、管理员三轮签审，仅可在报告中心预览，不能下载。")
+                st.info("该报告尚未完成质量负责人预览确认和管理员（授权签字人）签发，仅可在线预览，不能下载。")
 
 elif page=="报告中心":
-    header("报告三级签审：复核员审核 → 质量审核 → 管理员最终签发")
+    header("报告审核：质量负责人预览确认 → 管理员（授权签字人）签发")
     rs=list_reports(role,username);show_df(rs,["report_no","commission_no","task_no","status","validity_status","tester","verifier","quality_inspector","approver","updated_at"])
     if rs:
         rn=st.selectbox("报告",[x["report_no"] for x in rs]);r=report(rn);st.info("当前状态："+r["status"])
@@ -784,19 +927,23 @@ elif page=="报告中心":
             "结论":r.get("conclusion",""),"说明":r.get("notes",""),
             "来源版本":r.get("source_versions",""),
         }])
-        if r["status"]=="待复核员审核" and role=="复核员" and username==r["verifier"]:
-            comment=st.text_area("复核员报告审核意见");a,b=st.columns(2)
-            if a.button("复核员审核通过",type="primary"):
-                reviewer_review_report(rn,username,"通过",comment)
-                st.session_state.flash_message="报告已提交质量审核"
-                st.session_state.main_navigation="首页看板";st.rerun()
-            if b.button("退回整改"):
-                reviewer_review_report(rn,username,"退回",comment)
-                st.session_state.flash_message="报告已退回整改"
-                st.session_state.main_navigation="首页看板";st.rerun()
+        task0=task(r["task_no"]);record0=latest_record(r["task_no"]) or {}
+        payload0=record0.get("payload") or {}
+        show_pdf_preview(
+            f"{rn}_检验报告预览",
+            [
+                ("报告基本信息", {
+                    "报告编号":rn,"委托编号":r["commission_no"],"任务编号":r["task_no"],
+                    "检验项目":task0.get("experiment",""),"检测依据":task0.get("standard",""),
+                }),
+                ("检验结果", payload0.get("business_record",{}).get("rows") or []),
+                ("结论", {"结果摘要":r.get("notes",""),"检验结论":r.get("conclusion","")}),
+            ],
+        )
         if r["status"]=="待质量审核" and role=="质量检测员" and username==r["quality_inspector"]:
-            comment=st.text_area("质量审核意见");a,b=st.columns(2)
-            if a.button("质量审核通过",type="primary"):
+            st.info("质量负责人仅对报告进行预览确认，不形成电子签字。")
+            comment=st.text_area("质量预览确认意见");a,b=st.columns(2)
+            if a.button("预览确认通过",type="primary"):
                 quality_review_report(rn,username,"通过",comment)
                 st.session_state.flash_message="报告已提交管理员最终签发"
                 st.session_state.main_navigation="首页看板";st.rerun()
@@ -807,16 +954,41 @@ elif page=="报告中心":
             comment=st.text_area("最终审核意见");a,b=st.columns(2)
             if a.button("最终审核并签发",type="primary"):
                 approver_review_report(rn,username,"批准",comment)
-                st.session_state.flash_message="报告已完成三级签审并正式签发"
+                st.session_state.flash_message="授权签字人已签发，正式报告现已生成并开放下载"
                 st.session_state.main_navigation="首页看板";st.rerun()
             if b.button("退回质量审核"):approver_review_report(rn,username,"退回",comment);st.rerun()
+        if r["status"]=="已发布" and role=="管理员":
+            st.divider();st.subheader("管理员启动报告作废/更正")
+            action=st.radio("处理方式",["更正并重新签发","直接作废"],horizontal=True,key=f"report_change_{rn}")
+            reason=st.text_area("作废/更正原因（必填）",key=f"report_change_reason_{rn}")
+            if st.button("确认启动报告处理流程",type="primary"):
+                try:
+                    start_report_void_or_correction(rn,username,action,reason)
+                    st.session_state.flash_message=f"报告 {rn} 已启动：{action}"
+                    st.session_state.main_navigation="首页看板";st.rerun()
+                except Exception as e:st.error(str(e))
         show_df(report_actions(rn))
 
 elif page=="报告发放登记":
     header("检验报告发放登记表")
     published=rows("SELECT * FROM reports WHERE status='已发布' ORDER BY publish_date DESC")
-    show_df(report_deliveries(),["id","report_no","client_name","delivery_method","recipient","recipient_contact","delivered_at","receipt_status","receipt_note","operator"])
-    if published and role=="样品管理员":
+    delivery_rows=report_deliveries()
+    show_df(delivery_rows,["id","report_no","client_name","delivery_method","recipient","recipient_contact","delivered_at","receipt_status","receipt_note","operator"])
+    if delivery_rows:
+        delivery_report=st.selectbox(
+            "下载某份报告的发放登记表",
+            list(dict.fromkeys(x["report_no"] for x in delivery_rows)),
+            key="delivery_download_report",
+        )
+        selected_deliveries=[x for x in delivery_rows if x["report_no"]==delivery_report]
+        st.download_button(
+            "下载报告发放登记表",
+            report_delivery_document(delivery_report,selected_deliveries),
+            f"{delivery_report}-D_报告发放登记表.docx",
+            use_container_width=True,
+        )
+    if published and role in ("样品管理员","管理员"):
+        st.subheader("新增发放记录")
         report_no=st.selectbox("已签发报告",[x["report_no"] for x in published])
         report_row=report(report_no);commission_row=commission(report_row["commission_no"])
         a,b,c=st.columns(3)
@@ -832,6 +1004,7 @@ elif page=="报告发放登记":
                 "delivery_method":method,"recipient":recipient,"recipient_contact":contact,
                 "delivered_at":now(),"receipt_status":receipt,"receipt_note":note,
             },username)
+            st.session_state.flash_message=f"报告 {report_no} 发放记录已登记，可立即下载发放登记表"
             st.rerun()
 
 elif page=="客户异议":
