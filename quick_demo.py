@@ -29,6 +29,7 @@ from lims_db import (
     freeze_document_version,
     group_samples,
     list_experiment_methods,
+    list_attachments,
     list_organizations,
     now,
     package_tasks,
@@ -47,20 +48,35 @@ PENDING_DEMO_COMMISSION_NO = "WT20990101002"
 PENDING_DEMO_GROUP_NO = "BP20990101002"
 
 
-def _add_demo_result_photos(task_row: dict, sample_ids: list[str]) -> None:
+def _add_demo_result_photos(
+    task_row: dict, sample_ids: list[str], all_required: bool = False,
+    black: bool = False,
+) -> None:
     """Create deterministic camera-style evidence so the document demo includes photos."""
     checkpoint_labels = {code: label for code, label, _required in photo_checkpoints(task_row["experiment"])}
-    for code in REPORT_DECISIVE_PHOTO_CODES.get(task_row["experiment"], ["RESULT"]):
+    codes = (
+        [code for code, _label, required in photo_checkpoints(task_row["experiment"]) if required]
+        if all_required else REPORT_DECISIVE_PHOTO_CODES.get(task_row["experiment"], ["RESULT"])
+    )
+    existing={
+        (item.get("checkpoint_code"),item.get("sample_no") or "")
+        for item in list_attachments(task_no=task_row["task_no"])
+        if item.get("capture_source")=="live_camera" and item.get("evidence_status")=="有效"
+    }
+    for code in codes:
         entities = sample_ids if code in SAMPLE_LEVEL_PHOTO_CODES else [""]
         for sample_no in entities:
-            image = Image.new("RGB", (1280, 800), (232, 242, 247))
+            if (code,sample_no) in existing:
+                continue
+            image = Image.new("RGB", (1280, 800), (0, 0, 0) if black else (232, 242, 247))
             draw = ImageDraw.Draw(image)
-            draw.rectangle((55, 55, 1225, 745), outline=(23, 107, 135), width=8)
-            draw.text((95, 105), "BPLab DEMO RESULT EVIDENCE", fill=(18, 54, 74))
-            draw.text((95, 180), task_row["task_no"], fill=(18, 54, 74))
-            draw.text((95, 250), code, fill=(23, 107, 135))
-            draw.text((95, 320), sample_no or "TASK LEVEL", fill=(23, 107, 135))
-            draw.line((95, 520, 1160, 260), fill=(58, 166, 185), width=10)
+            if not black:
+                draw.rectangle((55, 55, 1225, 745), outline=(23, 107, 135), width=8)
+                draw.text((95, 105), "BPLab DEMO RESULT EVIDENCE", fill=(18, 54, 74))
+                draw.text((95, 180), task_row["task_no"], fill=(18, 54, 74))
+                draw.text((95, 250), code, fill=(23, 107, 135))
+                draw.text((95, 320), sample_no or "TASK LEVEL", fill=(23, 107, 135))
+                draw.line((95, 520, 1160, 260), fill=(58, 166, 185), width=10)
             content = BytesIO()
             image.save(content, "JPEG", quality=92)
             save_live_camera_photo(
@@ -138,13 +154,27 @@ def _complete_business(kind: str, sample_ids: list[str], equipment: list[dict]):
 
 def create_pending_review_demo() -> dict[str, str]:
     """Create one completed roughness experiment awaiting reviewer approval."""
-    if commission(PENDING_DEMO_COMMISSION_NO):
-        tasks = commission_tasks(PENDING_DEMO_COMMISSION_NO)
-        if tasks:
+    sequence = 2
+    while True:
+        commission_no = f"WT20990101{sequence:03d}"
+        group_no = f"BP20990101{sequence:03d}"
+        existing = commission(commission_no)
+        if not existing:
+            break
+        tasks = commission_tasks(commission_no)
+        pending = next(
+            (item for item in tasks if item.get("status") in ("待复核","更正待复核")),
+            None,
+        )
+        if pending:
+            group_row = commission_groups(commission_no)[0]
+            sample_ids = [item["sample_no"] for item in group_samples(group_row["id"])]
+            _add_demo_result_photos(pending, sample_ids, all_required=True, black=True)
             return {
-                "commission_no": PENDING_DEMO_COMMISSION_NO,
-                "task_no": tasks[0]["task_no"],
+                "commission_no": commission_no,
+                "task_no": pending["task_no"],
             }
+        sequence += 1
 
     organizations = list_organizations()
     client = next(item for item in organizations if item["org_code"] == "ORG-DEFAULT")
@@ -155,7 +185,7 @@ def create_pending_review_demo() -> dict[str, str]:
     )
     create_commission(
         {
-            "commission_no": PENDING_DEMO_COMMISSION_NO,
+            "commission_no": commission_no,
             "client_org_id": client["id"],
             "client_name": client["org_name"],
             "client_address": client["address"],
@@ -176,7 +206,7 @@ def create_pending_review_demo() -> dict[str, str]:
             "notes": "待复核实验临时Demo",
         },
         [{
-            "group_no": PENDING_DEMO_GROUP_NO,
+            "group_no": group_no,
             "catalog_id": None,
             "sample_name": "表面粗糙度待复核演示样品",
             "model": "DEMO-25 mm×2 mm×2 mm",
@@ -192,7 +222,7 @@ def create_pending_review_demo() -> dict[str, str]:
         }],
         "receiver",
     )
-    group_row = commission_groups(PENDING_DEMO_COMMISSION_NO)[0]
+    group_row = commission_groups(commission_no)[0]
     package_no = create_task_package(
         group_row["id"], [method["experiment_code"]],
         "tester", "receiver", "reviewer",
@@ -212,6 +242,8 @@ def create_pending_review_demo() -> dict[str, str]:
     equipment = snapshot.get("equipment") or []
     kind = snapshot.get("kind") or "rough"
     business = _complete_business(kind, sample_ids, equipment)
+    _add_demo_result_photos(task_row, sample_ids, all_required=True, black=True)
+    demo_attachments = list_attachments(task_no=task_row["task_no"])
     context = {
         "client_name": client["org_name"],
         "client_address": client["address"],
@@ -223,7 +255,7 @@ def create_pending_review_demo() -> dict[str, str]:
         "sample_nos": sample_ids,
         "sample_quantity": len(sample_ids),
         "received_date": str(china_today()),
-        "report_no": PENDING_DEMO_COMMISSION_NO,
+        "report_no": commission_no,
         "task_no": task_row["task_no"],
         "test_date": str(china_today()),
         "detection_location": task_row.get("detection_location") or "性能检测室",
@@ -234,13 +266,13 @@ def create_pending_review_demo() -> dict[str, str]:
     }
     template_name = snapshot.get("record_template_file", "")
     template_fields = business_to_template_fields(
-        template_name, kind, context, equipment, business, [], {},
+        template_name, kind, context, equipment, business, demo_attachments, {},
     )
     payload = {
         "common": {
             "record_no": task_row["task_no"], "task_no": task_row["task_no"],
-            "commission_no": PENDING_DEMO_COMMISSION_NO,
-            "report_no": PENDING_DEMO_COMMISSION_NO,
+            "commission_no": commission_no,
+            "report_no": commission_no,
             "client": client["org_name"], "sample_name": context["sample_name"],
             "sample_no": "、".join(sample_ids), "model": context["model"],
             "material": context["material"], "method_code": context["method_code"],
@@ -256,6 +288,11 @@ def create_pending_review_demo() -> dict[str, str]:
         "report_conclusion": business["report_conclusion"],
         "configuration_snapshot": snapshot,
         "tester_self_check": True,
+        "photo_attachment_ids": [
+            item["attachment_id"] for item in demo_attachments
+            if item.get("capture_source") == "live_camera"
+            and item.get("evidence_status") == "有效"
+        ],
     }
     timestamp = now()
     with connect() as connection:
@@ -300,7 +337,7 @@ def create_pending_review_demo() -> dict[str, str]:
         "record", task_row["task_no"],
     )
     return {
-        "commission_no": PENDING_DEMO_COMMISSION_NO,
+        "commission_no": commission_no,
         "task_no": task_row["task_no"],
     }
 

@@ -211,7 +211,7 @@ CREATE TABLE IF NOT EXISTS records(
 );
 CREATE TABLE IF NOT EXISTS reviews(
   id INTEGER PRIMARY KEY AUTOINCREMENT, record_no TEXT, version INTEGER, reviewer TEXT,
-  decision TEXT, comment TEXT, reviewed_at TEXT
+  decision TEXT, comment TEXT, correction_fields TEXT DEFAULT '[]', reviewed_at TEXT
 );
 CREATE TABLE IF NOT EXISTS package_loans(
   id INTEGER PRIMARY KEY AUTOINCREMENT, package_no TEXT NOT NULL, sample_no TEXT NOT NULL,
@@ -346,6 +346,9 @@ CREATE TABLE IF NOT EXISTS hazardous_waste_records(
         ):
             if column_name not in record_columns:
                 c.execute(f"ALTER TABLE records ADD COLUMN {column_name} {column_type}")
+        review_columns = {item[1] for item in c.execute("PRAGMA table_info(reviews)").fetchall()}
+        if "correction_fields" not in review_columns:
+            c.execute("ALTER TABLE reviews ADD COLUMN correction_fields TEXT DEFAULT '[]'")
         catalog_columns = {item[1] for item in c.execute("PRAGMA table_info(sample_catalog)").fetchall()}
         for column_name in ("process", "material_suffix", "source_sequence"):
             if column_name not in catalog_columns:
@@ -1887,7 +1890,10 @@ def pending_reviews(username: str | None = None) -> list[dict[str, Any]]:
     return result
 
 
-def review_record(record_no: str, version: int, reviewer: str, decision: str, comment: str) -> None:
+def review_record(
+    record_no: str, version: int, reviewer: str, decision: str, comment: str,
+    correction_fields: list[str] | None = None,
+) -> None:
     r = record(record_no, version)
     if not r:
         raise ValueError("记录不存在")
@@ -1898,6 +1904,9 @@ def review_record(record_no: str, version: int, reviewer: str, decision: str, co
         raise ValueError("当前人员不是该任务的复核人")
     if decision == "退回" and not comment.strip():
         raise ValueError("退回实验员修改时必须填写复核意见")
+    correction_fields = [str(item).strip() for item in (correction_fields or []) if str(item).strip()]
+    if decision == "退回" and not correction_fields:
+        raise ValueError("退回实验员修改时必须至少指定一个需要修改的字段")
     ts = now()
     status = "已锁定" if decision == "通过" else "复核退回"
     next_version = version + 1
@@ -1907,7 +1916,15 @@ def review_record(record_no: str, version: int, reviewer: str, decision: str, co
                WHERE record_no=? AND version=?""",
             (status, ts if decision == "通过" else None, ts, record_no, version),
         )
-        c.execute("INSERT INTO reviews(record_no,version,reviewer,decision,comment,reviewed_at) VALUES(?,?,?,?,?,?)", (record_no, version, reviewer, decision, comment, ts))
+        c.execute(
+            """INSERT INTO reviews(
+               record_no,version,reviewer,decision,comment,correction_fields,reviewed_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                record_no, version, reviewer, decision, comment,
+                json.dumps(correction_fields, ensure_ascii=False), ts,
+            ),
+        )
         c.execute("UPDATE tasks SET status=?,updated_at=? WHERE task_no=?", ("已复核" if decision == "通过" else "退回修改", ts, record_no))
         if decision == "退回":
             latest_version=c.execute(
@@ -1925,7 +1942,7 @@ def review_record(record_no: str, version: int, reviewer: str, decision: str, co
                     record_no,record_no,next_version,r.get("experiment",""),
                     r.get("owner",""),json.dumps(r.get("payload") or {},ensure_ascii=False,default=str),
                     r.get("template_version") or "A/0",r.get("sop_version") or "A/0",
-                    f"复核退回二次编辑：{comment}",ts,ts,
+                    f"复核退回二次编辑：{'；'.join(correction_fields)}；{comment}",ts,ts,
                 ),
             )
     audit("record", record_no, reviewer, "复核" + decision, reason=comment)
@@ -1940,11 +1957,13 @@ def review_record(record_no: str, version: int, reviewer: str, decision: str, co
         audit(
             "record",record_no,reviewer,"创建修改版（复核退回）",
             old_value=f"V{version}",new_value=f"V{next_version}",
-            reason=comment,snapshot=r["payload"],
+            reason=f"指定修改字段：{'、'.join(correction_fields)}；{comment}",snapshot=r["payload"],
         )
         create_notification(
             t.get("assignee", ""), "原始记录已退回",
-            f"{record_no} V{version} 已被复核员退回；复核意见：{comment}。系统已保留全部数据并生成二次编辑草稿 V{next_version}，请进入实验记录修改。",
+            f"{record_no} V{version} 已被复核员退回；指定修改字段：{'、'.join(correction_fields)}；"
+            f"复核意见：{comment}。系统已保留全部数据和照片，并生成二次编辑草稿 V{next_version}，"
+            "请进入实验记录，系统将自动定位到首个指定区域。",
             "record", record_no,
         )
 

@@ -111,6 +111,70 @@ def quality_evidence_choices(commission_no,selected_task_nos):
     return list(dict.fromkeys(photo_options)),list(dict.fromkeys(record_options)),other_options
 
 
+def review_correction_field_options(kind, business):
+    """Return reviewer-facing Chinese field labels grouped by experiment step."""
+    definition=SCHEMAS.get(kind) or SCHEMAS["generic"]
+    options=[
+        "①任务与样品确认｜样品接收、编号或状态确认",
+        "②设备与实验前检查｜设备状态、校准信息或异常说明",
+        "②设备与实验前检查｜实验前检查项目或说明",
+    ]
+    seen=set(options)
+    for section in definition.get("sections",[]):
+        for field in section.get("fields",[]):
+            label=field.get("label") or field.get("key")
+            value=f"③环境与实验参数｜{label}"
+            if value not in seen:
+                options.append(value);seen.add(value)
+    for _key,label,_field_type in definition.get("columns",[]):
+        if label in ("样品编号","序号"):
+            continue
+        value=f"④原始测量数据｜{label}"
+        if value not in seen:
+            options.append(value);seen.add(value)
+    options.extend([
+        "⑤异常与设备文件｜实验完成状态",
+        "⑤异常与设备文件｜异常、偏离、影响评估及处理措施",
+        "⑤异常与设备文件｜是否复测/重制",
+        "⑤异常与设备文件｜结果摘要或单项结论",
+        "⑤异常与设备文件｜照片留档",
+        "⑤异常与设备文件｜设备原始文件",
+        "⑥保存提交｜实验员自查确认或修改原因",
+    ])
+    return options
+
+
+def returned_fields(review_row):
+    try:
+        value=json.loads((review_row or {}).get("correction_fields") or "[]")
+        return value if isinstance(value,list) else []
+    except (TypeError,json.JSONDecodeError):
+        return []
+
+
+def focus_returned_step(fields, focus_key):
+    """Open the tab containing the first reviewer-designated field once."""
+    if not fields or st.session_state.get(focus_key):
+        return
+    first=str(fields[0])
+    step=next(
+        (index for index,marker in enumerate(("①","②","③","④","⑤","⑥"),1) if first.startswith(marker)),
+        1,
+    )
+    components.html(
+        f"""
+        <script>
+        setTimeout(function() {{
+          const tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
+          if (tabs.length >= {step}) tabs[{step-1}].click();
+        }}, 250);
+        </script>
+        """,
+        height=0,
+    )
+    st.session_state[focus_key]=True
+
+
 def increment_base(base,n):
     m=re.fullmatch(r"(BP\d{8})(\d{3})",base)
     return f"{m.group(1)}{int(m.group(2))+n:03d}" if m else base
@@ -177,6 +241,25 @@ def render_inline_camera(
         status = camera_checkpoint_status(task_row["task_no"], [(checkpoint_code, checkpoint_label, required)])[0]
         marker = "✅ 已留档" if status["complete"] else ("🔴 必拍" if required else "可选")
         with st.expander(f"{checkpoint_label}｜{marker}", expanded=required and not status["complete"]):
+            archived=[
+                item for item in list_attachments(task_no=task_row["task_no"])
+                if item.get("capture_source")=="live_camera"
+                and item.get("checkpoint_code")==checkpoint_code
+                and item.get("evidence_status")=="有效"
+            ]
+            if archived:
+                st.caption("已留档照片会跨草稿和二次编辑版本保留；重新拍摄前不会丢失。")
+                preview_cols=st.columns(min(3,len(archived)))
+                for photo_index,item in enumerate(archived):
+                    path=attachment_file(item)
+                    if path.exists():
+                        with preview_cols[photo_index % len(preview_cols)]:
+                            st.image(
+                                str(path),
+                                caption=f"{item.get('sample_no') or '任务整体'}｜"
+                                        f"{item.get('server_captured_at') or item.get('captured_at','')}",
+                                use_container_width=True,
+                            )
             if checkpoint_code in SAMPLE_LEVEL_PHOTO_CODES:
                 if status.get("missing_samples"):
                     st.warning("仍需拍摄："+"、".join(status["missing_samples"]))
@@ -746,6 +829,7 @@ elif page=="实验记录":
                ORDER BY rv.id DESC LIMIT 1""",
             (tn,),
         )
+        correction_fields=returned_fields(returned_review)
         if version>1 and latest and latest.get("status")!="已锁定":
             st.error(f"⚠️ 此实验为二次编辑：当前正在编辑 V{version} 草稿，上一提交版本已由复核员退回。")
             if returned_review:
@@ -754,7 +838,12 @@ elif page=="实验记录":
                     f"退回时间：{returned_review.get('reviewed_at','')}｜"
                     f"复核意见：{returned_review.get('comment','')}"
                 )
-            st.success("上一版本已填写的实验数据、设备信息、照片关联和结论已完整保留在当前草稿中，请按复核意见修改后重新提交。")
+            if correction_fields:
+                st.markdown("**复核员指定修改字段：**")
+                for item in correction_fields:
+                    st.write(f"- {item}")
+                st.info("系统将自动打开首个指定字段所在步骤；其他指定字段可按前面的步骤编号进入。")
+            st.success("上一版本已填写的实验数据、设备信息、照片原件和结论已完整保留在当前草稿中，请按复核意见修改后重新提交。")
 
         group0=group(t["group_id"]);commission0=commission(t["commission_no"]);package0=package(t["package_no"])
         sample_ids=t["sample_nos_list"]
@@ -804,6 +893,8 @@ elif page=="实验记录":
         all_checkpoints=photo_checkpoints(t["experiment"])
         checkpoint_groups=[all_checkpoints[index::4] for index in range(4)]
         tabs=st.tabs(["①任务确认","②设备与实验前检查","③环境与参数","④原始数据","⑤异常与设备文件","⑥保存提交"])
+        if version>1:
+            focus_returned_step(correction_fields,f"returned_focus_{tn}_{version}")
         with tabs[0]:
             render_readonly_summary(t,group0,commission0,package0,config_snapshot)
             business["task_confirmations"]=render_task_confirmations(business,key_prefix)
@@ -879,6 +970,11 @@ elif page=="实验记录":
                 "report_conclusion":business.get("report_conclusion",""),
                 "configuration_snapshot":config_snapshot,
                 "tester_self_check":tester_self_check,
+                "photo_attachment_ids":[
+                    item["attachment_id"] for item in list_attachments(task_no=tn)
+                    if item.get("capture_source")=="live_camera"
+                    and item.get("evidence_status")=="有效"
+                ],
             }
             a,b=st.columns(2)
             if a.button("同步当前记录并检查",use_container_width=True,key=f"{key_prefix}_draft"):
@@ -943,13 +1039,22 @@ elif page=="原始记录复核":
         st.info("原始记录由实验员提交并完成自查，复核员通过后立即锁定并开放正式文件下载。")
         st.subheader("附件索引（独立追溯）");show_df(list_attachments(task_no=rn),["attachment_id","attachment_type","original_name","sha256","description"])
         comment=st.text_area("复核意见")
+        correction_options=review_correction_field_options(kind,business)
+        correction_fields=st.multiselect(
+            "退回时指定需要修改的字段",
+            correction_options,
+            help="退回时至少选择一项。实验员打开二次编辑后，系统会显示全部指定字段并自动进入首个字段所在步骤。",
+        )
         a,b=st.columns(2)
         if a.button("复核通过并锁定原始记录",type="primary",disabled=not summary0["complete"]):
             review_record(rn,int(v),username,"通过",comment)
             navigate_to("首页看板","原始记录已通过复核并锁定，报告初稿已提交质量负责人预览")
         if b.button("退回修改"):
-            review_record(rn,int(v),username,"退回",comment)
-            navigate_to("首页看板","已退回实验员修改，复核窗口已关闭")
+            try:
+                review_record(rn,int(v),username,"退回",comment,correction_fields)
+                navigate_to("首页看板","已按指定字段退回实验员修改，复核窗口已关闭")
+            except Exception as e:
+                st.error(str(e))
 
 elif page=="样品归还":
     header("全部实验完成后整组样品一次归还")
