@@ -241,16 +241,22 @@ def show_pdf_preview(title, sections):
 
 
 @st.cache_data(show_spinner=False)
-def exact_document_preview_pages(docx_content):
-    return [image.getvalue() for image in pdf_page_images(docx_to_pdf(docx_content))]
+def controlled_document_pdf(docx_content):
+    """The sole PDF output path used by both document center and previews."""
+    return docx_to_pdf(docx_content)
 
 
-def show_exact_document_preview(title, docx_content):
-    st.markdown("#### 正式单据同版式 PDF 预览")
-    st.caption("预览由与单据中心相同的受控Word单据转换生成，不提供下载按钮。")
+@st.cache_data(show_spinner=False)
+def controlled_pdf_preview_pages(pdf_content):
+    return [image.getvalue() for image in pdf_page_images(pdf_content)]
+
+
+def show_controlled_pdf_preview(title, pdf_content):
+    st.markdown("#### 正式单据 PDF 预览")
+    st.caption("此处展示的就是单据中心正式PDF本身，仅隐藏下载按钮。")
     try:
-        with st.spinner("正在生成正式单据同版式预览…"):
-            pages=exact_document_preview_pages(docx_content)
+        with st.spinner("正在读取正式PDF…"):
+            pages=controlled_pdf_preview_pages(pdf_content)
         for index,page in enumerate(pages,1):
             st.image(page,caption=f"{title}｜第 {index} 页",use_container_width=True)
     except Exception as error:
@@ -773,9 +779,12 @@ elif page=="原始记录复核":
         st.subheader("设备使用确认");show_df(business.get("equipment_checks") or [])
         st.subheader("异常与结果")
         st.write("实验状态：",business.get("overall_status",""));st.write("异常/偏离：",business.get("deviation","无"));st.write("复测/重制：",business.get("retest","否"));st.write("结果摘要：",business.get("report_summary",""));st.write("单项结论：",business.get("report_conclusion",""))
-        show_exact_document_preview(
+        record_pdf=controlled_document_pdf(
+            export_record(r,template_name,audit_logs(rn)).getvalue()
+        )
+        show_controlled_pdf_preview(
             f"{rn}_V{v}_实验原始记录表",
-            export_record(r,template_name,audit_logs(rn)).getvalue(),
+            record_pdf,
         )
         show_report_photo_preview(r["task_no"])
         st.info("原始记录由实验员提交并完成自查，复核员通过后立即锁定并开放正式文件下载。")
@@ -968,7 +977,17 @@ elif page=="单据中心":
             if locked_versions:
                 locked.append(locked_versions[-1])
         if locked:
-            key=st.selectbox("下载锁定原始记录",[f"{r['record_no']}|{r['version']}" for r in locked]);rn,v=key.split("|");r=record(rn,int(v));t=task(rn);snap=task_config_snapshot(rn);r["kind"]=snap.get("kind") or "generic";template_name=snap.get("record_template_file","");changes=audit_logs(rn);st.download_button("下载选定原始记录表",export_record(r,template_name,changes),f"{rn}_V{v}_原始记录表.docx")
+            key=st.selectbox("下载锁定原始记录",[f"{r['record_no']}|{r['version']}" for r in locked])
+            rn,v=key.split("|");r=record(rn,int(v));t=task(rn);snap=task_config_snapshot(rn)
+            r["kind"]=snap.get("kind") or "generic";template_name=snap.get("record_template_file","")
+            changes=audit_logs(rn)
+            record_pdf=controlled_document_pdf(
+                export_record(r,template_name,changes).getvalue()
+            )
+            st.download_button(
+                "下载选定原始记录表PDF",record_pdf,
+                f"{rn}_V{v}_原始记录表.pdf","application/pdf",
+            )
         report_rows=rows("SELECT * FROM reports WHERE commission_no=? ORDER BY report_no",(cn,))
         if report_rows:
             selected_report=st.selectbox("选择检验报告",[x["report_no"] for x in report_rows])
@@ -977,10 +996,15 @@ elif page=="单据中心":
             task_row["sample_name"]=next(g["sample_name"] for g in groups if g["id"]==task_row["group_id"])
             sigs={u:signature(u) for u in users0}
             if rp["status"]=="已发布" and rp.get("validity_status")=="有效":
+                report_pdf=controlled_document_pdf(
+                    report_document(
+                        c0,groups,samples0,[task_row],
+                        report_records_for_report(selected_report),rp,users0,sigs,
+                    ).getvalue()
+                )
                 st.download_button(
-                    "下载授权签字人已签发的检验报告",
-                    report_document(c0,groups,samples0,[task_row],report_records_for_report(selected_report),rp,users0,sigs),
-                    f"{selected_report}_检验报告.docx",
+                    "下载授权签字人已签发的检验报告PDF",report_pdf,
+                    f"{selected_report}_检验报告.pdf","application/pdf",
                 )
             else:
                 st.info("该报告尚未完成质量负责人预览确认和管理员（授权签字人）签发，仅可在线预览，不能下载。")
@@ -1008,12 +1032,15 @@ elif page=="报告中心":
         )
         preview_users=user_map()
         preview_signatures={name:signature(name) for name in preview_users}
-        show_exact_document_preview(
-            f"{rn}_检验报告",
+        report_pdf=controlled_document_pdf(
             report_document(
                 commission0,report_groups,report_samples,[task_preview],
                 report_records_for_report(rn),r,preview_users,preview_signatures,
-            ).getvalue(),
+            ).getvalue()
+        )
+        show_controlled_pdf_preview(
+            f"{rn}_检验报告",
+            report_pdf,
         )
         show_report_photo_preview(r["task_no"])
         if r["status"]=="待质量审核" and role=="质量检测员" and username==r["quality_inspector"]:
