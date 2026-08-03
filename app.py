@@ -141,20 +141,28 @@ def render_inline_camera(
                     st.warning("仍需拍摄："+"、".join(status["missing_samples"]))
                 else:
                     st.success("本节点所有实体样品均已有有效照片。")
+                # While a checkpoint is incomplete, only offer samples that
+                # still need evidence. Including the photo count in the widget
+                # key resets the selector after each successful capture, so
+                # the next missing sample becomes the automatic default.
+                sample_options = status.get("missing_samples") or sample_ids
                 sample_no = st.selectbox(
-                    "本次拍摄的实体样品", sample_ids,
-                    key=f"{key_prefix}_{checkpoint_code}_sample",
+                    "本次拍摄的实体样品", sample_options,
+                    key=f"{key_prefix}_{checkpoint_code}_sample_{status['photo_count']}",
                 )
             else:
                 sample_no = ""
                 st.info("该照片关联整个实验任务，仅需拍摄一次，不需要逐个样品重复拍照。")
+            camera_entity = sample_no or "TASK"
             photo = st.camera_input(
                 f"现场拍摄：{checkpoint_label}",
-                key=f"{key_prefix}_{checkpoint_code}_camera",
+                # A separate camera widget per entity prevents the captured
+                # S01 image from being reused when the operator selects S02.
+                key=f"{key_prefix}_{checkpoint_code}_{camera_entity}_camera",
             )
             if photo and st.button(
                 "保存并自动盖时间戳", type="primary",
-                key=f"{key_prefix}_{checkpoint_code}_save",
+                key=f"{key_prefix}_{checkpoint_code}_{camera_entity}_save",
             ):
                 save_live_camera_photo(
                     {
