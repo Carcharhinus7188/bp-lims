@@ -486,3 +486,18 @@ def create_full_document_demo() -> str:
             (now(), group_row["id"]),
         )
     return DEMO_COMMISSION_NO
+
+
+def create_objection_application_demo() -> dict[str, str]:
+    """Prepare an already-issued report for manual objection-application testing."""
+    commission_no=create_full_document_demo()
+    with connect() as connection:
+        item=connection.execute(
+            """SELECT report_no FROM reports
+               WHERE commission_no=? AND status='已发布'
+               ORDER BY publish_date,report_no LIMIT 1""",
+            (commission_no,),
+        ).fetchone()
+    if not item:
+        raise ValueError("异议Demo未找到已签发报告")
+    return {"commission_no":commission_no,"report_no":item["report_no"]}

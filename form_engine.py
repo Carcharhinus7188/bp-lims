@@ -6,6 +6,7 @@ from typing import Any
 import json
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
+from docx.enum.table import WD_ROW_HEIGHT_RULE
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4, landscape
@@ -62,28 +63,59 @@ def group_range(g):
 
 
 def report_delivery_document(report_no: str, delivery_rows: list[dict[str, Any]]):
-    d=Document()
-    title=d.add_paragraph()
-    title.alignment=1
-    run=title.add_run("检验报告发放登记表")
-    run.bold=True;run.font.size=Pt(16)
-    d.add_paragraph(f"报告编号：{report_no}")
-    table=d.add_table(rows=1,cols=8)
-    table.style="Table Grid"
-    headers=["序号","客户名称","发放方式","接收人","联系方式","发放时间","签收状态","操作人/备注"]
-    for index,label in enumerate(headers):
-        table.rows[0].cells[index].text=label
-    for index,item in enumerate(delivery_rows,1):
-        cells=table.add_row().cells
-        values=[
-            index,item.get("client_name",""),item.get("delivery_method",""),
-            item.get("recipient",""),item.get("recipient_contact",""),
-            item.get("delivered_at",""),item.get("receipt_status",""),
-            f"{item.get('operator','')} / {item.get('receipt_note','')}",
-        ]
-        for column,value in enumerate(values):
-            cells[column].text=str(value)
-    d.add_paragraph("本表由系统依据报告发放记录自动生成。")
+    """Fill the controlled report-delivery template supplied by the laboratory."""
+    from lims_db import commission, commission_groups, one, report
+    d=Document(TEMPLATE_DIR/"FORM_REPORT_DELIVERY.docx")
+    table=d.tables[0]
+    report_row=report(report_no) or {}
+    commission_row=commission(report_row.get("commission_no","")) or {}
+    groups=commission_groups(report_row.get("commission_no","")) if report_row else []
+    sample_text="；".join(
+        f"{g.get('sample_name','')}/{g.get('model','')}" for g in groups
+    )
+    def checked(template,label):
+        value=template.replace("☑","□")
+        return value.replace("□"+label,"☑"+label,1)
+    ordered=sorted(delivery_rows,key=lambda x:str(x.get("delivered_at","")))[:7]
+    for offset in range(7):
+        row=table.rows[offset+1]
+        if offset>=len(ordered):
+            for index in (1,2,4,7,10,11,13,14):
+                _set_cell_existing(row.cells[index],"")
+            continue
+        item=ordered[offset]
+        note=str(item.get("receipt_note",""))
+        delivery_type="作废替换" if "作废替换" in note else ("更正" if "更正" in note else ("补发" if "补发" in note else "首次"))
+        medium=str(commission_row.get("report_medium") or "电子")
+        medium_label="纸质" if "纸" in medium else "电子"
+        method=str(item.get("delivery_method",""))
+        method_label="现场" if method in ("自取","现场领取","现场") else ("快递" if "快递" in method else ("邮件" if "邮件" in method else "系统"))
+        values={
+            0:offset+1,1:report_no,2:item.get("client_name") or commission_row.get("client_name",""),
+            4:sample_text,5:checked("□首次 □补发 □更正 □作废替换",delivery_type),
+            6:checked("□纸质 □电子\n份数：1",medium_label),
+            7:item.get("delivered_at",""),9:checked("□现场 □快递 □邮件 □系统",method_label),
+            10:f"{item.get('recipient','')} / {item.get('recipient_contact','')}",
+            11:f"{item.get('receipt_status','')}；{note}".strip("；"),
+            13:item.get("operator",""),14:note,
+        }
+        for index,value in values.items():
+            _set_cell_existing(row.cells[index],value)
+    latest=ordered[-1] if ordered else {}
+    manager_name=(one("SELECT display_name FROM users WHERE username=?",(latest.get("operator",""),)) or {}).get("display_name",latest.get("operator",""))
+    approver_name=(one("SELECT display_name FROM users WHERE username=?",(report_row.get("approver",""),)) or {}).get("display_name",report_row.get("approver",""))
+    _set_cell_existing(table.rows[8].cells[4],"☑审批签字完整  ☑报告编号一致  ☑页码完整  ☑专用章/电子章完整")
+    _set_cell_existing(table.rows[8].cells[9],"☑附表齐全  ☑照片/附件齐全  ☑电子文件可正常打开")
+    _set_cell_existing(table.rows[8].cells[16],"☑委托单位一致  ☑接收人信息正确  ☑交付方式符合约定")
+    _set_cell_existing(table.rows[9].cells[4],"☑无  □有，说明：")
+    _set_cell_existing(table.rows[9].cells[9],"申请/批准记录编号：不适用")
+    _set_cell_existing(table.rows[9].cells[16],"□收回  □作废  □无法收回已书面告知  □仅电子替换  ☑不适用")
+    _set_cell_existing(table.rows[10].cells[4],manager_name)
+    _set_cell_existing(table.rows[10].cells[9],approver_name)
+    _set_cell_existing(table.rows[10].cells[16],f"电子路径：系统单据中心/{report_no}")
+    date_text=str(latest.get("delivered_at",""))[:10]
+    _set_cell_existing(table.rows[11].cells[4],date_text)
+    _set_cell_existing(table.rows[11].cells[9],str(report_row.get("approver_signed_at",""))[:10])
     return _save(d)
 
 
@@ -169,33 +201,126 @@ def modification_log_pdf(log_rows: list[dict[str, Any]], scope: str = "全部单
 
 
 def hazardous_waste_document(item: dict[str, Any]):
-    d=Document()
-    title=d.add_paragraph()
-    title.alignment=1
-    run=title.add_run("实验废液及废弃样品分类处置登记表")
-    run.bold=True;run.font.size=Pt(16)
-    fields=[
-        ("处置编号",item.get("disposal_no","")),
-        ("委托编号",item.get("commission_no","")),
-        ("关联实验任务","、".join(json.loads(item.get("task_nos") or "[]"))),
-        ("废物类型",item.get("waste_type","")),
-        ("废物名称",item.get("waste_name","")),
-        ("数量",f"{item.get('quantity','')} {item.get('unit','')}"),
-        ("危废类别/特性",item.get("hazard_category","")),
-        ("分类处置方式",item.get("disposal_method","")),
-        ("收集容器编号",item.get("container_no","")),
-        ("经办人",item.get("handler","")),
-        ("处置时间",item.get("occurred_at","")),
-        ("状态",item.get("status","")),
-        ("备注",item.get("note","")),
-    ]
-    table=d.add_table(rows=0,cols=2)
-    table.style="Table Grid"
-    for label,value in fields:
-        cells=table.add_row().cells
-        cells[0].text=label;cells[1].text=str(value or "")
-    d.add_paragraph("本表由系统依据危废处置记录自动生成，修改痕迹进入审计日志。")
+    """Fill the controlled hazardous-waste template supplied by the laboratory."""
+    d=Document(TEMPLATE_DIR/"FORM_HAZARDOUS_WASTE.docx")
+    task_nos=json.loads(item.get("task_nos") or "[]")
+    occurred=str(item.get("occurred_at",""))
+    date_text=occurred[:10]
+    time_text=occurred[11:16]
+    def option_line(text,label):
+        value=text.replace("☑","□")
+        token="□ "+label
+        return value.replace(token,"☑ "+label,1) if token in value else value
+    info=d.tables[1]
+    _set_cell_existing(info.rows[0].cells[1],item.get("disposal_no",""))
+    _set_cell_existing(info.rows[0].cells[3],date_text)
+    _set_cell_existing(info.rows[1].cells[1],"实验室")
+    _set_cell_existing(info.rows[2].cells[1],f"{item.get('commission_no','')} / {'、'.join(task_nos)}")
+    _set_cell_existing(info.rows[2].cells[3],"、".join(task_nos))
+    _set_cell_existing(info.rows[3].cells[1],item.get("handler",""))
+    _set_cell_existing(info.rows[3].cells[3],item.get("container_no",""))
+    source=d.tables[2].cell(0,0)
+    source_text=source.text
+    source_text=option_line(source_text,"检测实验")
+    waste_type=str(item.get("waste_type",""))
+    mapping={"实验废液":"实验废液","废弃样品":"废弃/破坏性样品","沾染耗材":"受污染耗材/容器"}
+    source_text=option_line(source_text,mapping.get(waste_type,"其他"))
+    source_text=source_text.replace(
+        "产生情况及成分说明：______________________________________________________________",
+        f"产生情况及成分说明：{item.get('waste_name','')}；{item.get('note','')}",
+    )
+    _set_cell_existing(source,source_text)
+    detail=d.tables[3]
+    for ri in range(1,7):
+        for ci in range(1,9):
+            _set_cell_existing(detail.rows[ri].cells[ci],"")
+    _set_cell_existing(detail.rows[1].cells[1],item.get("disposal_no",""))
+    _set_cell_existing(detail.rows[1].cells[2],"、".join(task_nos))
+    _set_cell_existing(detail.rows[1].cells[3],item.get("waste_name",""))
+    _set_cell_existing(detail.rows[1].cells[4],"液体" if "液" in waste_type else "固体")
+    _set_cell_existing(detail.rows[1].cells[5],f"{item.get('quantity','')} {item.get('unit','')}")
+    _set_cell_existing(detail.rows[1].cells[6],item.get("container_no",""))
+    _set_cell_existing(detail.rows[1].cells[7],item.get("container_no",""))
+    _set_cell_existing(detail.rows[1].cells[8],item.get("note",""))
+    classification=d.tables[4]
+    _set_cell_existing(classification.rows[0].cells[1],option_line(classification.rows[0].cells[1].text,"危险废物"))
+    _set_cell_existing(classification.rows[1].cells[1],option_line(classification.rows[1].cells[1].text,"液体" if "液" in waste_type else "固体"))
+    _set_cell_existing(classification.rows[2].cells[1],option_line(classification.rows[2].cells[1].text,mapping.get(waste_type,"废弃样品/制样残余物")))
+    _set_cell_existing(classification.rows[6].cells[1],item.get("hazard_category",""))
+    _set_cell_existing(classification.rows[7].cells[1],f"姓名：{item.get('handler','')}  部门/岗位：实验员  日期：{date_text}")
+    storage=d.tables[5]
+    _set_cell_existing(storage.rows[0].cells[3],item.get("container_no",""))
+    _set_cell_existing(storage.rows[1].cells[1],item.get("container_no",""))
+    disposal=d.tables[7]
+    _set_cell_existing(disposal.rows[1].cells[1],f"{date_text} {time_text}")
+    _set_cell_existing(disposal.rows[2].cells[1],item.get("container_no",""))
+    _set_cell_existing(disposal.rows[3].cells[1],item.get("disposal_method",""))
+    _set_cell_existing(disposal.rows[4].cells[1],f"{item.get('quantity','')} {item.get('unit','')}")
+    _set_cell_existing(disposal.rows[5].cells[1],f"☑ 已完成分类包装  状态：{item.get('status','')}")
+    _set_cell_existing(disposal.rows[6].cells[1],item.get("note",""))
+    _set_cell_existing(disposal.rows[7].cells[1],f"姓名：{item.get('handler','')}  日期：{date_text}")
+    signatures=d.tables[8]
+    _set_cell_existing(signatures.rows[1].cells[1],item.get("handler",""))
+    _set_cell_existing(signatures.rows[1].cells[2],date_text)
     return _save(d)
+
+
+def _objection_form(title: str, form_no: str, sections: list[tuple[str, list[tuple[str, Any]]]]):
+    d=Document()
+    section=d.sections[0]
+    section.top_margin=Inches(0.55);section.bottom_margin=Inches(0.55)
+    title_p=d.add_paragraph();title_p.alignment=1
+    run=title_p.add_run(title);run.bold=True;run.font.size=Pt(17)
+    sub=d.add_paragraph(f"表单编号：{form_no}");sub.alignment=2
+    for section_title, fields in sections:
+        heading=d.add_paragraph();r=heading.add_run(section_title);r.bold=True;r.font.size=Pt(11)
+        table=d.add_table(rows=0,cols=2);table.style="Table Grid"
+        for label,value in fields:
+            cells=table.add_row().cells
+            cells[0].width=Inches(1.55);cells[1].width=Inches(5.65)
+            cells[0].text=str(label);cells[1].text="" if value is None else str(value)
+            for rr in cells[0].paragraphs[0].runs:rr.bold=True
+    d.add_paragraph("系统留痕：本表内容与异议流程记录、追溯资料及修改日志关联保存。")
+    return _save(d)
+
+
+def objection_application_document(obj: dict[str, Any], report_row: dict[str, Any], commission_row: dict[str, Any]):
+    return _objection_form("客户异议申请表",obj.get("objection_no",""),[
+        ("一、申请信息",[
+            ("异议编号",obj.get("objection_no","")),("关联报告编号",obj.get("report_no","")),
+            ("委托编号",obj.get("commission_no","")),("委托单位",obj.get("client_name","")),
+            ("联系人",obj.get("contact","")),("联系电话",commission_row.get("phone","")),
+            ("申请日期",obj.get("submitted_at","")),("受理渠道",obj.get("application_channel","")),
+            ("争议项目",obj.get("disputed_items","")),("涉及样品",obj.get("involved_samples","")),
+        ]),
+        ("二、客户异议内容",[
+            ("异议描述",obj.get("description","")),("随附材料/证据",obj.get("evidence_note","")),
+        ]),
+        ("三、受理信息",[
+            ("登记人",obj.get("registered_by","")),("质量调查人",obj.get("quality_inspector","")),
+            ("当前状态",obj.get("status","")),("登记时间",obj.get("created_at","")),
+        ]),
+    ])
+
+
+def objection_response_document(obj: dict[str, Any], report_row: dict[str, Any], commission_row: dict[str, Any]):
+    return _objection_form("客户异议回复单",f"{obj.get('objection_no','')}-R",[
+        ("一、异议基本信息",[
+            ("异议编号",obj.get("objection_no","")),("关联报告编号",obj.get("report_no","")),
+            ("委托单位",obj.get("client_name","")),("联系人",obj.get("contact","")),
+        ]),
+        ("二、调查与处理",[
+            ("责任判定",obj.get("pathway","")),("调查过程",obj.get("investigation","")),
+            ("调查结论",obj.get("trace_conclusion","")),("影响范围",obj.get("impact_scope","")),
+            ("客户重测决定",obj.get("customer_retest_decision","")),
+            ("重测任务/替代报告",f"{obj.get('retest_task_no','')} / {obj.get('replacement_report_no','')}"),
+        ]),
+        ("三、正式回复",[
+            ("回复内容",obj.get("response_text","")),("回复方式",obj.get("response_method","")),
+            ("样品管理员",obj.get("sent_by","")),("发送时间",obj.get("sent_at","")),
+            ("接收凭证/备注",obj.get("response_receipt","")),
+        ]),
+    ])
 
 
 def commission_document(c,groups,tests,receiver_name):
@@ -227,6 +352,15 @@ def commission_document(c,groups,tests,receiver_name):
         prod=c.get("production_org_name","")+("（受委托生产企业）" if c.get("production_relation")=="受委托生产企业" else "")
         data.append([i,f"{g['sample_name']}（{g['model']}）",group_range(g),prod,"、".join(tm.get(g["group_no"],[])),g.get("quantity",1),g.get("notes","") or g.get("condition_note","")])
     _fill(d.tables[0],data)
+    table=d.tables[0]
+    # Long model/specification values must wrap and remain fully visible.
+    for row in table.rows[1:]:
+        row.height=Inches(0.46)
+        row.height_rule=WD_ROW_HEIGHT_RULE.AT_LEAST
+        for paragraph in row.cells[3].paragraphs:
+            paragraph.paragraph_format.keep_together=True
+            for run in paragraph.runs:
+                run.font.size=Pt(8)
     return _save(d)
 
 

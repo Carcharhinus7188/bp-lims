@@ -15,13 +15,13 @@ from business_record_engine import initialize_business_record, calculate_busines
 from business_record_ui import render_readonly_summary, render_task_confirmations, render_equipment_confirmation, render_prechecks, render_parameters, render_sample_data, render_exception_and_summary, render_completion
 from equipment_registry import EQUIPMENT_BINDING_ROLES
 from experiment_schemas import SCHEMAS
-from form_engine import commission_document, sample_register_document, loan_return_document, report_document, report_delivery_document, hazardous_waste_document, modification_log_pdf
+from form_engine import commission_document, sample_register_document, loan_return_document, report_document, report_delivery_document, hazardous_waste_document, modification_log_pdf, objection_application_document, objection_response_document
 from report_rules import overall_conclusion, report_item
 from trace_excel_engine import build_internal_trace_workbook
 from camera_evidence import save_live_camera_photo
 from pdf_preview import build_preview_pdf, pdf_page_images
 from docx_preview import docx_review_html
-from quick_demo import create_pending_review_demo, create_full_document_demo
+from quick_demo import create_pending_review_demo, create_full_document_demo, create_objection_application_demo
 
 ROOT=Path(__file__).parent
 TEMPLATE_DIR=ROOT/"templates"
@@ -1154,62 +1154,138 @@ elif page=="报告发放登记":
             st.rerun()
 
 elif page=="客户异议":
-    header("客户异议：实验室检测问题与样品自身问题两条处理路径")
+    header("客户异议：登记、质量调查、重测与回复")
     objection_rows=objections_for_user(role,username)
     show_df(objection_rows,["objection_no","report_no","client_name","status","pathway","quality_inspector","customer_retest_decision","updated_at"])
-    if role=="样品管理员":
+    if role=="管理员":
+        st.subheader("管理员异议申请测试Demo")
+        st.caption("生成一套已有正式报告的完整演示委托，并自动带入下方异议申请。不会自动登记异议，便于反复测试人工录入。")
+        if st.button("准备已签发报告异议Demo",type="primary",use_container_width=True):
+            try:
+                demo=create_objection_application_demo()
+                st.session_state.objection_demo_report_no=demo["report_no"]
+                st.session_state.flash_message=f"异议Demo已准备：{demo['report_no']}，请在下方填写异议申请"
+                st.rerun()
+            except Exception as e:st.error(str(e))
         published=rows("SELECT * FROM reports WHERE status='已发布' ORDER BY publish_date DESC")
         with st.expander("登记新的客户异议",expanded=not objection_rows):
             if published:
-                report_no=st.selectbox("关联报告",[x["report_no"] for x in published],key="obj_report")
+                report_options=[x["report_no"] for x in published]
+                preferred=st.session_state.get("objection_demo_report_no")
+                default_index=report_options.index(preferred) if preferred in report_options else 0
+                report_no=st.selectbox("关联已签发报告",report_options,index=default_index,key="obj_report")
                 report_row=report(report_no);commission_row=commission(report_row["commission_no"])
-                contact=st.text_input("客户联系人",commission_row.get("contact",""))
+                task_rows=commission_tasks(report_row["commission_no"])
+                group_rows=commission_groups(report_row["commission_no"])
+                all_samples=[]
+                for group_row in group_rows:all_samples.extend(group_samples(group_row["id"]))
+                st.info(f"委托：{report_row['commission_no']}｜客户：{commission_row.get('client_name','')}｜报告状态：{report_row.get('status','')}")
+                a,b,c=st.columns(3)
+                submitted_at=a.date_input("客户提出日期",value=china_today())
+                channel=b.selectbox("受理渠道",["书面申请","电子邮件","电话后补书面","现场提交","其他"])
+                contact=c.text_input("客户联系人",commission_row.get("contact",""))
+                disputed_items=st.multiselect("争议检验项目",list(dict.fromkeys(x["experiment"] for x in task_rows)))
+                involved_samples=st.multiselect("涉及样品", [x["sample_no"] for x in all_samples])
                 description=st.text_area("客户书面异议内容")
                 evidence=st.text_area("随附材料和证据说明")
-                if st.button("登记异议并冻结证据",type="primary"):
-                    objection_no=register_objection({
-                        "report_no":report_no,"client_name":commission_row["client_name"],
-                        "contact":contact,"description":description,"evidence_note":evidence,
-                    },username)
-                    st.success("已登记："+objection_no);st.rerun()
+                if st.button("登记异议、生成申请表并冻结证据",type="primary"):
+                    try:
+                        objection_no=register_objection({
+                            "report_no":report_no,"client_name":commission_row["client_name"],
+                            "contact":contact,"description":description,"evidence_note":evidence,
+                            "submitted_at":str(submitted_at),"application_channel":channel,
+                            "disputed_items":"、".join(disputed_items),
+                            "involved_samples":"、".join(involved_samples),
+                        },username)
+                        st.session_state.selected_objection_no=objection_no
+                        st.session_state.flash_message=f"异议 {objection_no} 已登记并分配质量调查"
+                        st.rerun()
+                    except Exception as e:st.error(str(e))
+            else:st.warning("当前没有已签发报告，无法登记异议。")
     if objection_rows:
-        objection_no=st.selectbox("选择异议",[x["objection_no"] for x in objection_rows])
+        options=[x["objection_no"] for x in objection_rows]
+        preferred=st.session_state.get("selected_objection_no")
+        objection_no=st.selectbox("选择异议",options,index=options.index(preferred) if preferred in options else 0)
         obj=objection(objection_no)
+        report_row=report(obj["report_no"]) or {}
+        commission_row=commission(obj["commission_no"]) or {}
+        st.download_button("下载客户异议申请表",objection_application_document(obj,report_row,commission_row),f"{objection_no}_客户异议申请表.docx",use_container_width=True)
         show_df(objection_actions(objection_no),["created_at","actor","action","comment"])
         if role=="质量检测员" and obj["status"]=="调查中" and obj["quality_inspector"]==username:
-            pathway=st.radio("调查结论",["检测方法或实验室实施问题","样品自身问题"])
-            investigation=st.text_area("调取的可追溯记录和调查过程")
+            st.subheader("质量调查工作台")
+            st.download_button("下载异议调查追溯Excel",build_internal_trace_workbook(obj["commission_no"]),f"{objection_no}_异议调查追溯表.xlsx",use_container_width=True)
+            related={obj["commission_no"],obj["report_no"],objection_no}
+            related.update(x["task_no"] for x in commission_tasks(obj["commission_no"]))
+            related_logs=[x for x in modification_logs() if x.get("entity_id") in related]
+            st.download_button("下载相关修改日志PDF",modification_log_pdf(related_logs,scope=f"异议 {objection_no}"),f"{objection_no}_修改日志.pdf",use_container_width=True)
+            evidence=st.text_area("调取并核对的证据（追溯表、照片、原始记录、报告版本等）")
+            a,b=st.columns(2)
+            method_check=a.text_area("检测方法/SOP核查")
+            equipment_check=b.text_area("设备、校准与软件数据核查")
+            environment_check=a.text_area("环境与温湿度核查")
+            operation_check=b.text_area("人员操作与过程符合性核查")
+            calculation_check=st.text_area("数据计算、转录、复核与报告核查")
+            impact_scope=st.text_area("影响范围")
+            investigation=st.text_area("完整调查过程")
             conclusion=st.text_area("调查结论与证据链")
+            suggestion=st.text_area("处理建议")
+            pathway=st.radio("责任判定",["是我们的问题","不是我们的问题"],horizontal=True)
             if st.button("提交调查结论",type="primary"):
-                quality_submit_objection(objection_no,username,pathway,investigation,conclusion);st.rerun()
-        if role=="管理员" and obj["status"]=="待管理员确认":
-            decision=st.text_area("管理员确认意见")
-            if st.button("确认调查结论",type="primary"):
-                admin_confirm_objection(objection_no,username,decision);st.rerun()
+                try:
+                    quality_submit_objection(objection_no,username,pathway,investigation,conclusion,{
+                        "quality_evidence":evidence,"quality_method_check":method_check,
+                        "quality_equipment_check":equipment_check,"quality_environment_check":environment_check,
+                        "quality_operation_check":operation_check,"quality_calculation_check":calculation_check,
+                        "impact_scope":impact_scope,"treatment_suggestion":suggestion,
+                    });st.rerun()
+                except Exception as e:st.error(str(e))
         if role=="样品管理员" and obj["status"]=="待客户确认重测":
-            decision=st.radio("客户是否需要重测",["需要重测","不需要重测"])
-            note=st.text_area("客户确认方式、时间及留样/重新送样说明")
+            st.warning("质量调查判定为实验室问题。请在系统外询问客户，并在此记录处理结果。")
+            a,b=st.columns(2)
+            contact_at=a.text_input("联系时间",value=now())
+            contact_method=b.selectbox("联系方式",["电话","微信","电子邮件","现场","其他"])
+            decision=st.radio("客户是否需要重测",["待处理","需要重测","不需要重测"],horizontal=True)
+            note=st.text_area("客户意见、留样/重新送样说明")
             if st.button("记录客户决定",type="primary"):
-                record_customer_retest_decision(objection_no,username,decision,note);st.rerun()
+                try:record_customer_retest_decision(objection_no,username,decision,note,contact_at,contact_method);st.rerun()
+                except Exception as e:st.error(str(e))
         if role=="样品管理员" and obj["status"]=="待安排重测":
-            st.info("如留样数量和状态满足要求，可直接下发留样重测；如需客户重新送样，应重新建立委托和新样品组。")
+            st.info("从原委托样品库选择可用留样，按编号规则生成新的重测实验任务。")
+            original_task=task(report_row.get("task_no","")) if report_row else None
+            available=group_samples(original_task["group_id"]) if original_task else []
+            available=[x for x in available if x.get("status") not in ("全部消耗，记录归档","已销毁","已报废")]
+            sample_nos=st.multiselect("选择重测样品",[x["sample_no"] for x in available],default=[x["sample_no"] for x in available])
             testers=role_users("实验员")
             assignee=st.selectbox("重测实验员",[x["username"] for x in testers],format_func=display_user,key="obj_retest_tester")
             if st.button("使用留样下发重测任务",type="primary"):
-                new_task=dispatch_retained_sample_retest(objection_no,assignee,username)
-                st.success("已下发重测任务："+new_task);st.rerun()
-        if role=="管理员" and obj["status"]=="待回复签发":
+                try:
+                    new_task=dispatch_retained_sample_retest(objection_no,assignee,username,sample_nos)
+                    st.session_state.flash_message="已下发重测任务："+new_task;st.rerun()
+                except Exception as e:st.error(str(e))
+        if role=="样品管理员" and obj["status"]=="重测任务已下发":
+            retest=task(obj.get("retest_task_no",""))
+            st.info(f"重测任务 {obj.get('retest_task_no','')} 当前状态：{retest.get('status','') if retest else '等待任务'}。重测报告签发后将自动进入异议回复。")
+        if role=="样品管理员" and obj["status"]=="待异议回复":
             default_response=(
                 f"关于异议{objection_no}，经调取委托、样品、原始记录、设备、环境、审核及报告记录，"
-                f"调查结论为：{obj.get('trace_conclusion','')}。"
+                f"调查结论为：{obj.get('trace_conclusion','')}。处理结果："
+                f"{'已按客户意见安排重测。' if obj.get('customer_retest_decision')=='需要重测' else '原报告结论有效。'}"
             )
             response=st.text_area("异议回复正文",default_response)
-            if st.button("签发异议回复",type="primary"):
-                admin_sign_objection_response(objection_no,username,response);st.rerun()
+            response_method=st.selectbox("计划回复方式",["电子邮件","现场领取","快递","微信","其他"])
+            if st.button("生成异议回复单",type="primary"):
+                try:sample_manager_prepare_objection_response(objection_no,username,response,response_method);st.rerun()
+                except Exception as e:st.error(str(e))
         if role=="样品管理员" and obj["status"]=="待发送":
-            send_note=st.text_area("发送方式和客户接收情况")
+            st.download_button("下载客户异议回复单",objection_response_document(obj,report_row,commission_row),f"{objection_no}-R_客户异议回复单.docx",use_container_width=True)
+            response_method=st.selectbox("实际回复方式",["电子邮件","现场领取","快递","微信","其他"],key="obj_send_method")
+            send_note=st.text_area("客户接收凭证、时间和备注")
             if st.button("发送回复并归档",type="primary"):
-                send_and_archive_objection(objection_no,username,send_note);st.rerun()
+                try:send_and_archive_objection(objection_no,username,send_note,response_method);st.rerun()
+                except Exception as e:st.error(str(e))
+        if role=="样品管理员" and obj["status"]=="已归档":
+            st.success("异议已回复并归档。")
+            st.download_button("下载已归档客户异议回复单",objection_response_document(obj,report_row,commission_row),f"{objection_no}-R_客户异议回复单.docx",use_container_width=True)
 
 elif page=="修改中心":
     header("⚠️ 原始记录修改中心")

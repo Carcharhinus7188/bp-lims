@@ -136,9 +136,10 @@ def build_internal_trace_workbook(commission_no: str) -> BytesIO:
             sample_no = raw.get("sample_no", "")
             photo_rows = [x for x in task_photos if x.get("sample_no") in ("", sample_no)]
             values = [
-                f"{labels.get(key, key)}：{_text(value)}"
+                f"{labels[key]}：{_text(value)}"
                 for key, value in raw.items()
-                if key not in ("sample_no", "note") and not key.startswith("_") and value not in (None, "")
+                if key in labels and key not in ("sample_no", "note")
+                and not key.startswith("_") and value not in (None, "")
             ]
             conclusion = "；".join(filter(None, [
                 f"{labels.get('report_summary')}：{business.get('report_summary','')}",
@@ -216,7 +217,7 @@ def build_internal_trace_workbook(commission_no: str) -> BytesIO:
 
     # 5. Complete normalized raw data; no first-seven-column truncation.
     ws = wb.add_worksheet("完整原始数据")
-    headers = ["任务编号", "实验项目", "样品编号", "数据区域", "中文字段", "程序字段", "值", "记录版本", "记录状态"]
+    headers = ["任务编号", "实验项目", "样品编号", "数据区域", "中文字段", "记录值", "记录版本", "记录状态"]
     setup(ws, "完整原始数据（逐字段展开）", len(headers) - 1)
     ws.write_row(3, 0, headers, header_fmt)
     out_row = 4
@@ -226,36 +227,37 @@ def build_internal_trace_workbook(commission_no: str) -> BytesIO:
         kind = (task_config_snapshot(task["task_no"]) or {}).get("kind") or "generic"
         labels = _field_labels(kind)
         for key, value in (business.get("parameters") or {}).items():
+            if key not in labels:
+                continue
             ws.write_row(out_row, 0, [
                 task["task_no"], task.get("experiment", ""), "", "环境/参数",
-                labels.get(key, key), key, _text(value), rec.get("version", ""), rec.get("status", ""),
+                labels[key], _text(value), rec.get("version", ""), rec.get("status", ""),
             ], cell_fmt); out_row += 1
         for raw in business.get("rows") or []:
             for key, value in raw.items():
-                if key.startswith("_"):
+                if key.startswith("_") or key not in labels:
                     continue
                 ws.write_row(out_row, 0, [
                     task["task_no"], task.get("experiment", ""), raw.get("sample_no", ""), "原始测量",
-                    labels.get(key, key), key, _text(value), rec.get("version", ""), rec.get("status", ""),
+                    labels[key], _text(value), rec.get("version", ""), rec.get("status", ""),
                 ], cell_fmt); out_row += 1
     ws.autofilter(3, 0, max(3, out_row - 1), len(headers) - 1)
-    ws.set_column(0, 2, 24); ws.set_column(3, 5, 26); ws.set_column(6, 6, 48); ws.set_column(7, 8, 18)
+    ws.set_column(0, 2, 24); ws.set_column(3, 4, 26); ws.set_column(5, 5, 48); ws.set_column(6, 7, 18)
 
-    # 6. Technical appendix.
-    ws = wb.add_worksheet("附件技术索引")
-    headers = ["附件编号", "任务编号", "样品编号", "节点", "来源", "证据状态", "文件名", "相对路径", "SHA-256", "服务器时间", "上传人", "原附件编号"]
-    setup(ws, "完整附件技术索引", len(headers) - 1)
+    # 6. Human-readable evidence directory. Internal paths, hashes and IDs stay in the database.
+    ws = wb.add_worksheet("照片证据目录")
+    headers = ["照片编号", "任务编号", "样品编号", "拍摄节点", "证据状态", "文件名称", "拍摄时间", "拍摄人"]
+    setup(ws, "照片证据目录", len(headers) - 1)
     ws.write_row(3, 0, headers, header_fmt)
     for offset, item in enumerate(attachments, 4):
         ws.write_row(offset, 0, [
             item.get("attachment_id", ""), item.get("task_no", ""), item.get("sample_no", ""),
-            item.get("checkpoint_label", ""), item.get("capture_source", ""), item.get("evidence_status", ""),
-            item.get("original_name", ""), item.get("relative_path", ""), item.get("sha256", ""),
+            item.get("checkpoint_label", ""), item.get("evidence_status", ""),
+            item.get("original_name", ""),
             item.get("server_captured_at") or item.get("captured_at", ""), item.get("uploader", ""),
-            item.get("parent_attachment_id", ""),
         ], cell_fmt)
     ws.autofilter(3, 0, max(3, 3 + len(attachments)), len(headers) - 1)
-    ws.set_column(0, 6, 24); ws.set_column(7, 8, 58); ws.set_column(9, 11, 24)
+    ws.set_column(0, 4, 24); ws.set_column(5, 5, 42); ws.set_column(6, 7, 24)
 
     wb.close()
     output.seek(0)

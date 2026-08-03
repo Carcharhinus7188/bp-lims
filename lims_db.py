@@ -272,9 +272,15 @@ CREATE TABLE IF NOT EXISTS objections(
   client_name TEXT, contact TEXT, submitted_at TEXT, description TEXT,
   evidence_note TEXT, status TEXT DEFAULT '已登记', pathway TEXT,
   investigation TEXT, trace_conclusion TEXT, quality_inspector TEXT,
+  disputed_items TEXT, involved_samples TEXT, application_channel TEXT,
+  quality_evidence TEXT, quality_method_check TEXT, quality_equipment_check TEXT,
+  quality_environment_check TEXT, quality_operation_check TEXT,
+  quality_calculation_check TEXT, impact_scope TEXT, treatment_suggestion TEXT,
   admin_decision TEXT, customer_retest_decision TEXT, retest_note TEXT,
+  customer_contact_at TEXT, customer_contact_method TEXT,
   retest_task_no TEXT, replacement_report_no TEXT,
-  response_text TEXT, registered_by TEXT, investigated_at TEXT,
+  response_text TEXT, response_method TEXT, response_receipt TEXT,
+  registered_by TEXT, investigated_at TEXT,
   approved_by TEXT, approved_at TEXT, sent_by TEXT, sent_at TEXT,
   archived_at TEXT, created_at TEXT, updated_at TEXT
 );
@@ -356,9 +362,30 @@ CREATE TABLE IF NOT EXISTS hazardous_waste_records(
             if column_name not in audit_columns:
                 c.execute(f"ALTER TABLE audit_logs ADD COLUMN {column_name} {column_type}")
         objection_columns = {item[1] for item in c.execute("PRAGMA table_info(objections)").fetchall()}
-        for column_name,column_type in (("retest_task_no","TEXT"),("replacement_report_no","TEXT")):
+        for column_name,column_type in (
+            ("retest_task_no","TEXT"),("replacement_report_no","TEXT"),
+            ("disputed_items","TEXT"),("involved_samples","TEXT"),
+            ("application_channel","TEXT"),("quality_evidence","TEXT"),
+            ("quality_method_check","TEXT"),("quality_equipment_check","TEXT"),
+            ("quality_environment_check","TEXT"),("quality_operation_check","TEXT"),
+            ("quality_calculation_check","TEXT"),("impact_scope","TEXT"),
+            ("treatment_suggestion","TEXT"),("customer_contact_at","TEXT"),
+            ("customer_contact_method","TEXT"),("response_method","TEXT"),
+            ("response_receipt","TEXT"),
+        ):
             if column_name not in objection_columns:
                 c.execute(f"ALTER TABLE objections ADD COLUMN {column_name} {column_type}")
+        # Older demos used an administrator confirmation step. Migrate them to
+        # the V8.1 role flow without requiring any manual administrator action.
+        c.execute(
+            """UPDATE objections
+               SET status=CASE
+                   WHEN pathway='检测方法或实验室实施问题' THEN '待客户确认重测'
+                   ELSE '待异议回复'
+               END,updated_at=?
+               WHERE status='待管理员确认'""",
+            (now(),),
+        )
         c.execute("UPDATE users SET role='实验员' WHERE role='实验人员'")
         c.execute("UPDATE users SET role='复核员' WHERE role='复核实验员'")
         c.execute("UPDATE users SET role='管理员' WHERE role='批准人'")
@@ -2436,10 +2463,20 @@ def approver_review_report(report_no: str, actor: str, decision: str, comment: s
         obsolete_prior_versions("record", r.get("task_no", ""), int(source.get(r.get("task_no", ""), 1)), actor, "最终报告已生成")
         with connect() as c:
             c.execute(
-                """UPDATE objections SET status='待回复签发',updated_at=?
+                """UPDATE objections SET status='待异议回复',updated_at=?
                    WHERE replacement_report_no=? AND status='重测任务已下发'""",
                 (now(),report_no),
             )
+            objection_row = c.execute(
+                "SELECT report_no FROM objections WHERE replacement_report_no=?",
+                (report_no,),
+            ).fetchone()
+            if objection_row:
+                c.execute(
+                    """UPDATE reports SET validity_status='已被重测报告替代',
+                       updated_at=? WHERE report_no=?""",
+                    (now(), objection_row["report_no"]),
+                )
     else:
         create_notification(
             r.get("quality_inspector", ""), "报告被授权签字人退回",
@@ -2634,8 +2671,13 @@ def _next_objection_no() -> str:
 
 def register_objection(data: dict[str, Any], actor: str) -> str:
     report_row = report(data["report_no"])
-    if not report_row:
-        raise ValueError("关联报告不存在")
+    actor_row = one("SELECT role FROM users WHERE username=?", (actor,)) or {}
+    if actor_row.get("role") != "管理员":
+        raise ValueError("只有管理员可以录入客户异议申请")
+    if not report_row or report_row.get("status") != "已发布":
+        raise ValueError("只能对已经签发的检验报告登记异议")
+    if not str(data.get("description") or "").strip():
+        raise ValueError("客户异议内容不能为空")
     objection_no = _next_objection_no()
     inspector = report_row.get("quality_inspector") or _auto_match_user("质量检测员")
     ts = now()
@@ -2643,14 +2685,17 @@ def register_objection(data: dict[str, Any], actor: str) -> str:
         c.execute(
             """INSERT INTO objections(
                objection_no,report_no,commission_no,client_name,contact,submitted_at,
-               description,evidence_note,status,quality_inspector,registered_by,
+               description,evidence_note,disputed_items,involved_samples,
+               application_channel,status,quality_inspector,registered_by,
                created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?, '调查中',?,?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?, '调查中',?,?,?,?)""",
             (
                 objection_no, report_row["report_no"], report_row["commission_no"],
                 data.get("client_name", ""), data.get("contact", ""),
                 data.get("submitted_at", ts), data.get("description", ""),
-                data.get("evidence_note", ""), inspector, actor, ts, ts,
+                data.get("evidence_note", ""), data.get("disputed_items", ""),
+                data.get("involved_samples", ""), data.get("application_channel", ""),
+                inspector, actor, ts, ts,
             ),
         )
         c.execute(
@@ -2662,6 +2707,11 @@ def register_objection(data: dict[str, Any], actor: str) -> str:
             (ts, report_row["report_no"]),
         )
     audit("objection", objection_no, actor, "登记客户异议", new_value=report_row["report_no"])
+    create_notification(
+        inspector, "客户异议待调查",
+        f"管理员已登记异议 {objection_no}，关联报告 {report_row['report_no']}，请调取追溯资料并完成责任判定。",
+        "objection", objection_no,
+    )
     return objection_no
 
 
@@ -2681,69 +2731,79 @@ def objection_actions(objection_no: str) -> list[dict[str, Any]]:
 
 def quality_submit_objection(
     objection_no: str, actor: str, pathway: str, investigation: str,
-    trace_conclusion: str,
+    trace_conclusion: str, details: dict[str, Any] | None = None,
 ) -> None:
     row = objection(objection_no)
     if not row or row["quality_inspector"] != actor or row["status"] != "调查中":
         raise ValueError("当前异议不能由该质量检测员提交调查")
-    if pathway not in ("检测方法或实验室实施问题", "样品自身问题"):
+    if pathway not in ("是我们的问题", "不是我们的问题"):
         raise ValueError("必须选择两条规定路径之一")
+    if not investigation.strip() or not trace_conclusion.strip():
+        raise ValueError("调查过程和调查结论均不能为空")
+    details = details or {}
+    next_status = "待客户确认重测" if pathway == "是我们的问题" else "待异议回复"
+    report_validity = "异议成立-暂停使用" if pathway == "是我们的问题" else "有效"
     ts = now()
     with connect() as c:
         c.execute(
             """UPDATE objections SET pathway=?,investigation=?,trace_conclusion=?,
-               status='待管理员确认',investigated_at=?,updated_at=?
+               quality_evidence=?,quality_method_check=?,quality_equipment_check=?,
+               quality_environment_check=?,quality_operation_check=?,
+               quality_calculation_check=?,impact_scope=?,treatment_suggestion=?,
+               status=?,investigated_at=?,updated_at=?
                WHERE objection_no=?""",
-            (pathway, investigation, trace_conclusion, ts, ts, objection_no),
+            (
+                pathway, investigation, trace_conclusion,
+                details.get("quality_evidence", ""), details.get("quality_method_check", ""),
+                details.get("quality_equipment_check", ""), details.get("quality_environment_check", ""),
+                details.get("quality_operation_check", ""), details.get("quality_calculation_check", ""),
+                details.get("impact_scope", ""), details.get("treatment_suggestion", ""),
+                next_status, ts, ts, objection_no,
+            ),
+        )
+        c.execute(
+            "UPDATE reports SET validity_status=?,updated_at=? WHERE report_no=?",
+            (report_validity, ts, row["report_no"]),
         )
         c.execute(
             "INSERT INTO objection_actions(objection_no,actor,action,comment,created_at) VALUES(?,?,?,?,?)",
             (objection_no, actor, "提交调查结论", pathway + "｜" + trace_conclusion, ts),
         )
     audit("objection", objection_no, actor, "提交调查结论", new_value=pathway, reason=trace_conclusion)
+    receiver = _auto_match_user("样品管理员")
+    create_notification(
+        receiver, "客户异议待处理",
+        (
+            f"异议 {objection_no} 已完成质量调查，判定为“{pathway}”。"
+            + ("请在系统外联系客户并记录是否需要重测。" if pathway == "是我们的问题" else "请拟制并发送异议回复。")
+        ),
+        "objection", objection_no,
+    )
 
 
 def admin_confirm_objection(objection_no: str, actor: str, decision: str) -> None:
-    row = objection(objection_no)
-    actor_row = one("SELECT role FROM users WHERE username=?", (actor,)) or {}
-    if not row or actor_row.get("role") != "管理员" or row["status"] != "待管理员确认":
-        raise ValueError("当前异议不能确认")
-    if row["pathway"] == "检测方法或实验室实施问题":
-        status = "待客户确认重测"
-        validity = "已作废"
-    else:
-        status = "待回复签发"
-        validity = "有效"
-    ts = now()
-    with connect() as c:
-        c.execute(
-            """UPDATE objections SET admin_decision=?,status=?,approved_by=?,
-               approved_at=?,updated_at=? WHERE objection_no=?""",
-            (decision, status, actor, ts, ts, objection_no),
-        )
-        c.execute(
-            "UPDATE reports SET validity_status=?,updated_at=? WHERE report_no=?",
-            (validity, ts, row["report_no"]),
-        )
-        c.execute(
-            "INSERT INTO objection_actions(objection_no,actor,action,comment,created_at) VALUES(?,?,?,?,?)",
-            (objection_no, actor, "管理员确认调查结论", decision, ts),
-        )
-    audit("objection", objection_no, actor, "管理员确认调查结论", new_value=status, reason=decision)
+    raise ValueError("V8.1已取消管理员异议确认步骤；质量调查后由样品管理员继续处理")
 
 
 def record_customer_retest_decision(
     objection_no: str, actor: str, decision: str, note: str,
+    contact_at: str = "", contact_method: str = "",
 ) -> None:
     row = objection(objection_no)
+    actor_row = one("SELECT role FROM users WHERE username=?", (actor,)) or {}
+    if actor_row.get("role") != "样品管理员":
+        raise ValueError("只有样品管理员可以记录客户重测决定")
     if not row or row["status"] != "待客户确认重测":
         raise ValueError("当前异议不在客户重测确认阶段")
-    status = "待安排重测" if decision == "需要重测" else "待回复签发"
+    if decision not in ("需要重测", "不需要重测", "待处理"):
+        raise ValueError("客户决定选项无效")
+    status = "待安排重测" if decision == "需要重测" else ("待异议回复" if decision == "不需要重测" else "待客户确认重测")
     with connect() as c:
         c.execute(
             """UPDATE objections SET customer_retest_decision=?,retest_note=?,
+               customer_contact_at=?,customer_contact_method=?,
                status=?,updated_at=? WHERE objection_no=?""",
-            (decision, note, status, now(), objection_no),
+            (decision, note, contact_at or now(), contact_method, status, now(), objection_no),
         )
         c.execute(
             "INSERT INTO objection_actions(objection_no,actor,action,comment,created_at) VALUES(?,?,?,?,?)",
@@ -2752,8 +2812,14 @@ def record_customer_retest_decision(
     audit("objection", objection_no, actor, "记录客户重测决定", new_value=decision, reason=note)
 
 
-def dispatch_retained_sample_retest(objection_no: str, assignee: str, actor: str) -> str:
+def dispatch_retained_sample_retest(
+    objection_no: str, assignee: str, actor: str,
+    selected_sample_nos: list[str] | None = None,
+) -> str:
     row = objection(objection_no)
+    actor_row = one("SELECT role FROM users WHERE username=?", (actor,)) or {}
+    if actor_row.get("role") != "样品管理员":
+        raise ValueError("只有样品管理员可以从样品库下发重测任务")
     if not row or row["status"] != "待安排重测" or row["customer_retest_decision"] != "需要重测":
         raise ValueError("当前异议不能下发留样重测")
     original_report = report(row["report_no"])
@@ -2769,7 +2835,13 @@ def dispatch_retained_sample_retest(objection_no: str, assignee: str, actor: str
     package_no = _next_package_no(g["group_no"])
     task_count = one("SELECT COUNT(*) n FROM tasks WHERE group_no=?", (g["group_no"],))["n"]
     task_no = f"{g['group_no']}-T{task_count + 1:02d}"
-    sample_nos = [x["sample_no"] for x in samples if x["status"] != "全部消耗，记录归档"]
+    available = {
+        x["sample_no"]: x for x in samples
+        if x["status"] not in ("全部消耗，记录归档", "已销毁", "已报废")
+    }
+    sample_nos = list(dict.fromkeys(selected_sample_nos or available.keys()))
+    if not sample_nos or any(sample_no not in available for sample_no in sample_nos):
+        raise ValueError("所选样品不在原委托可用留样库中")
     original_snapshot = task_config_snapshot(original_task["task_no"])
     snapshot_hash = hashlib.sha256(
         json.dumps(original_snapshot,ensure_ascii=False,sort_keys=True,default=str).encode("utf-8")
@@ -2823,37 +2895,71 @@ def dispatch_retained_sample_retest(objection_no: str, assignee: str, actor: str
             "INSERT INTO objection_actions(objection_no,actor,action,comment,created_at) VALUES(?,?,?,?,?)",
             (objection_no,actor,"下发留样重测任务",task_no,ts),
         )
+        for sample_no in sample_nos:
+            old = available[sample_no]
+            c.execute(
+                """UPDATE samples SET status='待接收重测',current_holder=?,
+                   updated_at=? WHERE sample_no=?""",
+                (assignee, ts, sample_no),
+            )
+            c.execute(
+                """INSERT INTO sample_events(
+                   sample_no,actor,action,from_status,to_status,from_location,
+                   to_location,details,created_at
+                   ) VALUES(?,?, '异议留样重测派发',?,'待接收重测',?,?,?,?)""",
+                (
+                    sample_no, actor, old.get("status", ""), old.get("current_location", ""),
+                    old.get("current_location", ""), f"异议:{objection_no};任务:{task_no}", ts,
+                ),
+            )
     audit("objection",objection_no,actor,"下发留样重测任务",new_value=task_no)
+    create_notification(
+        assignee, "收到异议重测任务",
+        f"异议 {objection_no} 已从样品库派发留样，重测任务为 {task_no}，请接收后按原流程检测。",
+        "task", task_no,
+    )
     return task_no
 
 
-def admin_sign_objection_response(objection_no: str, actor: str, response_text: str) -> None:
+def sample_manager_prepare_objection_response(
+    objection_no: str, actor: str, response_text: str,
+    response_method: str = "",
+) -> None:
     row = objection(objection_no)
     actor_row = one("SELECT role FROM users WHERE username=?", (actor,)) or {}
-    if not row or actor_row.get("role") != "管理员" or row["status"] != "待回复签发":
-        raise ValueError("当前异议不能签发回复")
+    if not row or actor_row.get("role") != "样品管理员" or row["status"] != "待异议回复":
+        raise ValueError("当前异议不能由样品管理员生成回复")
+    if not response_text.strip():
+        raise ValueError("异议回复正文不能为空")
     with connect() as c:
         c.execute(
-            "UPDATE objections SET response_text=?,status='待发送',updated_at=? WHERE objection_no=?",
-            (response_text, now(), objection_no),
+            """UPDATE objections SET response_text=?,response_method=?,
+               status='待发送',updated_at=? WHERE objection_no=?""",
+            (response_text, response_method, now(), objection_no),
         )
         c.execute(
             "INSERT INTO objection_actions(objection_no,actor,action,comment,created_at) VALUES(?,?,?,?,?)",
-            (objection_no, actor, "签发异议回复", response_text, now()),
+            (objection_no, actor, "生成异议回复单", response_text, now()),
         )
-    audit("objection", objection_no, actor, "签发异议回复", new_value=f"{objection_no}-R")
+    audit("objection", objection_no, actor, "生成异议回复单", new_value=f"{objection_no}-R")
 
 
-def send_and_archive_objection(objection_no: str, actor: str, note: str) -> None:
+def send_and_archive_objection(
+    objection_no: str, actor: str, note: str, response_method: str = "",
+) -> None:
     row = objection(objection_no)
+    actor_row = one("SELECT role FROM users WHERE username=?", (actor,)) or {}
+    if actor_row.get("role") != "样品管理员":
+        raise ValueError("只有样品管理员可以发送异议回复")
     if not row or row["status"] != "待发送":
         raise ValueError("异议回复尚未签发")
     ts = now()
     with connect() as c:
         c.execute(
             """UPDATE objections SET status='已归档',sent_by=?,sent_at=?,
-               archived_at=?,updated_at=? WHERE objection_no=?""",
-            (actor, ts, ts, ts, objection_no),
+               response_method=COALESCE(NULLIF(?,''),response_method),
+               response_receipt=?,archived_at=?,updated_at=? WHERE objection_no=?""",
+            (actor, ts, response_method, note, ts, ts, objection_no),
         )
         c.execute(
             "INSERT INTO objection_actions(objection_no,actor,action,comment,created_at) VALUES(?,?,?,?,?)",
