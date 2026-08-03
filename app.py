@@ -31,27 +31,47 @@ st.set_page_config(page_title="BPLab Trace",page_icon="🧪",layout="wide",initi
 st.markdown("""
 <style>
 :root{
-  --lab-navy:#0f1a2f;--lab-blue:#3478f6;--lab-cyan:#21b3a8;
-  --lab-ink:#172033;--lab-muted:#6b7485;--lab-line:#e7ebf1;
-  --lab-bg:#f6f8fb;--lab-panel:#ffffff;--lab-soft:#edf3ff;
+  --lab-navy:#334155;--lab-blue:#7183a6;--lab-cyan:#79a9a3;
+  --lab-ink:#293443;--lab-muted:#7b8492;--lab-line:#e3e8ee;
+  --lab-bg:#eef2f5;--lab-panel:#ffffff;--lab-soft:#e8edf5;
 }
 html,body,.stApp,[data-testid=stAppViewContainer]{
   background:var(--lab-bg);color:var(--lab-ink);font-family:"Inter","PingFang SC","Microsoft YaHei",sans-serif;
 }
 .block-container{max-width:1480px;padding:1.25rem 2rem 4rem}
 [data-testid=stSidebar]{
-  background:#0f1a2f;border-right:1px solid #182744;min-width:260px;
+  background:#fbfcfd;border-right:1px solid #e2e7ec;min-width:270px;
+  box-shadow:5px 0 20px rgba(50,65,80,.035);
 }
 [data-testid=stSidebar] h1,[data-testid=stSidebar] h2,[data-testid=stSidebar] h3,
-[data-testid=stSidebar] p,[data-testid=stSidebar] label{color:#eef7fa!important}
+[data-testid=stSidebar] p,[data-testid=stSidebar] label{color:#3f4b5b!important}
+[data-testid=stSidebar] [data-testid=stCaptionContainer] p{
+  color:#89929f!important;font-size:.72rem;letter-spacing:.07em;font-weight:700;
+}
 [data-testid=stSidebar] [role=radiogroup]{gap:3px}
 [data-testid=stSidebar] [role=radio]{
   background:transparent;border:1px solid transparent;border-radius:8px;
   padding:10px 12px;margin:2px 0;transition:none;
 }
 [data-testid=stSidebar] [role=radio]:has(input:checked){
-  background:#192b4d;border-color:#28436f;box-shadow:inset 3px 0 0 #4b84ff;
+  background:#e8edf5;border-color:#dfe5ed;box-shadow:inset 3px 0 0 #8292b0;
 }
+[data-testid=stSidebar] .stButton>button{
+  width:100%;justify-content:flex-start;border:1px solid transparent;background:transparent;
+  color:#667080;border-radius:9px;min-height:38px;padding:.45rem .7rem;font-weight:560;
+}
+[data-testid=stSidebar] .stButton>button:hover{
+  background:#f0f3f6;border-color:#e5e9ee;color:#354154;
+}
+[data-testid=stSidebar] .stButton>button[kind=primary]{
+  background:#e6ebf3;border-color:#dce3ec;color:#33445f;
+  box-shadow:inset 3px 0 0 #8293b2;font-weight:750;
+}
+.sidebar-profile{
+  background:#f1f4f7;border:1px solid #e5e9ee;border-radius:11px;
+  padding:11px 12px;margin:8px 0 15px;
+}
+.sidebar-profile b{color:#344154}.sidebar-profile span{color:#89929f;font-size:.76rem}
 .lab-topbar{
   display:flex;align-items:center;justify-content:space-between;background:#fff;
   border:1px solid var(--lab-line);border-radius:10px 10px 0 0;padding:10px 18px;
@@ -607,13 +627,38 @@ if goto_page in ROLE_MENUS[role]:
     st.session_state["main_navigation"]=goto_page
     del st.query_params["goto"]
 with st.sidebar:
-    st.markdown("## 🧪 BPLab Trace")
+    st.markdown("## ◉ BPLab Trace")
     st.caption("LABORATORY MANAGEMENT")
-    st.markdown(f"**{user['display_name']}**")
-    st.caption(f"{role} · 受控工作台")
-    st.divider()
-    page=st.radio("导航",ROLE_MENUS[role],label_visibility="collapsed",key="main_navigation")
-    st.divider();st.caption("系统时间：中国大陆 UTC+8")
+    st.markdown(
+        f'<div class="sidebar-profile"><b>{html.escape(user["display_name"])}</b><br>'
+        f'<span>{html.escape(role)} · 受控工作台</span></div>',
+        unsafe_allow_html=True,
+    )
+    if st.session_state.get("main_navigation") not in ROLE_MENUS[role]:
+        st.session_state["main_navigation"]=ROLE_MENUS[role][0]
+    current_page=st.session_state["main_navigation"]
+    for group_index,(group_name,group_pages) in enumerate(ROLE_NAV_GROUPS[role]):
+        if group_index==0:
+            st.caption(group_name.upper())
+            target_container=st.container()
+        else:
+            target_container=st.expander(
+                group_name,
+                expanded=current_page in group_pages,
+            )
+        with target_container:
+            for nav_page in group_pages:
+                icon=NAV_ICONS.get(nav_page,"·")
+                if st.button(
+                    f"{icon}　{nav_page}",
+                    key=f"nav_{role}_{nav_page}",
+                    type="primary" if nav_page==current_page else "secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state["main_navigation"]=nav_page
+                    st.rerun()
+    page=st.session_state["main_navigation"]
+    st.divider();st.caption("中国大陆时间 · UTC+8")
     if st.button("退出登录",use_container_width=True,key="logout_button"):delete_session(st.query_params.get("session",""));st.session_state.clear();st.query_params.clear();st.rerun()
 
 flash_message = st.session_state.pop("flash_message", None)
