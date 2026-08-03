@@ -18,7 +18,8 @@ from form_engine import commission_document, sample_register_document, loan_retu
 from report_rules import overall_conclusion, report_item
 from trace_excel_engine import build_internal_trace_workbook
 from camera_evidence import save_live_camera_photo
-from pdf_preview import build_preview_pdf, pdf_page_images, docx_to_pdf
+from pdf_preview import build_preview_pdf, pdf_page_images
+from quick_demo import create_full_document_demo
 
 ROOT=Path(__file__).parent
 TEMPLATE_DIR=ROOT/"templates"
@@ -240,42 +241,17 @@ def show_pdf_preview(title, sections):
         st.image(image,caption=f"{title}｜第 {index} 页",use_container_width=True)
 
 
-@st.cache_data(show_spinner=False)
-def controlled_document_pdf(docx_content):
-    """The sole PDF output path used by both document center and previews."""
-    return docx_to_pdf(docx_content)
-
-
-@st.cache_data(show_spinner=False)
-def controlled_pdf_preview_pages(pdf_content):
-    return [image.getvalue() for image in pdf_page_images(pdf_content)]
-
-
-def show_controlled_pdf_preview(title, pdf_content):
-    st.markdown("#### 正式单据 PDF 预览")
-    st.caption("此处读取单据中心的同一份正式PDF；请在阅读器内翻页或缩放，审核阶段不提供文件下载按钮。")
-    try:
-        if hasattr(st, "pdf"):
-            # Native fixed-height PDF reader: page navigation and zoom stay
-            # inside one viewport instead of expanding every page vertically.
-            st.pdf(pdf_content, height=900, key=f"pdf_reader_{hashlib.sha256(pdf_content).hexdigest()[:16]}")
-            return
-        # Compatibility fallback for an incompletely rebuilt deployment:
-        # render exactly one selected page, never the entire document at once.
-        with st.spinner("正在读取正式PDF…"):
-            pages=controlled_pdf_preview_pages(pdf_content)
-        page_number=st.number_input(
-            "预览页码",min_value=1,max_value=len(pages),value=1,step=1,
-            key=f"pdf_page_{hashlib.sha256(pdf_content).hexdigest()[:16]}",
-        )
-        st.caption(f"{title}｜共 {len(pages)} 页")
-        st.image(
-            pages[int(page_number)-1],
-            caption=f"{title}｜第 {int(page_number)} 页",
-            use_container_width=True,
-        )
-    except Exception as error:
-        st.error(str(error))
+def show_controlled_docx_review(title, docx_content):
+    st.markdown("#### 受控 DOCX 审核文件")
+    st.caption("当前暂时停用PDF转换。此文件与复核通过后进入单据中心的DOCX为同一受控模板输出。")
+    st.download_button(
+        "打开审核用DOCX",
+        docx_content,
+        f"{title}.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        key=f"review_docx_{hashlib.sha256(docx_content).hexdigest()[:16]}",
+        use_container_width=True,
+    )
 
 
 def preview_rows(kind, rows0):
@@ -794,12 +770,10 @@ elif page=="原始记录复核":
         st.subheader("设备使用确认");show_df(business.get("equipment_checks") or [])
         st.subheader("异常与结果")
         st.write("实验状态：",business.get("overall_status",""));st.write("异常/偏离：",business.get("deviation","无"));st.write("复测/重制：",business.get("retest","否"));st.write("结果摘要：",business.get("report_summary",""));st.write("单项结论：",business.get("report_conclusion",""))
-        record_pdf=controlled_document_pdf(
-            export_record(r,template_name,audit_logs(rn)).getvalue()
-        )
-        show_controlled_pdf_preview(
+        record_docx=export_record(r,template_name,audit_logs(rn)).getvalue()
+        show_controlled_docx_review(
             f"{rn}_V{v}_实验原始记录表",
-            record_pdf,
+            record_docx,
         )
         show_report_photo_preview(r["task_no"])
         st.info("原始记录由实验员提交并完成自查，复核员通过后立即锁定并开放正式文件下载。")
@@ -949,9 +923,22 @@ elif page=="一键下载":
 
 elif page=="单据中心":
     header("检验委托单、样品登记、领用归还、原始记录和检验报告")
+    if role=="管理员":
+        st.info("临时演示工具：一次生成全部十种实验、完整设备快照、已锁定原始记录和已签发报告。")
+        if st.button("生成完整单据演示并直接查看",type="primary",key="create_full_document_demo"):
+            try:
+                demo_commission=create_full_document_demo()
+                st.session_state["document_commission_no"]=demo_commission
+                st.toast("完整演示单据已生成")
+                st.rerun()
+            except Exception as error:
+                st.error("生成演示数据失败："+str(error))
     cs=list_commissions();show_df(cs,["commission_no","client_name","commission_date","due_date","status"])
     if cs:
-        cn=st.selectbox("选择委托",[x["commission_no"] for x in cs]);c0=commission(cn);groups=commission_groups(cn);samples0=commission_samples(cn);tests=commission_tests(cn);users0=user_map();st.download_button("下载检验委托单",commission_document(c0,groups,tests,display_user(c0["created_by"])),f"{cn}_检验委托单.docx");st.download_button("下载样品登记表",sample_register_document(c0,groups,samples0,tests,display_user(c0["created_by"])),f"{cn}_样品登记表.docx");st.download_button("下载样品领用归还登记表",loan_return_document(commission_loans(cn),users0),f"{cn}_样品领用归还登记表.docx")
+        commission_options=[x["commission_no"] for x in cs]
+        if st.session_state.get("document_commission_no") not in commission_options:
+            st.session_state["document_commission_no"]=commission_options[0]
+        cn=st.selectbox("选择委托",commission_options,key="document_commission_no");c0=commission(cn);groups=commission_groups(cn);samples0=commission_samples(cn);tests=commission_tests(cn);users0=user_map();st.download_button("下载检验委托单",commission_document(c0,groups,tests,display_user(c0["created_by"])),f"{cn}_检验委托单.docx");st.download_button("下载样品登记表",sample_register_document(c0,groups,samples0,tests,display_user(c0["created_by"])),f"{cn}_样品登记表.docx");st.download_button("下载样品领用归还登记表",loan_return_document(commission_loans(cn),users0),f"{cn}_样品领用归还登记表.docx")
         st.download_button("下载内部实验数据追溯Excel",build_internal_trace_workbook(cn),f"{cn}_内部实验数据追溯工作簿.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         st.subheader("危废处置登记表")
         waste_documents=rows(
@@ -996,12 +983,11 @@ elif page=="单据中心":
             rn,v=key.split("|");r=record(rn,int(v));t=task(rn);snap=task_config_snapshot(rn)
             r["kind"]=snap.get("kind") or "generic";template_name=snap.get("record_template_file","")
             changes=audit_logs(rn)
-            record_pdf=controlled_document_pdf(
-                export_record(r,template_name,changes).getvalue()
-            )
+            record_docx=export_record(r,template_name,changes).getvalue()
             st.download_button(
-                "下载选定原始记录表PDF",record_pdf,
-                f"{rn}_V{v}_原始记录表.pdf","application/pdf",
+                "下载选定原始记录表DOCX",record_docx,
+                f"{rn}_V{v}_原始记录表.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
         report_rows=rows("SELECT * FROM reports WHERE commission_no=? ORDER BY report_no",(cn,))
         if report_rows:
@@ -1011,15 +997,14 @@ elif page=="单据中心":
             task_row["sample_name"]=next(g["sample_name"] for g in groups if g["id"]==task_row["group_id"])
             sigs={u:signature(u) for u in users0}
             if rp["status"]=="已发布" and rp.get("validity_status")=="有效":
-                report_pdf=controlled_document_pdf(
-                    report_document(
-                        c0,groups,samples0,[task_row],
-                        report_records_for_report(selected_report),rp,users0,sigs,
-                    ).getvalue()
-                )
+                report_docx=report_document(
+                    c0,groups,samples0,[task_row],
+                    report_records_for_report(selected_report),rp,users0,sigs,
+                ).getvalue()
                 st.download_button(
-                    "下载授权签字人已签发的检验报告PDF",report_pdf,
-                    f"{selected_report}_检验报告.pdf","application/pdf",
+                    "下载授权签字人已签发的检验报告DOCX",report_docx,
+                    f"{selected_report}_检验报告.docx",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
             else:
                 st.info("该报告尚未完成质量负责人预览确认和管理员（授权签字人）签发，仅可在线预览，不能下载。")
@@ -1047,15 +1032,13 @@ elif page=="报告中心":
         )
         preview_users=user_map()
         preview_signatures={name:signature(name) for name in preview_users}
-        report_pdf=controlled_document_pdf(
-            report_document(
-                commission0,report_groups,report_samples,[task_preview],
-                report_records_for_report(rn),r,preview_users,preview_signatures,
-            ).getvalue()
-        )
-        show_controlled_pdf_preview(
+        report_docx=report_document(
+            commission0,report_groups,report_samples,[task_preview],
+            report_records_for_report(rn),r,preview_users,preview_signatures,
+        ).getvalue()
+        show_controlled_docx_review(
             f"{rn}_检验报告",
-            report_pdf,
+            report_docx,
         )
         show_report_photo_preview(r["task_no"])
         if r["status"]=="待质量审核" and role=="质量检测员" and username==r["quality_inspector"]:
