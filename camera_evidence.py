@@ -7,7 +7,8 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-from lims_db import now, save_attachment, supersede_camera_checkpoint
+from lims_db import now, save_attachment, supersede_camera_checkpoint, task
+from constants import SAMPLE_LEVEL_PHOTO_CODES
 
 
 def _font(size: int):
@@ -74,7 +75,15 @@ def save_live_camera_photo(
     task_no = str(meta["task_no"])
     checkpoint_code = str(meta["checkpoint_code"])
     checkpoint_label = str(meta["checkpoint_label"])
-    supersede_camera_checkpoint(task_no, checkpoint_code, actor)
+    sample_no = str(meta.get("sample_no") or "")
+    if checkpoint_code in SAMPLE_LEVEL_PHOTO_CODES:
+        task_row = task(task_no) or {}
+        if sample_no not in (task_row.get("sample_nos_list") or []):
+            raise ValueError("该拍照节点必须选择并关联一个实际实体样品")
+    else:
+        sample_no = ""
+        meta = {**meta, "sample_no": ""}
+    supersede_camera_checkpoint(task_no, checkpoint_code, actor, sample_no)
     base = {
         **meta,
         "attachment_type": "实验现场照片",

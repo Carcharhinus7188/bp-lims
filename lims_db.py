@@ -2083,12 +2083,14 @@ def save_attachment(meta: dict[str, Any], content: bytes, actor: str) -> str:
     return attachment_id
 
 
-def supersede_camera_checkpoint(task_no: str, checkpoint_code: str, actor: str) -> None:
+def supersede_camera_checkpoint(
+    task_no: str, checkpoint_code: str, actor: str, sample_no: str = "",
+) -> None:
     prior = rows(
         """SELECT attachment_id FROM attachments
            WHERE task_no=? AND checkpoint_code=? AND capture_source='live_camera'
-             AND evidence_status='有效'""",
-        (task_no, checkpoint_code),
+             AND COALESCE(sample_no,'')=? AND evidence_status='有效'""",
+        (task_no, checkpoint_code, sample_no),
     )
     if not prior:
         return
@@ -2096,8 +2098,8 @@ def supersede_camera_checkpoint(task_no: str, checkpoint_code: str, actor: str) 
         c.execute(
             """UPDATE attachments SET evidence_status='已替代'
                WHERE task_no=? AND checkpoint_code=? AND capture_source='live_camera'
-                 AND evidence_status='有效'""",
-            (task_no, checkpoint_code),
+                 AND COALESCE(sample_no,'')=? AND evidence_status='有效'""",
+            (task_no, checkpoint_code, sample_no),
         )
     audit(
         "photo_evidence", task_no, actor, "重拍替代旧照片",
@@ -2108,23 +2110,36 @@ def supersede_camera_checkpoint(task_no: str, checkpoint_code: str, actor: str) 
 
 
 def camera_checkpoint_status(task_no: str, checkpoints: list[tuple[str, str, bool]]) -> list[dict[str, Any]]:
+    from constants import SAMPLE_LEVEL_PHOTO_CODES
+    task_row = task(task_no) or {}
+    required_samples = task_row.get("sample_nos_list") or []
     current = rows(
-        """SELECT checkpoint_code,COUNT(*) AS photo_count,MAX(server_captured_at) AS captured_at
+        """SELECT checkpoint_code,COALESCE(sample_no,'') sample_no,
+           COUNT(*) AS photo_count,MAX(server_captured_at) AS captured_at
            FROM attachments WHERE task_no=? AND capture_source='live_camera'
              AND is_original=1 AND evidence_status='有效'
-           GROUP BY checkpoint_code""",
+           GROUP BY checkpoint_code,COALESCE(sample_no,'')""",
         (task_no,),
     )
-    mapped = {x["checkpoint_code"]: x for x in current}
-    return [
-        {
+    output = []
+    for code, label, required in checkpoints:
+        matched = [x for x in current if x["checkpoint_code"] == code]
+        captured_samples = {x["sample_no"] for x in matched if x["sample_no"]}
+        missing_samples = [
+            sample_no for sample_no in required_samples if sample_no not in captured_samples
+        ] if code in SAMPLE_LEVEL_PHOTO_CODES else []
+        complete = (
+            not missing_samples and bool(required_samples)
+            if code in SAMPLE_LEVEL_PHOTO_CODES
+            else any(not x["sample_no"] for x in matched)
+        )
+        output.append({
             "checkpoint_code": code, "checkpoint_label": label, "required": required,
-            "complete": bool(mapped.get(code, {}).get("photo_count")),
-            "photo_count": mapped.get(code, {}).get("photo_count", 0),
-            "captured_at": mapped.get(code, {}).get("captured_at", ""),
-        }
-        for code, label, required in checkpoints
-    ]
+            "complete": complete, "photo_count": sum(x["photo_count"] for x in matched),
+            "captured_at": max((x["captured_at"] or "" for x in matched), default=""),
+            "missing_samples": missing_samples,
+        })
+    return output
 
 
 def mandatory_camera_complete(task_no: str, checkpoints: list[tuple[str, str, bool]]) -> bool:

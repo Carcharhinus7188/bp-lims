@@ -298,6 +298,39 @@ def report_document(c,groups,samples,tasks,records,report,user_names,signatures)
         if p.text.strip().startswith("样品情况说明："):_set_existing_text(p,"样品情况说明："+(report.get("sample_statement") or auto_statement))
         if p.text.strip().startswith("检验结论："):_set_existing_text(p,"检验结论："+(report.get("conclusion") or auto_conclusion))
 
+    # Insert the explicitly captured report-area photo into the controlled report.
+    from lims_db import list_attachments, attachment_file
+    report_photos=[]
+    for task_item in tasks:
+        candidates=[
+            item for item in list_attachments(task_no=task_item["task_no"])
+            if item.get("checkpoint_code")=="REPORT_PHOTO"
+            and item.get("capture_source")=="live_camera"
+            and item.get("evidence_status")=="有效"
+            and not bool(item.get("is_original"))
+        ]
+        if candidates:
+            report_photos.append((task_item,candidates[0]))
+    for paragraph in d.paragraphs:
+        if paragraph.text.strip().startswith("照片和说明："):
+            _set_existing_text(paragraph,"照片和说明：")
+            for task_item,photo in report_photos:
+                path=attachment_file(photo)
+                if not path.exists():
+                    continue
+                paragraph.add_run("\n")
+                try:
+                    paragraph.add_run().add_picture(str(path),width=Inches(2.6))
+                    paragraph.add_run(
+                        f"\n{task_item.get('experiment','')}｜{photo.get('server_captured_at','')}｜"
+                        f"{photo.get('original_name','')}"
+                    )
+                except Exception:
+                    paragraph.add_run(f"\n照片文件：{photo.get('original_name','')}")
+            if not report_photos:
+                paragraph.add_run("未留档")
+            break
+
     equipment_rows=[]
     equipment=list(equipment_map.values())
     for item in equipment[:5]:

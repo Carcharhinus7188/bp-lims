@@ -6,7 +6,10 @@ import json
 import textwrap
 from typing import Any
 
-import fitz
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
 
 
 def _plain(value: Any) -> str:
@@ -34,20 +37,28 @@ def build_preview_pdf(title: str, sections: list[tuple[str, Any]]) -> bytes:
     for line in lines:
         wrapped.extend(textwrap.wrap(line, width=48, replace_whitespace=False) or [""])
 
-    document = fitz.open()
-    per_page = 42
-    for offset in range(0, len(wrapped), per_page):
-        page = document.new_page(width=595, height=842)
-        page.insert_textbox(
-            fitz.Rect(45, 45, 550, 800),
-            "\n".join(wrapped[offset:offset + per_page]),
-            fontname="china-s", fontsize=10.5, lineheight=1.35,
-            color=(0.08, 0.16, 0.22),
-        )
-    return document.tobytes(garbage=4, deflate=True)
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    output = BytesIO()
+    writer = canvas.Canvas(output, pagesize=A4, pageCompression=1)
+    width, height = A4
+    y = height - 48
+    writer.setFont("STSong-Light", 15)
+    writer.drawString(45, y, title)
+    y -= 28
+    writer.setFont("STSong-Light", 10.5)
+    for line in wrapped[2:]:
+        if y < 48:
+            writer.showPage()
+            writer.setFont("STSong-Light", 10.5)
+            y = height - 48
+        writer.drawString(45, y, line)
+        y -= 16
+    writer.save()
+    return output.getvalue()
 
 
 def pdf_page_images(content: bytes) -> list[BytesIO]:
+    import fitz
     document = fitz.open(stream=content, filetype="pdf")
     images: list[BytesIO] = []
     for page in document:

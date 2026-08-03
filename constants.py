@@ -5,7 +5,7 @@ COMPANY_CN = "大连标普检测有限公司"
 COMPANY_EN = "DALIAN BIAOPU TESTING CO., LTD."
 SYSTEM_CN = "大连标普实验室样品全过程追溯系统"
 SYSTEM_EN = "BPLab Sample Lifecycle Tracking System"
-APP_VERSION = "BPLab Trace V7.0 全流程签审演示版"
+APP_VERSION = "BPLab Trace V7.1 流程校正版"
 TIMEZONE_NAME = "Asia/Shanghai"
 
 STORAGE_AREAS = ["A区域", "B区域"]
@@ -41,6 +41,7 @@ COMMON_PHOTO_CHECKPOINTS = [
     ("SETUP", "样品安装、装夹或放置状态", True),
     ("RESULT", "最终读数、曲线或结果界面", True),
     ("SAMPLE_AFTER", "实验结束后样品状态", True),
+    ("REPORT_PHOTO", "检验报告照片区域用代表性照片", True),
 ]
 
 # 只有这些节点确实描述单件样品状态，才允许关联实体样品。

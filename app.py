@@ -137,8 +137,12 @@ def render_inline_camera(
         marker = "✅ 已留档" if status["complete"] else ("🔴 必拍" if required else "可选")
         with st.expander(f"{checkpoint_label}｜{marker}", expanded=required and not status["complete"]):
             if checkpoint_code in SAMPLE_LEVEL_PHOTO_CODES:
+                if status.get("missing_samples"):
+                    st.warning("仍需拍摄："+"、".join(status["missing_samples"]))
+                else:
+                    st.success("本节点所有实体样品均已有有效照片。")
                 sample_no = st.selectbox(
-                    "关联实体样品（按实际拍摄对象选择）", [""] + sample_ids,
+                    "本次拍摄的实体样品", sample_ids,
                     key=f"{key_prefix}_{checkpoint_code}_sample",
                 )
             else:
@@ -228,6 +232,47 @@ def show_pdf_preview(title, sections):
         st.image(image,caption=f"{title}｜第 {index} 页",use_container_width=True)
 
 
+def preview_rows(kind, rows0):
+    labels={key:label for key,label,_type in schema(kind).get("columns",[])}
+    labels["sample_no"]="样品编号"
+    return [
+        {
+            labels.get(key,key):value
+            for key,value in row.items()
+            if not key.startswith("_") and value not in (None,"")
+        }
+        for row in rows0
+    ]
+
+
+def show_report_photo_preview(task_no):
+    photos=[
+        item for item in list_attachments(task_no=task_no)
+        if item.get("checkpoint_code")=="REPORT_PHOTO"
+        and item.get("evidence_status")=="有效"
+        and not bool(item.get("is_original"))
+    ]
+    st.markdown("#### 报告照片区域预览")
+    if not photos:
+        st.warning("尚未拍摄“检验报告照片区域用代表性照片”。")
+        return
+    for item in photos:
+        path=attachment_file(item)
+        if path.exists():
+            st.image(
+                str(path),
+                caption=f"{item.get('original_name','')}｜{item.get('server_captured_at','')}",
+                width=520,
+            )
+
+
+def navigate_to(target, message=""):
+    if message:
+        st.session_state.flash_message=message
+    st.query_params["goto"]=target
+    st.rerun()
+
+
 init_db()
 for exp,cfg in EXPERIMENTS.items():
     seed_template(exp,"原始记录表",cfg.get("template"));seed_template(exp,"SOP",cfg.get("sop"))
@@ -249,6 +294,10 @@ if "user" not in st.session_state:
 user=st.session_state.user;role=user["role"];username=user["username"]
 if "device_id" not in st.session_state:
     st.session_state.device_id="TAB-"+uuid.uuid4().hex[:10].upper()
+goto_page=st.query_params.get("goto","")
+if goto_page in ROLE_MENUS[role]:
+    st.session_state["main_navigation"]=goto_page
+    del st.query_params["goto"]
 with st.sidebar:
     st.title("BPLab Trace");st.write(user["display_name"]);st.caption(role)
     page=st.radio("导航",ROLE_MENUS[role],label_visibility="collapsed",key="main_navigation")
@@ -384,10 +433,16 @@ elif page=="新建委托与入库":
 
     st.subheader("添加样品组")
     with st.form("add_group",clear_on_submit=False):
-        a,b,c=st.columns(3)
-        cat_id=a.selectbox("样品名称/规格型号",[x["id"] for x in catalog],
-            format_func=lambda x:next(f"{y['sample_name']}｜{y['model']}｜{y['material_name']}" for y in catalog if y["id"]==x))
+        cat_id=st.selectbox(
+            "样品名称 / 规格型号 / 材料（完整宽度）",
+            [x["id"] for x in catalog],
+            format_func=lambda x:next(
+                f"{y['sample_name']}｜{y['model']}｜{y['material_name']}｜{y.get('process','')}"
+                for y in catalog if y["id"]==x
+            ),
+        )
         cat=next(x for x in catalog if x["id"]==cat_id)
+        a,b,c=st.columns(3)
         base_default=increment_base(next_sample_base(),len(st.session_state.intake_groups))
         group_no=b.text_input("样品组基础编号",value=base_default)
         qty=int(c.number_input("接收数量（自动生成 -S01～-Sxx）",1,99,1))
@@ -487,8 +542,7 @@ elif page=="任务包分配":
         if st.button("下发任务包并提醒实验员",type="primary"):
             try:
                 package_no=create_task_package(gid,experiment_codes,assignee,username)
-                st.session_state.flash_message="已下发："+package_no
-                st.session_state.main_navigation="首页看板";st.rerun()
+                navigate_to("首页看板","已下发："+package_no)
             except Exception as e:st.error(str(e))
 
 elif page=="我的任务包":
@@ -516,8 +570,7 @@ elif page=="我的任务包":
             if st.button("确认整组样品领用",type="primary"):
                 try:
                     accept_package(pn,username,result,task_locations,note)
-                    st.session_state.flash_message="任务包已接收，实验记录窗口已为您准备"
-                    st.session_state.main_navigation="实验记录";st.rerun()
+                    navigate_to("实验记录","任务包已接收，实验记录窗口已为您准备")
                 except Exception as e:st.error(str(e))
 
 elif page=="实验记录":
@@ -641,10 +694,11 @@ elif page=="实验记录":
                 template_name,kind,context,bound_devices,business,attachments,prior.get("template_fields") or {}
             )
             summary0=business_completion_summary(kind,business,bound_devices)
-            if end_at:
-                render_completion(summary0)
-            else:
+            validation_key=f"{key_prefix}_validation_ready"
+            if not end_at:
                 st.info("实验尚未点击“记录实验结束时间”。结束前暂不显示未填写区域；可先保存草稿。")
+            elif not st.session_state.get(validation_key,False):
+                st.info("请先点击“同步当前记录并检查”。系统会保存当前页面状态并重新核验，避免把刚填写但尚未同步的区域误报为未填写。")
             st.caption("提交后，系统会把上述业务数据直接回填至受控Word母版的原位置；实验员界面不显示模板原文、表格坐标或无关选项。")
             tester_self_check=st.checkbox(
                 "我已完成实验员自查：样品、设备、环境、原始数据、计算结果、照片和异常记录均已核对",
@@ -668,13 +722,15 @@ elif page=="实验记录":
                 "tester_self_check":tester_self_check,
             }
             a,b=st.columns(2)
-            if a.button("保存草稿",use_container_width=True,key=f"{key_prefix}_draft"):
-                save_record(tn,version,payload,username,"草稿",tm_version,sm_version,reason,compare);st.success("草稿已保存")
-            if b.button("提交复核",type="primary",use_container_width=True,disabled=not tester_self_check or not end_at or not summary0["complete"] or not photos_complete,key=f"{key_prefix}_submit"):
-                save_record(tn,version,payload,username,"更正待复核" if version>1 else "待复核",tm_version,sm_version,reason,compare)
-                st.session_state.flash_message="已提交复核，当前实验窗口已关闭"
-                st.session_state.main_navigation="首页看板"
+            if a.button("同步当前记录并检查",use_container_width=True,key=f"{key_prefix}_draft"):
+                save_record(tn,version,payload,username,"草稿",tm_version,sm_version,reason,compare)
+                st.session_state[validation_key]=True
                 st.rerun()
+            if end_at and st.session_state.get(validation_key,False):
+                render_completion(summary0)
+            if b.button("提交复核",type="primary",use_container_width=True,disabled=not st.session_state.get(validation_key,False) or not tester_self_check or not end_at or not summary0["complete"] or not photos_complete,key=f"{key_prefix}_submit"):
+                save_record(tn,version,payload,username,"更正待复核" if version>1 else "待复核",tm_version,sm_version,reason,compare)
+                navigate_to("首页看板","已提交复核，当前实验窗口已关闭")
 
 elif page=="原始记录复核":
     header("按实验流程复核原始记录")
@@ -698,25 +754,24 @@ elif page=="原始记录复核":
                 ("任务与样品", {"任务编号":rn,"实验":t0["experiment"],"样品":"、".join(t0["sample_nos_list"])}),
                 ("环境与实验参数", business.get("parameters") or {}),
                 ("设备使用确认", business.get("equipment_checks") or []),
-                ("原始测量数据", business.get("rows") or []),
+                ("原始测量数据", preview_rows(kind,business.get("rows") or [])),
                 ("异常与结果", {
                     "状态":business.get("overall_status",""),"偏离":business.get("deviation","无"),
                     "结果摘要":business.get("report_summary",""),"结论":business.get("report_conclusion",""),
                 }),
             ],
         )
+        show_report_photo_preview(r["task_no"])
         st.info("原始记录由实验员提交并完成自查，复核员通过后立即锁定并开放正式文件下载。")
         st.subheader("附件索引（独立追溯）");show_df(list_attachments(task_no=rn),["attachment_id","attachment_type","original_name","sha256","description"])
         comment=st.text_area("复核意见")
         a,b=st.columns(2)
         if a.button("复核通过并锁定原始记录",type="primary",disabled=not summary0["complete"]):
             review_record(rn,int(v),username,"通过",comment)
-            st.session_state.flash_message="原始记录已通过复核并锁定，报告初稿已提交质量负责人预览"
-            st.session_state.main_navigation="首页看板";st.rerun()
+            navigate_to("首页看板","原始记录已通过复核并锁定，报告初稿已提交质量负责人预览")
         if b.button("退回修改"):
             review_record(rn,int(v),username,"退回",comment)
-            st.session_state.flash_message="已退回实验员修改，复核窗口已关闭"
-            st.session_state.main_navigation="首页看板";st.rerun()
+            navigate_to("首页看板","已退回实验员修改，复核窗口已关闭")
 
 elif page=="样品归还":
     header("全部实验完成后整组样品一次归还")
@@ -725,8 +780,7 @@ elif page=="样品归还":
         pn=st.selectbox("待归还任务包",[x["package_no"] for x in packages]);loans=package_loan_rows(pn);edit=pd.DataFrame([{"样品编号":x["sample_no"],"归还状态":"完好","归还备注":""} for x in loans]);edit=st.data_editor(edit,hide_index=True,use_container_width=True,column_config={"样品编号":st.column_config.TextColumn(disabled=True),"归还状态":st.column_config.SelectboxColumn(options=RETURN_CONDITIONS)})
         if st.button("提交整组归还",type="primary"):
             submit_package_return(pn,username,[{"sample_no":r["样品编号"],"condition":r["归还状态"],"note":r["归还备注"]} for _,r in edit.iterrows()])
-            st.session_state.flash_message="整组样品已提交回库确认"
-            st.session_state.main_navigation="首页看板";st.rerun()
+            navigate_to("首页看板","整组样品已提交回库确认")
 
 elif page=="回库确认":
     header("样品管理员逐个确认回库位置")
@@ -735,8 +789,7 @@ elif page=="回库确认":
         pn=st.selectbox("待回库任务包",[x["package_no"] for x in packages]);loans=[x for x in package_loan_rows(pn) if x["return_status"]=="待回库确认"];edit=pd.DataFrame([{"样品编号":x["sample_no"],"归还状态":x["return_condition"],"回库位置":"A区域"} for x in loans]);edit=st.data_editor(edit,hide_index=True,use_container_width=True,column_config={"样品编号":st.column_config.TextColumn(disabled=True),"归还状态":st.column_config.TextColumn(disabled=True),"回库位置":st.column_config.SelectboxColumn(options=STORAGE_AREAS)})
         if st.button("确认整组回库",type="primary"):
             confirm_package_return(pn,username,[{"sample_no":r["样品编号"],"location":r["回库位置"]} for _,r in edit.iterrows()])
-            st.session_state.flash_message="整组样品回库已完成"
-            st.session_state.main_navigation="首页看板";st.rerun()
+            navigate_to("首页看板","整组样品回库已完成")
 
 elif page=="危废处理":
     header("实验废液及废弃样品分类处置登记")
@@ -936,26 +989,28 @@ elif page=="报告中心":
                     "报告编号":rn,"委托编号":r["commission_no"],"任务编号":r["task_no"],
                     "检验项目":task0.get("experiment",""),"检测依据":task0.get("standard",""),
                 }),
-                ("检验结果", payload0.get("business_record",{}).get("rows") or []),
+                ("检验结果", preview_rows(
+                    task_config_snapshot(r["task_no"]).get("kind") or "generic",
+                    payload0.get("business_record",{}).get("rows") or [],
+                )),
                 ("结论", {"结果摘要":r.get("notes",""),"检验结论":r.get("conclusion","")}),
             ],
         )
+        show_report_photo_preview(r["task_no"])
         if r["status"]=="待质量审核" and role=="质量检测员" and username==r["quality_inspector"]:
             st.info("质量负责人仅对报告进行预览确认，不形成电子签字。")
             comment=st.text_area("质量预览确认意见");a,b=st.columns(2)
             if a.button("预览确认通过",type="primary"):
                 quality_review_report(rn,username,"通过",comment)
-                st.session_state.flash_message="报告已提交管理员最终签发"
-                st.session_state.main_navigation="首页看板";st.rerun()
+                navigate_to("首页看板","报告已提交管理员最终签发")
             if b.button("退回整改"):
                 quality_review_report(rn,username,"退回",comment)
-                st.session_state.main_navigation="首页看板";st.rerun()
+                navigate_to("首页看板","报告已退回整改")
         if r["status"]=="待管理员签发" and role=="管理员":
             comment=st.text_area("最终审核意见");a,b=st.columns(2)
             if a.button("最终审核并签发",type="primary"):
                 approver_review_report(rn,username,"批准",comment)
-                st.session_state.flash_message="授权签字人已签发，正式报告现已生成并开放下载"
-                st.session_state.main_navigation="首页看板";st.rerun()
+                navigate_to("首页看板","授权签字人已签发，正式报告现已生成并开放下载")
             if b.button("退回质量审核"):approver_review_report(rn,username,"退回",comment);st.rerun()
         if r["status"]=="已发布" and role=="管理员":
             st.divider();st.subheader("管理员启动报告作废/更正")
@@ -964,8 +1019,7 @@ elif page=="报告中心":
             if st.button("确认启动报告处理流程",type="primary"):
                 try:
                     start_report_void_or_correction(rn,username,action,reason)
-                    st.session_state.flash_message=f"报告 {rn} 已启动：{action}"
-                    st.session_state.main_navigation="首页看板";st.rerun()
+                    navigate_to("首页看板",f"报告 {rn} 已启动：{action}")
                 except Exception as e:st.error(str(e))
         show_df(report_actions(rn))
 
