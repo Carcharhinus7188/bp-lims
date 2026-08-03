@@ -380,12 +380,14 @@ CREATE TABLE IF NOT EXISTS hazardous_waste_records(
         c.execute(
             """UPDATE objections
                SET status=CASE
-                   WHEN pathway='检测方法或实验室实施问题' THEN '待客户确认重测'
+                   WHEN pathway IN ('检测方法或实验室实施问题','是我们的问题','是我方问题') THEN '待客户确认重测'
                    ELSE '待异议回复'
                END,updated_at=?
                WHERE status='待管理员确认'""",
             (now(),),
         )
+        c.execute("UPDATE objections SET pathway='是我方问题' WHERE pathway='是我们的问题'")
+        c.execute("UPDATE objections SET pathway='样品问题' WHERE pathway IN ('不是我们的问题','样品自身问题')")
         c.execute("UPDATE users SET role='实验员' WHERE role='实验人员'")
         c.execute("UPDATE users SET role='复核员' WHERE role='复核实验员'")
         c.execute("UPDATE users SET role='管理员' WHERE role='批准人'")
@@ -2672,8 +2674,8 @@ def _next_objection_no() -> str:
 def register_objection(data: dict[str, Any], actor: str) -> str:
     report_row = report(data["report_no"])
     actor_row = one("SELECT role FROM users WHERE username=?", (actor,)) or {}
-    if actor_row.get("role") != "管理员":
-        raise ValueError("只有管理员可以录入客户异议申请")
+    if actor_row.get("role") != "样品管理员":
+        raise ValueError("只有样品管理员可以录入客户异议申请")
     if not report_row or report_row.get("status") != "已发布":
         raise ValueError("只能对已经签发的检验报告登记异议")
     if not str(data.get("description") or "").strip():
@@ -2709,7 +2711,7 @@ def register_objection(data: dict[str, Any], actor: str) -> str:
     audit("objection", objection_no, actor, "登记客户异议", new_value=report_row["report_no"])
     create_notification(
         inspector, "客户异议待调查",
-        f"管理员已登记异议 {objection_no}，关联报告 {report_row['report_no']}，请调取追溯资料并完成责任判定。",
+        f"样品管理员已登记异议 {objection_no}，关联报告 {report_row['report_no']}，请调取追溯资料并完成责任判定。",
         "objection", objection_no,
     )
     return objection_no
@@ -2736,13 +2738,13 @@ def quality_submit_objection(
     row = objection(objection_no)
     if not row or row["quality_inspector"] != actor or row["status"] != "调查中":
         raise ValueError("当前异议不能由该质量检测员提交调查")
-    if pathway not in ("是我们的问题", "不是我们的问题"):
+    if pathway not in ("是我方问题", "样品问题"):
         raise ValueError("必须选择两条规定路径之一")
     if not investigation.strip() or not trace_conclusion.strip():
         raise ValueError("调查过程和调查结论均不能为空")
     details = details or {}
-    next_status = "待客户确认重测" if pathway == "是我们的问题" else "待异议回复"
-    report_validity = "异议成立-暂停使用" if pathway == "是我们的问题" else "有效"
+    next_status = "待客户确认重测" if pathway == "是我方问题" else "待异议回复"
+    report_validity = "异议成立-暂停使用" if pathway == "是我方问题" else "有效"
     ts = now()
     with connect() as c:
         c.execute(
@@ -2775,7 +2777,7 @@ def quality_submit_objection(
         receiver, "客户异议待处理",
         (
             f"异议 {objection_no} 已完成质量调查，判定为“{pathway}”。"
-            + ("请在系统外联系客户并记录是否需要重测。" if pathway == "是我们的问题" else "请拟制并发送异议回复。")
+            + ("请在系统外联系客户并记录是否需要重测。" if pathway == "是我方问题" else "请拟制并发送异议回复。")
         ),
         "objection", objection_no,
     )

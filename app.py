@@ -1152,6 +1152,51 @@ elif page=="报告发放登记":
             },username)
             st.session_state.flash_message=f"报告 {report_no} 发放记录已登记，可立即下载发放登记表"
             st.rerun()
+    if role=="管理员":
+        st.divider()
+        st.subheader("管理员：已发放报告作废/更正")
+        st.error("此处只处理已经完成发放登记的正式报告。作废后原报告立即停止使用，操作不可撤销且永久写入修改日志。")
+        issued=rows(
+            """SELECT DISTINCT r.* FROM reports r
+               JOIN report_deliveries d ON d.report_no=r.report_no
+               WHERE r.status='已发布'
+               ORDER BY r.publish_date DESC,r.report_no DESC"""
+        )
+        if issued:
+            change_report_no=st.selectbox(
+                "选择已发放报告",[x["report_no"] for x in issued],
+                key="delivered_report_change_no",
+            )
+            selected_delivery_rows=[x for x in delivery_rows if x["report_no"]==change_report_no]
+            show_df(selected_delivery_rows,["report_no","client_name","delivery_method","recipient","delivered_at","receipt_status","receipt_note"])
+            display_action=st.radio(
+                "处理方式",["直接作废并停止使用","启动更正并重新签发"],
+                horizontal=True,key="delivered_report_change_action",
+            )
+            original_handling=st.selectbox(
+                "原报告处理结果",
+                ["待联系客户处理","已收回纸质原报告","电子报告已撤回/替换","无法收回，已书面通知客户"],
+                key="delivered_report_original_handling",
+            )
+            change_reason=st.text_area("作废/更正原因（必填）",key="delivered_report_change_reason")
+            confirm_report_no=st.text_input(
+                f"请输入报告编号 {change_report_no} 确认操作",
+                key="delivered_report_change_confirm",
+            )
+            button_label="确认作废报告" if display_action.startswith("直接作废") else "确认启动更正流程"
+            if st.button(button_label,type="primary",use_container_width=True):
+                if confirm_report_no.strip()!=change_report_no:
+                    st.error("确认报告编号不一致，未执行操作")
+                else:
+                    try:
+                        action="直接作废" if display_action.startswith("直接作废") else "更正并重新签发"
+                        full_reason=f"{change_reason.strip()}；原报告处理：{original_handling}"
+                        start_report_void_or_correction(change_report_no,username,action,full_reason)
+                        st.session_state.flash_message=f"报告 {change_report_no} 已执行：{action}"
+                        st.rerun()
+                    except Exception as e:st.error(str(e))
+        else:
+            st.info("当前没有可作废或更正的已发放正式报告。")
 
 elif page=="客户异议":
     header("客户异议：登记、质量调查、重测与回复")
@@ -1164,9 +1209,10 @@ elif page=="客户异议":
             try:
                 demo=create_objection_application_demo()
                 st.session_state.objection_demo_report_no=demo["report_no"]
-                st.session_state.flash_message=f"异议Demo已准备：{demo['report_no']}，请在下方填写异议申请"
+                st.session_state.flash_message=f"异议Demo已准备：{demo['report_no']}，请切换样品管理员录入异议申请"
                 st.rerun()
             except Exception as e:st.error(str(e))
+    if role=="样品管理员":
         published=rows("SELECT * FROM reports WHERE status='已发布' ORDER BY publish_date DESC")
         with st.expander("登记新的客户异议",expanded=not objection_rows):
             if published:
@@ -1229,7 +1275,10 @@ elif page=="客户异议":
             investigation=st.text_area("完整调查过程")
             conclusion=st.text_area("调查结论与证据链")
             suggestion=st.text_area("处理建议")
-            pathway=st.radio("责任判定",["是我们的问题","不是我们的问题"],horizontal=True)
+            pathway=st.radio(
+                "责任判定（提交后自动转交样品管理员）",
+                ["是我方问题","样品问题"],horizontal=True,
+            )
             if st.button("提交调查结论",type="primary"):
                 try:
                     quality_submit_objection(objection_no,username,pathway,investigation,conclusion,{

@@ -15,6 +15,7 @@ from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfgen import canvas
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 from experiment_engine import result_summary
 from report_rules import overall_conclusion, report_item
@@ -64,7 +65,7 @@ def group_range(g):
 
 def report_delivery_document(report_no: str, delivery_rows: list[dict[str, Any]]):
     """Fill the controlled report-delivery template supplied by the laboratory."""
-    from lims_db import commission, commission_groups, one, report
+    from lims_db import commission, commission_groups, one, report, report_actions
     d=Document(TEMPLATE_DIR/"FORM_REPORT_DELIVERY.docx")
     table=d.tables[0]
     report_row=report(report_no) or {}
@@ -107,9 +108,26 @@ def report_delivery_document(report_no: str, delivery_rows: list[dict[str, Any]]
     _set_cell_existing(table.rows[8].cells[4],"☑审批签字完整  ☑报告编号一致  ☑页码完整  ☑专用章/电子章完整")
     _set_cell_existing(table.rows[8].cells[9],"☑附表齐全  ☑照片/附件齐全  ☑电子文件可正常打开")
     _set_cell_existing(table.rows[8].cells[16],"☑委托单位一致  ☑接收人信息正确  ☑交付方式符合约定")
-    _set_cell_existing(table.rows[9].cells[4],"☑无  □有，说明：")
-    _set_cell_existing(table.rows[9].cells[9],"申请/批准记录编号：不适用")
-    _set_cell_existing(table.rows[9].cells[16],"□收回  □作废  □无法收回已书面告知  □仅电子替换  ☑不适用")
+    actions=[
+        x for x in report_actions(report_no)
+        if "作废" in str(x.get("action","")) or "更正" in str(x.get("action",""))
+    ]
+    latest_action=actions[-1] if actions else {}
+    action_comment=str(latest_action.get("comment",""))
+    changed=bool(latest_action)
+    _set_cell_existing(table.rows[9].cells[4],f"{'□无  ☑有' if changed else '☑无  □有'}，说明：{action_comment if changed else ''}")
+    _set_cell_existing(table.rows[9].cells[9],f"申请/批准记录编号：{report_no}-CHG-{latest_action.get('id','')}" if changed else "申请/批准记录编号：不适用")
+    if "已收回" in action_comment:
+        handling="☑收回  □作废  □无法收回已书面告知  □仅电子替换  □不适用"
+    elif "无法收回" in action_comment:
+        handling="□收回  ☑作废  ☑无法收回已书面告知  □仅电子替换  □不适用"
+    elif "电子报告" in action_comment:
+        handling="□收回  ☑作废  □无法收回已书面告知  ☑仅电子替换  □不适用"
+    elif changed:
+        handling="□收回  ☑作废  □无法收回已书面告知  □仅电子替换  □不适用"
+    else:
+        handling="□收回  □作废  □无法收回已书面告知  □仅电子替换  ☑不适用"
+    _set_cell_existing(table.rows[9].cells[16],handling)
     _set_cell_existing(table.rows[10].cells[4],manager_name)
     _set_cell_existing(table.rows[10].cells[9],approver_name)
     _set_cell_existing(table.rows[10].cells[16],f"电子路径：系统单据中心/{report_no}")
@@ -120,83 +138,124 @@ def report_delivery_document(report_no: str, delivery_rows: list[dict[str, Any]]
 
 
 def modification_log_pdf(log_rows: list[dict[str, Any]], scope: str = "全部单据") -> BytesIO:
-    """Create a human-readable, immutable modification-only log."""
-    output = BytesIO()
-    font_name = "STSong-Light"
+    """Create a Chinese-safe PDF without parsing log values as XML/HTML."""
+    output=BytesIO()
+    font_name="STSong-Light"
     for font_path in (
-        ROOT / "assets" / "NotoSansCJK-Regular.ttc",
+        ROOT/"assets"/"NotoSansCJK-Regular.ttc",
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
         Path("/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf"),
         Path("/System/Library/Fonts/Supplemental/Songti.ttc"),
     ):
         if font_path.exists():
             try:
-                font_name = "BPLab-CJK"
-                pdfmetrics.registerFont(TTFont(font_name, str(font_path), subfontIndex=0))
+                font_name="BPLab-CJK"
+                try:pdfmetrics.getFont(font_name)
+                except Exception:pdfmetrics.registerFont(TTFont(font_name,str(font_path),subfontIndex=0))
                 break
             except Exception:
+                font_name="STSong-Light"
+    if font_name=="STSong-Light":
+        try:pdfmetrics.getFont(font_name)
+        except Exception:pdfmetrics.registerFont(UnicodeCIDFont(font_name))
+    page_size=landscape(A4)
+    pdf=canvas.Canvas(output,pagesize=page_size)
+    pdf.setTitle("修改记录日志")
+    width,height=page_size
+    margin=8*mm
+    headers=["编号","单据/对象","修改位置","修改内容","修改前","修改后","原因","操作者/角色","服务器时间"]
+    col_widths=[10,30,30,25,43,43,37,30,25]
+    col_widths=[value*mm for value in col_widths]
+    font_size=6.5
+    line_height=8.5
+    page_no=0
+
+    def safe(value):
+        text="" if value is None else str(value)
+        return "".join(ch if ch in "\t\n\r" or ord(ch)>=32 else " " for ch in text)
+
+    def wrap(text,max_width):
+        lines=[]
+        for source_line in safe(text).replace("\r","\n").split("\n"):
+            if not source_line:
+                lines.append("")
                 continue
-    if font_name == "STSong-Light":
-        pdfmetrics.registerFont(UnicodeCIDFont(font_name))
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "CNTitle", parent=styles["Title"], fontName=font_name,
-        fontSize=18, leading=24, alignment=TA_CENTER, textColor=colors.HexColor("#12364A"),
-        spaceAfter=5 * mm,
-    )
-    body_style = ParagraphStyle(
-        "CNBody", parent=styles["BodyText"], fontName=font_name,
-        fontSize=8, leading=11, wordWrap="CJK",
-    )
-    small_style = ParagraphStyle(
-        "CNSmall", parent=body_style, fontSize=7, leading=9, textColor=colors.HexColor("#4B5563"),
-    )
-    doc = SimpleDocTemplate(
-        output, pagesize=landscape(A4), leftMargin=10 * mm, rightMargin=10 * mm,
-        topMargin=12 * mm, bottomMargin=12 * mm,
-        title="修改记录日志", author=COMPANY_CN if "COMPANY_CN" in globals() else "大连标普检测有限公司",
-    )
-    story = [
-        Paragraph("修改记录日志", title_style),
-        Paragraph(f"范围：{scope}　　记录数量：{len(log_rows)}", body_style),
-        Paragraph("本日志只列示数据或单据发生的修改、作废及更正，不包含查看、下载和普通审批操作。日志按服务器时间排序，修改前后值及原因不可覆盖。", small_style),
-        Spacer(1, 4 * mm),
-    ]
-    header = ["编号", "单据/对象", "修改位置", "修改内容", "修改前", "修改后", "原因", "操作者/角色", "服务器时间"]
-    data = [[Paragraph(x, body_style) for x in header]]
+            current=""
+            for char in source_line:
+                if pdfmetrics.stringWidth(current+char,font_name,font_size)<=max_width-4:
+                    current+=char
+                else:
+                    lines.append(current or char)
+                    current="" if current else ""
+                    if current=="" and pdfmetrics.stringWidth(char,font_name,font_size)<=max_width-4:
+                        current=char
+            lines.append(current)
+        return lines or [""]
+
+    def page_header():
+        nonlocal page_no
+        page_no+=1
+        pdf.setFillColor(colors.HexColor("#12364A"))
+        pdf.setFont(font_name,16)
+        pdf.drawCentredString(width/2,height-margin-4,"修改记录日志")
+        pdf.setFillColor(colors.black);pdf.setFont(font_name,8)
+        pdf.drawString(margin,height-margin-20,f"范围：{safe(scope)}    记录数量：{len(log_rows)}")
+        pdf.setFont(font_name,6.5);pdf.setFillColor(colors.HexColor("#475569"))
+        pdf.drawString(margin,height-margin-32,"仅列示修改、作废、更正和照片替代；修改前后值及原因不可覆盖。")
+        y=height-margin-44
+        pdf.setFillColor(colors.HexColor("#176B87"))
+        pdf.rect(margin,y-18,sum(col_widths),18,fill=1,stroke=0)
+        x=margin
+        pdf.setFillColor(colors.white);pdf.setFont(font_name,7)
+        for label,col_width in zip(headers,col_widths):
+            pdf.drawCentredString(x+col_width/2,y-12,label)
+            x+=col_width
+        return y-18
+
+    def footer():
+        pdf.setFillColor(colors.HexColor("#475569"));pdf.setFont(font_name,6.5)
+        pdf.drawString(margin,6*mm,"系统完整审计链另行保存，可验证日志未被覆盖。")
+        pdf.drawRightString(width-margin,6*mm,f"第 {page_no} 页")
+
+    y=page_header()
+    records=[]
     for item in log_rows:
-        entity = f"{item.get('entity_type','')} / {item.get('entity_id','')}"
-        location = item.get("field_label") or item.get("field_name") or "单据级"
-        operator = f"{item.get('actor_name') or item.get('actor','')} / {item.get('actor_role','')}"
-        values = [
-            str(item.get("id", "")), entity, location, item.get("action", ""),
-            item.get("old_value", ""), item.get("new_value", ""), item.get("reason", ""),
-            operator, item.get("created_at", ""),
-        ]
-        data.append([Paragraph(str(value or ""), body_style) for value in values])
-    if len(data) == 1:
-        data.append([Paragraph("暂无修改记录", body_style)] + [""] * (len(header) - 1))
-    table = Table(
-        data, repeatRows=1,
-        colWidths=[12*mm, 30*mm, 39*mm, 27*mm, 38*mm, 38*mm, 42*mm, 29*mm, 29*mm],
-    )
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#176B87")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, -1), font_name),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#94A3B8")),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F3F7F9")]),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-    ]))
-    story.append(table)
-    story.append(Spacer(1, 4 * mm))
-    story.append(Paragraph("完整性说明：系统后台同时保存前一日志哈希、本日志哈希和文档版本快照，用于验证日志链未被覆盖。", small_style))
-    doc.build(story)
-    output.seek(0)
+        records.append([
+            item.get("id",""),
+            f"{item.get('entity_type','')} / {item.get('entity_id','')}",
+            item.get("field_label") or item.get("field_name") or "单据级",
+            item.get("action",""),item.get("old_value",""),item.get("new_value",""),
+            item.get("reason",""),
+            f"{item.get('actor_name') or item.get('actor','')} / {item.get('actor_role','')}",
+            item.get("created_at",""),
+        ])
+    if not records:
+        records=[["","暂无修改记录","","","","","","",""]]
+    for row_number,values in enumerate(records):
+        line_sets=[wrap(value,col_width) for value,col_width in zip(values,col_widths)]
+        consumed=0;total=max(len(lines) for lines in line_sets)
+        while consumed<total:
+            available_lines=max(1,int((y-margin-7)/line_height))
+            take=min(total-consumed,available_lines)
+            row_height=max(18,take*line_height+6)
+            if y-row_height<margin:
+                footer();pdf.showPage();y=page_header()
+                continue
+            x=margin
+            pdf.setFillColor(colors.HexColor("#F3F7F9") if row_number%2 else colors.white)
+            pdf.rect(margin,y-row_height,sum(col_widths),row_height,fill=1,stroke=0)
+            pdf.setStrokeColor(colors.HexColor("#94A3B8"));pdf.setLineWidth(0.35)
+            pdf.setFont(font_name,font_size);pdf.setFillColor(colors.black)
+            for lines,col_width in zip(line_sets,col_widths):
+                pdf.rect(x,y-row_height,col_width,row_height,fill=0,stroke=1)
+                for line_index,line in enumerate(lines[consumed:consumed+take]):
+                    pdf.drawString(x+2,y-9-line_index*line_height,safe(line))
+                x+=col_width
+            y-=row_height
+            consumed+=take
+            if consumed<total:
+                footer();pdf.showPage();y=page_header()
+    footer();pdf.save();output.seek(0)
     return output
 
 
