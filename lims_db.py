@@ -816,6 +816,21 @@ def add_user(username: str, display_name: str, password: str, role: str) -> None
     audit("user", username, "admin", "创建用户")
 
 
+def reset_user_password(target_username: str, new_password: str, actor: str) -> None:
+    target_username = (target_username or "").strip()
+    if not one("SELECT username FROM users WHERE username=?", (target_username,)):
+        raise ValueError("用户不存在")
+    if len(new_password or "") < 10 or not re.search(r"[A-Za-z]", new_password) or not re.search(r"\d", new_password):
+        raise ValueError("新密码至少10位，并同时包含英文字母和数字")
+    with connect() as c:
+        c.execute(
+            "UPDATE users SET password_hash=? WHERE username=?",
+            (_password_hash(new_password), target_username),
+        )
+        c.execute("DELETE FROM sessions WHERE username=?", (target_username,))
+    audit("user", target_username, actor, "管理员重置密码", reason="密码内容不写入日志")
+
+
 # ---------------------- Master data ----------------------
 def list_organizations(include_disabled: bool = False) -> list[dict[str, Any]]:
     q = "SELECT * FROM organizations"

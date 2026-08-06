@@ -2,7 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, time
 from pathlib import Path
-import csv, hashlib, html, io, json, re, uuid, zipfile
+import base64, csv, hashlib, html, io, json, re, uuid, zipfile
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -20,12 +20,16 @@ from report_rules import overall_conclusion, report_item
 from trace_excel_engine import build_internal_trace_workbook
 from camera_evidence import save_live_camera_photo
 from pdf_preview import build_preview_pdf, pdf_page_images
-from docx_preview import docx_review_html
+from docx_preview import DocxPreviewError, docx_page_images, docx_review_html
 from quick_demo import create_pending_review_demo, create_full_document_demo, create_objection_application_demo
 
 ROOT=Path(__file__).parent
 TEMPLATE_DIR=ROOT/"templates"
 SIG_DIR=ROOT/"data"/"signatures";SIG_DIR.mkdir(parents=True,exist_ok=True)
+MOBILE_CAMERA_COMPONENT=components.declare_component(
+    "bplab_mobile_camera",
+    path=str(ROOT/"camera_component"),
+)
 
 st.set_page_config(page_title="BPLab Trace",page_icon="🧪",layout="wide",initial_sidebar_state="expanded")
 st.markdown("""
@@ -403,7 +407,7 @@ def render_inline_camera(
     task_row, sample_ids, checkpoints, actor, actor_name, key_prefix, title,
 ):
     st.markdown(f"#### 📷 {title}")
-    st.caption("拍照是本实验步骤的一部分；按钮直接调用当前平板相机，照片由服务器加盖时间戳并按实验任务编号归档。")
+    st.caption("拍照是本实验步骤的一部分；默认启动后置摄像头，可在取景区切换前/后摄。照片由服务器加盖时间戳并按实验任务编号归档。")
     for checkpoint_code, checkpoint_label, required in checkpoints:
         status = camera_checkpoint_status(task_row["task_no"], [(checkpoint_code, checkpoint_label, required)])[0]
         marker = "✅ 已留档" if status["complete"] else ("🔴 必拍" if required else "可选")
@@ -445,13 +449,31 @@ def render_inline_camera(
                 sample_no = ""
                 st.info("该照片关联整个实验任务，仅需拍摄一次，不需要逐个样品重复拍照。")
             camera_entity = sample_no or "TASK"
-            photo = st.camera_input(
-                f"现场拍摄：{checkpoint_label}",
-                # A separate camera widget per entity prevents the captured
-                # S01 image from being reused when the operator selects S02.
-                key=f"{key_prefix}_{checkpoint_code}_{camera_entity}_camera",
+            camera_widget_key=f"{key_prefix}_{checkpoint_code}_{camera_entity}_camera"
+            camera_result=MOBILE_CAMERA_COMPONENT(
+                label=f"现场拍摄：{checkpoint_label}",
+                default_facing="environment",
+                key=camera_widget_key,
+                default=None,
             )
-            if photo and st.button(
+            photo_bytes=None
+            capture_id=""
+            if isinstance(camera_result,dict):
+                capture_id=str(camera_result.get("capture_id") or "")
+                consumed_key=f"{camera_widget_key}_consumed"
+                if capture_id and capture_id!=st.session_state.get(consumed_key):
+                    data_url=str(camera_result.get("data_url") or "")
+                    if data_url.startswith("data:image/") and "," in data_url:
+                        try:
+                            photo_bytes=base64.b64decode(data_url.split(",",1)[1],validate=True)
+                        except Exception:
+                            st.error("相机照片读取失败，请重新拍摄。")
+            if photo_bytes:
+                st.success(
+                    "照片已拍摄，当前镜头："+
+                    ("后置摄像头" if camera_result.get("facing_mode")=="environment" else "前置摄像头")
+                )
+            if photo_bytes and st.button(
                 "保存并自动盖时间戳", type="primary",
                 key=f"{key_prefix}_{checkpoint_code}_{camera_entity}_save",
             ):
@@ -464,8 +486,9 @@ def render_inline_camera(
                         "checkpoint_label": checkpoint_label,
                         "device_id": st.session_state.device_id,
                     },
-                    photo.getvalue(), actor, actor_name,
+                    photo_bytes, actor, actor_name,
                 )
+                st.session_state[f"{camera_widget_key}_consumed"]=capture_id
                 st.session_state.flash_message = f"{checkpoint_label}照片已按任务编号留档"
                 st.rerun()
 
@@ -532,14 +555,30 @@ def show_pdf_preview(title, sections):
         st.image(image,caption=f"{title}｜第 {index} 页",use_container_width=True)
 
 
+@st.cache_data(show_spinner=False,max_entries=40)
+def controlled_docx_page_images(docx_content):
+    return docx_page_images(docx_content)
+
+
 def show_controlled_docx_review(title, docx_content, allow_download=True):
-    st.markdown("#### 受控 DOCX 审核文件")
-    st.caption("下方阅读器直接解析受控DOCX，不经过PDF转换；复核通过后单据中心使用同一DOCX数据。")
-    components.html(
-        docx_review_html(docx_content,title),
-        height=920,
-        scrolling=True,
-    )
+    st.markdown("#### 受控 Word 原版逐页预览")
+    st.caption("预览由服务器直接渲染实际受控DOCX，分页、表格、签名和照片与单据中心文件保持一致。")
+    try:
+        with st.spinner("正在生成原版页面预览…"):
+            page_images=controlled_docx_page_images(docx_content)
+        for page_number,page_image in enumerate(page_images,1):
+            st.image(
+                page_image,
+                caption=f"{title}｜第 {page_number} 页 / 共 {len(page_images)} 页",
+                use_container_width=True,
+            )
+    except DocxPreviewError as exc:
+        st.warning(f"原版页面渲染暂不可用：{exc}。已切换到兼容阅读模式。")
+        components.html(
+            docx_review_html(docx_content,title),
+            height=920,
+            scrolling=True,
+        )
     if allow_download:
         st.download_button(
             "打开审核用DOCX",
@@ -2278,10 +2317,35 @@ elif page=="电子签名":
 elif page=="用户与权限":
     header("用户与角色权限")
     if role!="管理员":st.stop()
-    show_df(list_users());a,b=st.columns(2);u=a.text_input("用户名");name=b.text_input("姓名");pwd=a.text_input("初始密码",type="password");r=b.selectbox("角色",ROLES)
-    if st.button("创建用户",type="primary"):
-        try:add_user(u,name,pwd,r);st.rerun()
-        except Exception as e:st.error(str(e))
+    users_for_admin=list_users()
+    show_df(users_for_admin)
+    create_tab,password_tab=st.tabs(["创建用户","重置用户密码"])
+    with create_tab:
+        a,b=st.columns(2);u=a.text_input("用户名");name=b.text_input("姓名");pwd=a.text_input("初始密码",type="password");r=b.selectbox("角色",ROLES)
+        if st.button("创建用户",type="primary"):
+            try:add_user(u,name,pwd,r);st.rerun()
+            except Exception as e:st.error(str(e))
+    with password_tab:
+        st.warning("密码重置成功后，该用户现有登录会话立即失效，需要使用新密码重新登录。")
+        target_user=st.selectbox(
+            "选择用户",
+            [item["username"] for item in users_for_admin],
+            format_func=lambda value:next(
+                f"{item['display_name']}｜{item['role']}｜{item['username']}"
+                for item in users_for_admin if item["username"]==value
+            ),
+        )
+        new_password=st.text_input("新密码（至少10位，包含英文字母和数字）",type="password")
+        confirm_password=st.text_input("再次输入新密码",type="password")
+        if st.button("确认重置密码",type="primary"):
+            if new_password!=confirm_password:
+                st.error("两次输入的密码不一致")
+            else:
+                try:
+                    reset_user_password(target_user,new_password,username)
+                    st.success(f"{target_user} 的密码已重置，请通知该用户重新登录。")
+                except Exception as e:
+                    st.error(str(e))
 
 elif page=="审计追踪":
     header("不可无痕修改的审计记录")

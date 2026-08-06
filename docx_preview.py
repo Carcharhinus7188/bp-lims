@@ -2,13 +2,87 @@
 from __future__ import annotations
 
 import base64
+import shutil
+import subprocess
+import tempfile
 from html import escape
 from io import BytesIO
+from pathlib import Path
 
+try:
+    import fitz
+except ImportError:  # pragma: no cover - deployment normally uses PyMuPDF
+    fitz=None
 from docx import Document
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
+
+
+class DocxPreviewError(RuntimeError):
+    pass
+
+
+def docx_page_images(content: bytes, scale: float = 1.7) -> list[bytes]:
+    """Render the actual DOCX with LibreOffice, then return one PNG per page."""
+    soffice=shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        raise DocxPreviewError("服务器未安装办公文档渲染引擎")
+    with tempfile.TemporaryDirectory(prefix="bplab_docx_preview_") as temp_name:
+        temp_dir=Path(temp_name)
+        source=temp_dir/"controlled_document.docx"
+        output=temp_dir/"controlled_document.pdf"
+        profile=temp_dir/"lo_profile"
+        source.write_bytes(content)
+        command=[
+            soffice,
+            f"-env:UserInstallation={profile.as_uri()}",
+            "--headless","--nologo","--nodefault","--nolockcheck",
+            "--convert-to","pdf:writer_pdf_Export",
+            "--outdir",str(temp_dir),str(source),
+        ]
+        try:
+            completed=subprocess.run(
+                command,capture_output=True,text=True,timeout=90,check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise DocxPreviewError("受控Word预览生成超时") from exc
+        if completed.returncode!=0 or not output.exists():
+            detail=(completed.stderr or completed.stdout or "").strip()
+            raise DocxPreviewError("受控Word预览生成失败"+(f"：{detail[:180]}" if detail else ""))
+        try:
+            if fitz is not None:
+                document=fitz.open(output)
+                if not document.page_count:
+                    raise DocxPreviewError("受控Word没有可显示页面")
+                if document.page_count>50:
+                    raise DocxPreviewError(f"预览页数异常（{document.page_count}页），已停止显示")
+                matrix=fitz.Matrix(scale,scale)
+                return [
+                    page.get_pixmap(matrix=matrix,alpha=False).tobytes("png")
+                    for page in document
+                ]
+            pdftoppm=shutil.which("pdftoppm")
+            if not pdftoppm:
+                raise DocxPreviewError("服务器未安装PDF页面渲染引擎")
+            prefix=temp_dir/"page"
+            rendered=subprocess.run(
+                [pdftoppm,"-png","-r",str(int(96*scale)),str(output),str(prefix)],
+                capture_output=True,text=True,timeout=90,check=False,
+            )
+            page_paths=sorted(
+                temp_dir.glob("page-*.png"),
+                key=lambda path:int(path.stem.rsplit("-",1)[-1]),
+            )
+            if rendered.returncode!=0 or not page_paths:
+                raise DocxPreviewError("受控Word页面渲染失败")
+            if len(page_paths)>50:
+                raise DocxPreviewError(f"预览页数异常（{len(page_paths)}页），已停止显示")
+            return [path.read_bytes() for path in page_paths]
+        except DocxPreviewError:
+            raise
+        except Exception as exc:
+            raise DocxPreviewError("受控Word页面读取失败") from exc
 
 
 def _blocks(document):
