@@ -1753,14 +1753,7 @@ elif page=="报告中心":
             ),
         )
         r=report(rn);st.info("当前状态："+r["status"])
-        st.markdown("**报告初稿内容（系统根据已锁定记录自动形成）**")
-        show_df([{
-            "检验类别":r.get("report_category",""),"样品说明":r.get("sample_statement",""),
-            "结论":r.get("conclusion",""),"说明":r.get("notes",""),
-            "来源版本":r.get("source_versions",""),
-        }])
-        task0=task(r["task_no"]);record0=latest_record(r["task_no"]) or {}
-        payload0=record0.get("payload") or {}
+        task0=task(r["task_no"])
         commission0=commission(r["commission_no"])
         report_groups=commission_groups(r["commission_no"])
         report_samples=commission_samples(r["commission_no"])
@@ -1775,11 +1768,12 @@ elif page=="报告中心":
             commission0,report_groups,report_samples,[task_preview],
             report_records_for_report(rn),r,preview_users,preview_signatures,
         ).getvalue()
+        st.caption("以下预览与实验员、复核员查看原始记录时使用同一受控 Word 阅读器；内容直接来自实际检验报告母版。审批期间只允许预览。")
         show_controlled_docx_review(
             f"{rn}_检验报告",
             report_docx,
+            allow_download=False,
         )
-        show_report_photo_preview(r["task_no"])
         if r["status"]=="待质量审核" and role=="质量负责人" and username==r["quality_inspector"]:
             st.info("质量负责人仅对报告进行预览确认，不形成电子签字。")
             comment=st.text_area("质量预览确认意见");a,b=st.columns(2)
