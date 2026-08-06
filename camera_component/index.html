@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <style>
+    :root{font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif;color:#293443}
+    *{box-sizing:border-box}
+    body{margin:0;background:transparent}
+    .camera-card{border:1px solid #dfe6ec;border-radius:14px;background:#f9fbfc;padding:12px}
+    .top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+    .label{font-size:15px;font-weight:700;line-height:1.35}
+    .lens{font-size:12px;color:#526272;background:#e8eef3;border-radius:999px;padding:5px 9px;white-space:nowrap}
+    .stage{position:relative;width:100%;aspect-ratio:4/3;overflow:hidden;border-radius:11px;background:#1b232b}
+    video,img{display:block;width:100%;height:100%;object-fit:contain;background:#111}
+    .message{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;color:#e8edf1;padding:24px;line-height:1.55}
+    .actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:10px}
+    button,.native-label{appearance:none;border:1px solid #cad5de;border-radius:10px;background:#fff;color:#334454;
+      min-height:42px;padding:8px 10px;font-size:14px;font-weight:650;text-align:center;display:flex;align-items:center;justify-content:center}
+    button.primary{background:#607d8b;border-color:#607d8b;color:#fff}
+    button:disabled{opacity:.45}
+    .native-label{grid-column:1/-1;background:#eef3f6}
+    input[type=file]{display:none}
+    .hint{font-size:12px;color:#71808d;line-height:1.45;margin:9px 2px 0}
+    @media(max-width:560px){.actions{grid-template-columns:1fr}.native-label{grid-column:auto}.top{align-items:flex-start;flex-direction:column}}
+  </style>
+</head>
+<body>
+  <section class="camera-card">
+    <div class="top">
+      <div id="label" class="label">现场拍摄</div>
+      <div id="lens" class="lens">默认：后置摄像头</div>
+    </div>
+    <div class="stage">
+      <video id="video" autoplay muted playsinline></video>
+      <img id="preview" alt="已拍摄照片" hidden>
+      <div id="message" class="message">正在启动后置摄像头…</div>
+    </div>
+    <div class="actions">
+      <button id="start">启动摄像头</button>
+      <button id="switch">切换为前置摄像头</button>
+      <button id="capture" class="primary" disabled>拍照</button>
+      <button id="retake" hidden>重新拍摄</button>
+      <label class="native-label" for="nativeCamera">无法切换时：调用系统相机（后置优先）</label>
+      <input id="nativeCamera" type="file" accept="image/*" capture="environment">
+    </div>
+    <div class="hint">安卓平板与iPad将优先使用后置镜头。首次使用请允许浏览器访问摄像头；系统相机入口用于兼容限制实时切换的浏览器。</div>
+  </section>
+  <canvas id="canvas" hidden></canvas>
+  <script>
+    const Streamlit={
+      ready(){
+        window.parent.postMessage({isStreamlitMessage:true,type:"streamlit:componentReady",apiVersion:1},"*");
+      },
+      height(){
+        window.parent.postMessage({isStreamlitMessage:true,type:"streamlit:setFrameHeight",height:document.documentElement.scrollHeight},"*");
+      },
+      value(value){
+        window.parent.postMessage({isStreamlitMessage:true,type:"streamlit:setComponentValue",value},"*");
+      }
+    };
+
+    const video=document.getElementById("video");
+    const preview=document.getElementById("preview");
+    const message=document.getElementById("message");
+    const lens=document.getElementById("lens");
+    const startButton=document.getElementById("start");
+    const switchButton=document.getElementById("switch");
+    const captureButton=document.getElementById("capture");
+    const retakeButton=document.getElementById("retake");
+    const nativeCamera=document.getElementById("nativeCamera");
+    const canvas=document.getElementById("canvas");
+    let stream=null;
+    let facingMode="environment";
+    let rendered=false;
+
+    function stopStream(){
+      if(stream){stream.getTracks().forEach(track=>track.stop());stream=null}
+      video.srcObject=null;
+    }
+
+    function updateLens(){
+      const rear=facingMode==="environment";
+      lens.textContent=rear?"当前：后置摄像头":"当前：前置摄像头";
+      startButton.textContent=rear?"启动后置摄像头":"启动前置摄像头";
+      switchButton.textContent=rear?"切换为前置摄像头":"切换为后置摄像头";
+      nativeCamera.setAttribute("capture",facingMode);
+    }
+
+    async function requestCamera(mode){
+      stopStream();
+      facingMode=mode;
+      updateLens();
+      preview.hidden=true;
+      video.hidden=false;
+      message.hidden=false;
+      message.textContent=`正在启动${mode==="environment"?"后置":"前置"}摄像头…`;
+      captureButton.disabled=true;
+      retakeButton.hidden=true;
+      try{
+        try{
+          stream=await navigator.mediaDevices.getUserMedia({
+            audio:false,video:{facingMode:{exact:mode},width:{ideal:1920},height:{ideal:1080}}
+          });
+        }catch(firstError){
+          stream=await navigator.mediaDevices.getUserMedia({
+            audio:false,video:{facingMode:{ideal:mode},width:{ideal:1920},height:{ideal:1080}}
+          });
+        }
+        const track=stream.getVideoTracks()[0];
+        const actual=(track&&track.getSettings&&track.getSettings().facingMode)||mode;
+        if(actual==="user"||actual==="environment")facingMode=actual;
+        updateLens();
+        video.srcObject=stream;
+        await video.play();
+        message.hidden=true;
+        captureButton.disabled=false;
+      }catch(error){
+        message.hidden=false;
+        message.textContent="无法自动打开摄像头。请允许摄像头权限，或使用下方“调用系统相机”入口。";
+        captureButton.disabled=true;
+      }
+      Streamlit.height();
+    }
+
+    function sendPhoto(dataUrl,source){
+      const payload={
+        data_url:dataUrl,
+        capture_id:`${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        facing_mode:facingMode,
+        source
+      };
+      Streamlit.value(payload);
+    }
+
+    function captureVideo(){
+      if(!video.videoWidth||!video.videoHeight)return;
+      const maxEdge=1920;
+      const scale=Math.min(1,maxEdge/Math.max(video.videoWidth,video.videoHeight));
+      canvas.width=Math.round(video.videoWidth*scale);
+      canvas.height=Math.round(video.videoHeight*scale);
+      canvas.getContext("2d").drawImage(video,0,0,canvas.width,canvas.height);
+      const dataUrl=canvas.toDataURL("image/jpeg",0.92);
+      preview.src=dataUrl;
+      preview.hidden=false;
+      video.hidden=true;
+      message.hidden=true;
+      captureButton.disabled=true;
+      retakeButton.hidden=false;
+      sendPhoto(dataUrl,"live_camera");
+      Streamlit.height();
+    }
+
+    startButton.addEventListener("click",()=>requestCamera(facingMode));
+    switchButton.addEventListener("click",()=>requestCamera(facingMode==="environment"?"user":"environment"));
+    captureButton.addEventListener("click",captureVideo);
+    retakeButton.addEventListener("click",()=>{
+      preview.hidden=true;video.hidden=false;captureButton.disabled=!stream;retakeButton.hidden=true;Streamlit.height();
+    });
+    nativeCamera.addEventListener("change",event=>{
+      const file=event.target.files&&event.target.files[0];
+      if(!file)return;
+      const reader=new FileReader();
+      reader.onload=()=>{
+        const dataUrl=String(reader.result||"");
+        preview.src=dataUrl;preview.hidden=false;video.hidden=true;message.hidden=true;
+        captureButton.disabled=true;retakeButton.hidden=false;
+        sendPhoto(dataUrl,"native_camera");
+        Streamlit.height();
+      };
+      reader.readAsDataURL(file);
+    });
+
+    window.addEventListener("message",event=>{
+      if(!event.data||event.data.type!=="streamlit:render")return;
+      const args=event.data.args||{};
+      document.getElementById("label").textContent=args.label||"现场拍摄";
+      if(!rendered){
+        rendered=true;
+        facingMode=args.default_facing==="user"?"user":"environment";
+        updateLens();
+        message.hidden=false;
+        message.textContent="点击“启动后置摄像头”开始取景；首次使用请允许摄像头权限。";
+      }
+      Streamlit.height();
+    });
+    window.addEventListener("beforeunload",stopStream);
+    Streamlit.ready();
+    Streamlit.height();
+  </script>
+</body>
+</html>

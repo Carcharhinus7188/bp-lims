@@ -1,0 +1,21 @@
+[global]
+# Disable development mode to remove "Clear caches" and other dev options
+developmentMode = false
+
+[theme]
+# Fixed light theme — do not follow system dark/light mode
+base = "light"
+primaryColor = "#7183a6"
+backgroundColor = "#eef2f5"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#293443"
+font = "sans serif"
+
+[client]
+# Hide the developer toolbar to suppress "Clear caches" prompts
+toolbarMode = "viewer"
+
+[server]
+# Production-oriented defaults
+runOnSave = false
+enableXsrfProtection = true

@@ -1,0 +1,46 @@
+# BPLab Trace — Docker Compose Configuration
+#
+# Development:
+#   docker-compose up --build
+#
+# Production (with persistent storage):
+#   docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+version: "3.9"
+
+services:
+  bplab:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bplab-trace
+    ports:
+      - "8501:8501"
+    volumes:
+      # Persistent data storage
+      - bplab_data:/app/data
+      # Mount templates for hot-reload in development
+      - ./templates:/app/templates:ro
+    environment:
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      # Override these in production via docker-compose.prod.yml or .env
+      - BPLAB_DEMO_MODE=${BPLAB_DEMO_MODE:-true}
+      - BPLAB_SECRET_KEY=${BPLAB_SECRET_KEY:-dev-secret-change-in-production}
+      - BPLAB_COMPANY_CN=${BPLAB_COMPANY_CN:-大连标普检测有限公司}
+      - BPLAB_COMPANY_EN=${BPLAB_COMPANY_EN:-DALIAN BIAOPU TESTING CO., LTD.}
+      - BPLAB_LOG_LEVEL=${BPLAB_LOG_LEVEL:-INFO}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  bplab_data:
+    driver: local
+    name: bplab_trace_data
