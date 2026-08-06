@@ -5,7 +5,7 @@ COMPANY_CN = "大连标普检测有限公司"
 COMPANY_EN = "DALIAN BIAOPU TESTING CO., LTD."
 SYSTEM_CN = "大连标普实验室样品全过程追溯系统"
 SYSTEM_EN = "BPLab Sample Lifecycle Tracking System"
-APP_VERSION = "BPLab Trace V9.3 移动摄像头与高保真预览版"
+APP_VERSION = "BPLab Trace V9.3.3 厚度测量流程更新版"
 TIMEZONE_NAME = "Asia/Shanghai"
 
 STORAGE_AREAS = ["A区域", "B区域"]
@@ -49,6 +49,7 @@ COMMON_PHOTO_CHECKPOINTS = [
 SAMPLE_LEVEL_PHOTO_CODES = {
     "SAMPLE_BEFORE", "SAMPLE_AFTER", "DAMAGE", "CRACK", "FRACTURE",
     "INDENT", "MEASURE_RESULT", "OBSERVER_RESULT", "PROFILE", "H1", "H2", "ROI",
+    "ROUGH_PARAMETERS", "CTE_PARAMETERS", "FINAL_CURVE",
 }
 
 # 确定报告结论时真正使用的结果证据。报告生成器按此顺序选图，
@@ -58,19 +59,20 @@ REPORT_DECISIVE_PHOTO_CODES = {
     "金属-陶瓷结合裂纹萌生试验": ["FASTTEST_RESULT", "CRACK"],
     "金属内部质量X射线灰度分析": ["RADIOGRAPH", "ROI"],
     "翘曲变形试验": ["H1", "H2"],
-    "热膨胀系数试验": ["CTE_CURVE"],
+    "热膨胀系数试验": ["CTE_PARAMETERS"],
     "陶瓷牙耐急冷急热试验": ["DAMAGE"],
     "弯曲性能试验": ["FORCE_CURVE", "FRACTURE"],
     "维氏硬度试验": ["INDENT"],
-    "增材制造金属试样厚度测量": ["MEASURE_RESULT"],
+    "增材制造金属试样厚度测量": ["FINAL_CURVE", "MEASURE_RESULT"],
     "牙科材料色稳定性试验": ["D65_COMPARE", "OBSERVER_RESULT"],
 }
 
 EXPERIMENT_PHOTO_CHECKPOINTS = {
     "表面粗糙度试验": [
         ("REFERENCE_CHECK", "标准样块核查读数", True),
-        ("STYLUS_POSITION", "触针与试样测量位置", True),
-        ("PROFILE", "轮廓曲线及Ra结果", True),
+        ("SAMPLE_BEFORE", "实验前样品标签", True),
+        ("PROFILE", "最终读数、轮廓曲线与结果界面", True),
+        ("ROUGH_PARAMETERS", "设备参数与软件数据界面", True),
     ],
     "金属-陶瓷结合裂纹萌生试验": [
         ("SPAN_FIXTURE", "三点弯曲夹具和跨距", True),
@@ -90,10 +92,7 @@ EXPERIMENT_PHOTO_CHECKPOINTS = {
         ("H2", "切割后H2测量界面", True),
     ],
     "热膨胀系数试验": [
-        ("SPECIMEN_LENGTH", "试样实际长度及软件输入值", True),
-        ("PV_STABLE", "启动前PV值稳定在50～60", True),
-        ("CTE_PROGRAM", "终止温度550℃等升温参数", True),
-        ("CTE_CURVE", "温度-位移曲线及计算结果", True),
+        ("CTE_PARAMETERS", "设备参数或软件数据界面", True),
     ],
     "陶瓷牙耐急冷急热试验": [
         ("OVEN_TEMP", "烘箱100±2℃实测温度", True),
@@ -115,15 +114,14 @@ EXPERIMENT_PHOTO_CHECKPOINTS = {
         ("FRACTURE", "断裂状态", True),
     ],
     "维氏硬度试验": [
-        ("SURFACE", "试样表面状态/粗糙度确认", True),
-        ("HARDNESS_BLOCK", "标准硬度块核查结果", True),
-        ("LOAD_DWELL", "试验力与保持时间参数", True),
-        ("INDENT", "各测试面有效压痕及软件测量结果", True),
+        ("SAMPLE_BEFORE", "实验前样品标签", True),
+        ("HARDNESS_BLOCK", "标准硬度块核查", True),
+        ("INDENT", "最终读数、曲线与结果界面", True),
     ],
     "增材制造金属试样厚度测量": [
-        ("GAUGE_BLOCK", "标准量块核查界面", True),
-        ("MEASURE_POSITION", "试样固定及测点位置", True),
-        ("MEASURE_RESULT", "各截面测量图像和实测值", True),
+        ("SAMPLE_BEFORE", "实验前样品及标签", True),
+        ("MEASURE_RESULT", "各截面测量图像与实测值", True),
+        ("FINAL_CURVE", "最终读数、曲线与结果界面", True),
     ],
     "牙科材料色稳定性试验": [
         ("COVER", "试样遮盖方式", True),
@@ -137,6 +135,13 @@ EXPERIMENT_PHOTO_CHECKPOINTS = {
 
 
 def photo_checkpoints(experiment_name: str):
+    # 粗糙度与热膨胀按最新受控流程使用精简后的专属节点，
+    # 不再叠加温湿度、设备铭牌、装夹、实验后状态等通用照片。
+    if experiment_name in {
+        "表面粗糙度试验", "热膨胀系数试验", "维氏硬度试验",
+        "增材制造金属试样厚度测量",
+    }:
+        return EXPERIMENT_PHOTO_CHECKPOINTS.get(experiment_name, [])
     return COMMON_PHOTO_CHECKPOINTS + EXPERIMENT_PHOTO_CHECKPOINTS.get(experiment_name, [])
 
 # 与当前受控《检验委托单》保持一致，仅使用已批准的方法选项。

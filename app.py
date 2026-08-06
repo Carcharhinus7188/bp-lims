@@ -21,7 +21,11 @@ from trace_excel_engine import build_internal_trace_workbook
 from camera_evidence import save_live_camera_photo
 from pdf_preview import build_preview_pdf, pdf_page_images
 from docx_preview import DocxPreviewError, docx_page_images, docx_review_html
-from quick_demo import create_pending_review_demo, create_full_document_demo, create_objection_application_demo
+from quick_demo import (
+    create_pending_review_demo,
+    create_full_document_demo,
+    create_objection_application_demo,
+)
 
 ROOT=Path(__file__).parent
 TEMPLATE_DIR=ROOT/"templates"
@@ -366,7 +370,7 @@ def field_widget(field,value,key_prefix):
         except:v=china_today()
         return str(st.date_input(label,v,key=key))
     if typ=="datetime":
-        return st.text_input(label,value=str(value or now()),key=key,help="北京时间，格式建议 YYYY-MM-DD HH:MM:SS")
+        return st.text_input(label,value=str(value or now()),key=key)
     if typ=="textarea":return st.text_area(label,value=str(value or ""),key=key)
     return st.text_input(label,value=str(value or ""),key=key)
 
@@ -890,9 +894,10 @@ elif page=="新建委托与入库":
         cat=next(x for x in catalog if x["id"]==cat_id)
         a,b,c=st.columns(3)
         base_default=increment_base(next_sample_base(),len(st.session_state.intake_groups))
-        group_no=b.text_input("样品组基础编号",value=base_default)
-        qty=int(c.number_input("接收数量（自动生成 -S01～-Sxx）",1,99,1))
         product_no=a.text_input("产品编号/批号（必填）")
+        production_date=b.date_input("生产日期",china_today())
+        qty=int(c.number_input("接收数量（自动生成 -S01～-Sxx）",1,99,1))
+        group_no=a.text_input("样品组基础编号",value=base_default)
         condition=b.selectbox("样品状态",SAMPLE_CONDITIONS)
         storage=c.selectbox("入库区域",STORAGE_AREAS)
         unit=a.text_input("单位",value=cat["unit"])
@@ -916,14 +921,18 @@ elif page=="新建委托与入库":
                 st.session_state.intake_groups.append({
                     "group_no":normalized_group,"catalog_id":cat_id,"sample_name":cat["sample_name"],
                     "model":cat["model"],"material_name":cat["material_name"],"quantity":qty,
-                    "product_no":product_no,"unit":unit,"condition":condition,
+                    "product_no":product_no,"production_date":str(production_date),
+                    "unit":unit,"condition":condition,
                     "condition_note":condition_note,"storage_area":storage,
                     "experiment_codes":exp_codes,
                     "experiment_labels":[f"{method_map[x]['experiment_name']}｜{method_map[x]['method_code']}" for x in exp_codes],
                     "notes":group_notes,
                 });st.rerun()
     if st.session_state.intake_groups:
-        show_df(st.session_state.intake_groups,["group_no","sample_name","model","material_name","quantity","condition","storage_area","experiment_labels"])
+        show_df(st.session_state.intake_groups,[
+            "group_no","sample_name","model","material_name","product_no","production_date",
+            "quantity","condition","storage_area","experiment_labels",
+        ])
         remove_index=st.selectbox("删除一条草稿明细",range(len(st.session_state.intake_groups)),
             format_func=lambda i:f"{i+1}. {st.session_state.intake_groups[i]['group_no']} {st.session_state.intake_groups[i]['sample_name']}")
         if st.button("删除所选草稿"):st.session_state.intake_groups.pop(remove_index);st.rerun()
@@ -950,7 +959,7 @@ elif page=="新建委托与入库":
 elif page=="委托与样品管理":
     header("委托、样品组、实体样品和全过程时间轴");cs=list_commissions();show_df(cs,["commission_no","client_name","production_org_name","production_relation","commission_date","due_date","status","created_by"])
     if cs:
-        cn=st.selectbox("选择委托",[x["commission_no"] for x in cs]);groups=commission_groups(cn,True);show_df(groups,["id","group_no","sample_name","model","material_name","quantity","status","is_void","void_reason"])
+        cn=st.selectbox("选择委托",[x["commission_no"] for x in cs]);groups=commission_groups(cn,True);show_df(groups,["id","group_no","sample_name","model","material_name","product_no","production_date","quantity","status","is_void","void_reason"])
         active=[g for g in groups if not g["is_void"]]
         if active:
             gid=st.selectbox("查看样品组",[g["id"] for g in active],format_func=lambda x:next(f"{g['group_no']} {g['sample_name']}" for g in active if g["id"]==x));samples0=group_samples(gid);show_df(samples0,["sample_no","sample_name","model","material_name","status","current_location","current_holder"])
@@ -1089,6 +1098,13 @@ elif page=="实验记录":
             st.stop()
         kind=config_snapshot.get("kind") or EXPERIMENTS.get(t["experiment"],{}).get("kind","generic")
         bound_devices=config_snapshot.get("equipment",[])
+        if kind=="cte":
+            # 最新线胀系数流程仅保留卡尺、温湿度表和热膨胀仪。
+            allowed_cte_equipment={"BPGL-A001","BPGL-A009","BPGL-A020"}
+            bound_devices=[
+                item for item in bound_devices
+                if (item.get("management_no") or item.get("管理编号")) in allowed_cte_equipment
+            ]
         production_unit=commission0.get("production_org_name","")
         if commission0.get("production_relation")=="受委托生产企业" and production_unit:
             production_unit += "（受委托生产企业）"
@@ -1097,6 +1113,7 @@ elif page=="实验记录":
             "client_address":commission0.get("client_address",""),
             "production_unit":production_unit,
             "product_no":group0.get("product_no",""),
+            "production_date":group0.get("production_date",""),
             "sample_name":group0.get("sample_name",""),
             "model":group0.get("model",""),
             "material":t.get("material_name",""),
@@ -1115,6 +1132,11 @@ elif page=="实验记录":
         task_location=t.get("detection_location") or package0.get("detection_location","")
         business=initialize_business_record(kind,sample_ids,task_location,prior.get("business_record") or {})
         business.setdefault("parameters",{})["detection_location"]=task_location
+        if kind=="hv":
+            business["parameters"]["sample_production_date"]=group0.get("product_no","")
+        if kind=="thickness":
+            business["parameters"]["sample_production_date"]=group0.get("product_no","")
+            business["parameters"]["production_date"]=group0.get("production_date","")
         if t.get("experiment_started_at"):
             business["parameters"]["start_time"]=str(t["experiment_started_at"]).replace("T"," ")
             business["parameters"]["test_date"]=str(t["experiment_started_at"])[:10]
@@ -1122,12 +1144,30 @@ elif page=="实验记录":
             business["parameters"]["end_time"]=str(t["experiment_ended_at"]).replace("T"," ")
         key_prefix=f"simple_{tn}_{version}"
         st.info(f"{t['experiment']}｜{t['method_code']}｜{len(sample_ids)}件样品。已知信息自动带入，正常选项已设置为默认值；实验员只需确认现场状态并填写实际测量数据。")
-        start_at,end_at=render_experiment_timeline(t,username,key_prefix)
-        business["parameters"]["start_time"]=str(start_at).replace("T"," ") if start_at else ""
-        business["parameters"]["end_time"]=str(end_at).replace("T"," ") if end_at else ""
-        if start_at:business["parameters"]["test_date"]=str(start_at)[:10]
+        if kind=="cte":
+            start_at=t.get("experiment_started_at") or ""
+            end_at=t.get("experiment_ended_at") or ""
+            business["parameters"].pop("start_time",None)
+            business["parameters"].pop("end_time",None)
+            if start_at:business["parameters"]["test_date"]=str(start_at)[:10]
+            st.caption("本实验不显示开始/结束时间操作；系统仍在后台保留任务进入时间等审计记录。")
+        else:
+            start_at,end_at=render_experiment_timeline(t,username,key_prefix)
+            business["parameters"]["start_time"]=str(start_at).replace("T"," ") if start_at else ""
+            business["parameters"]["end_time"]=str(end_at).replace("T"," ") if end_at else ""
+            if start_at:business["parameters"]["test_date"]=str(start_at)[:10]
         all_checkpoints=photo_checkpoints(t["experiment"])
-        checkpoint_groups=[all_checkpoints[index::4] for index in range(4)]
+        if kind=="thickness":
+            # 厚度测量的照片严格跟随业务位置：逐样标签在任务确认，
+            # 两类测量结果证据全部放在对应样品的原始数据步骤。
+            checkpoint_groups=[
+                [item for item in all_checkpoints if item[0]=="SAMPLE_BEFORE"],
+                [],
+                [],
+                [item for item in all_checkpoints if item[0] in {"MEASURE_RESULT","FINAL_CURVE"}],
+            ]
+        else:
+            checkpoint_groups=[all_checkpoints[index::4] for index in range(4)]
         secondary_edit=bool(version>1 and latest and latest.get("status")!="已锁定")
         step1_labels=returned_step_labels(correction_fields,"①") if secondary_edit else None
         step2_labels=returned_step_labels(correction_fields,"②") if secondary_edit else None
@@ -1234,7 +1274,8 @@ elif page=="实验记录":
             )
             summary0=business_completion_summary(kind,business,bound_devices)
             validation_key=f"{key_prefix}_validation_ready"
-            if not end_at:
+            timeline_complete=bool(end_at) or kind=="cte"
+            if not timeline_complete:
                 st.info("实验尚未点击“记录实验结束时间”。结束前暂不显示未填写区域；可先保存草稿。")
             elif not st.session_state.get(validation_key,False):
                 st.info("请先点击“同步当前记录并检查”。系统会保存当前页面状态并重新核验，避免把刚填写但尚未同步的区域误报为未填写。")
@@ -1273,19 +1314,22 @@ elif page=="实验记录":
                 )
             a,b=st.columns(2)
             if a.button("同步当前记录并检查",use_container_width=True,key=f"{key_prefix}_draft"):
+                if kind=="cte" and not end_at:
+                    mark_task_experiment_time(tn,username,"结束")
                 save_record(tn,version,payload,username,"草稿",tm_version,sm_version,reason,compare)
                 st.session_state[validation_key]=True
                 st.rerun()
             validation_ready=bool(st.session_state.get(validation_key,False))
             final_sections=dict(summary0.get("sections") or {})
             final_sections.update({
-                "实验结束时间已记录":bool(end_at),
                 "实验员自查已确认":bool(tester_self_check),
                 "强制拍照节点已完成":bool(photos_complete),
                 "受控模板补充字段已完成":not supplement_missing,
             })
+            if kind!="cte":
+                final_sections["实验结束时间已记录"]=bool(end_at)
             final_issues=list(summary0.get("issues") or [])
-            if not end_at:final_issues.append("尚未记录实验结束时间")
+            if kind!="cte" and not end_at:final_issues.append("尚未记录实验结束时间")
             if not tester_self_check:final_issues.append("尚未勾选实验员自查确认")
             if not photos_complete:
                 missing_photo_labels=[
@@ -1300,7 +1344,7 @@ elif page=="实验记录":
                     (f"等共{len(supplement_missing)}项" if len(supplement_missing)>8 else "")
                 )
             final_complete=bool(
-                summary0["complete"] and end_at and tester_self_check
+                summary0["complete"] and timeline_complete and tester_self_check
                 and photos_complete and not supplement_missing
             )
             if validation_ready:
@@ -1310,12 +1354,13 @@ elif page=="实验记录":
             submit_clicked=b.button(
                 "提交复核",type="primary",use_container_width=True,
                 disabled=not validation_ready,key=f"{key_prefix}_submit",
-                help="同步检查完成后按钮即可点击；若仍有缺项，系统会明确提示具体原因。",
             )
             if submit_clicked:
                 if not final_complete:
                     st.error("当前不能提交复核，请先完成："+ "；".join(final_issues))
                 else:
+                    if kind=="cte" and not (task(tn) or {}).get("experiment_ended_at"):
+                        mark_task_experiment_time(tn,username,"结束")
                     save_record(tn,version,payload,username,"更正待复核" if version>1 else "待复核",tm_version,sm_version,reason,compare)
                     navigate_to("首页看板","已提交复核，当前实验窗口已关闭")
 
@@ -1350,7 +1395,6 @@ elif page=="原始记录复核":
         correction_fields=st.multiselect(
             "退回时指定需要修改的字段",
             correction_options,
-            help="退回时至少选择一项。实验员打开二次编辑后，系统会显示全部指定字段并自动进入首个字段所在步骤。",
         )
         a,b=st.columns(2)
         if a.button("复核通过并锁定原始记录",type="primary",disabled=not summary0["complete"]):

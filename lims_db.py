@@ -165,7 +165,7 @@ CREATE TABLE IF NOT EXISTS commissions(
 CREATE TABLE IF NOT EXISTS sample_groups(
   id INTEGER PRIMARY KEY AUTOINCREMENT, group_no TEXT NOT NULL UNIQUE, commission_no TEXT NOT NULL,
   catalog_id INTEGER, sample_name TEXT, model TEXT, material_name TEXT, production_org_id INTEGER,
-  production_org_name TEXT, production_relation TEXT, product_no TEXT, quantity INTEGER,
+  production_org_name TEXT, production_relation TEXT, product_no TEXT, production_date TEXT, quantity INTEGER,
   unit TEXT, condition TEXT, condition_note TEXT, storage_area TEXT, notes TEXT,
   status TEXT DEFAULT '待分配', is_void INTEGER DEFAULT 0, void_by TEXT, void_at TEXT,
   void_reason TEXT, created_at TEXT, updated_at TEXT
@@ -322,6 +322,9 @@ CREATE TABLE IF NOT EXISTS hazardous_waste_records(
         package_columns = {item[1] for item in c.execute("PRAGMA table_info(task_packages)").fetchall()}
         if "quality_inspector" not in package_columns:
             c.execute("ALTER TABLE task_packages ADD COLUMN quality_inspector TEXT")
+        group_columns = {item[1] for item in c.execute("PRAGMA table_info(sample_groups)").fetchall()}
+        if "production_date" not in group_columns:
+            c.execute("ALTER TABLE sample_groups ADD COLUMN production_date TEXT")
         attachment_columns = {item[1] for item in c.execute("PRAGMA table_info(attachments)").fetchall()}
         for column_name, column_type in (
             ("capture_source", "TEXT DEFAULT 'file'"), ("checkpoint_code", "TEXT"),
@@ -1188,13 +1191,13 @@ def create_commission(data: dict[str, Any], groups: list[dict[str, Any]], actor:
             c.execute(
                 """INSERT INTO sample_groups(
                    group_no,commission_no,catalog_id,sample_name,model,material_name,
-                   production_org_id,production_org_name,production_relation,product_no,quantity,
+                   production_org_id,production_org_name,production_relation,product_no,production_date,quantity,
                    unit,condition,condition_note,storage_area,notes,status,created_at,updated_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '待分配',?,?)""",
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '待分配',?,?)""",
                 (group_no,commission_no,group_data.get("catalog_id"),group_data["sample_name"],
                  group_data["model"],group_data["material_name"],data["production_org_id"],
                  data["production_org_name"],data["production_relation"],group_data.get("product_no",""),
-                 qty,group_data.get("unit","件"),group_data.get("condition","完好"),
+                 str(group_data.get("production_date") or ""),qty,group_data.get("unit","件"),group_data.get("condition","完好"),
                  group_data.get("condition_note",""),group_data.get("storage_area","A区域"),
                  group_data.get("notes",""),ts,ts),
             )
@@ -1216,6 +1219,7 @@ def create_commission(data: dict[str, Any], groups: list[dict[str, Any]], actor:
                        ) VALUES(?,?,?,'','待分配','',?,?,?)""",
                     (sample_no,actor,"样品接收并入库",group_data.get("storage_area","A区域"),
                      f"委托编号:{commission_no};生产单位:{data['production_org_name']};关系:{data['production_relation']};"
+                     f"批号:{group_data.get('product_no','')};生产日期:{group_data.get('production_date','')};"
                      f"样品状态:{group_data.get('condition','完好')};备注:{group_data.get('condition_note','')}",ts),
                 )
             for code in codes:

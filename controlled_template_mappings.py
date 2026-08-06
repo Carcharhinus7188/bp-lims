@@ -122,7 +122,7 @@ def _rough(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any], c
     deviation = None if nominal in (None, "") or measured in (None, "") else round(float(measured) - float(nominal), 4)
     repeats = [params.get(f"repeat_check_{i}") for i in range(1, 4)]
     valid_repeats = [float(x) for x in repeats if x not in (None, "")]
-    repeat_mean = round(mean(valid_repeats), 4) if len(valid_repeats) == 3 else ""
+    repeat_mean = round(mean(valid_repeats), 3) if len(valid_repeats) == 3 else ""
     writer.put(4, 3, 2, f"标称值：{_text(nominal)}；实测值：{_text(measured)}；偏差：{_text(deviation)}")
     writer.put(4, 4, 2, f"1：{_text(repeats[0])} 2：{_text(repeats[1])} 3：{_text(repeats[2])} 平均：{_text(repeat_mean)}")
     for row_index in range(1, 7):
@@ -278,30 +278,43 @@ def _cte(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any], con
                 writer.put_unused_row(table, row_index)
             continue
         item = rows[row_index - 1]
-        for col, key in enumerate(("sample_no",)):
-            writer.put(4, row_index, col, item.get(key))
+        writer.put(4, row_index, 0, item.get("sample_no"))
         writer.put(4, row_index, 1, context.get("material"))
         writer.put(4, row_index, 2, item.get("l0"))
-        writer.put(4, row_index, 3, item.get("width_or_diameter"))
-        writer.put(4, row_index, 4, item.get("thickness"))
+        writer.put(4, row_index, 3, item.get("diameter"))
+        writer.put(4, row_index, 4, item.get("nominal_value"))
         writer.put(4, row_index, 5, item.get("installation_direction", "正确"), True)
         writer.put(4, row_index, 6, params.get("initial_pv"))
         writer.put(4, row_index, 7, item.get("sample_secure", "是"), True)
+        writer.put(4, row_index, 8, item.get("note") or "/")
         writer.put(5, row_index, 0, item.get("sample_no"))
-        writer.put(5, row_index, 1, item.get("run_start"))
-        writer.put(5, row_index, 2, item.get("run_end"))
-        writer.put(5, row_index, 3, item.get("t1"))
-        writer.put(5, row_index, 4, item.get("t2"))
+        writer.put(5, row_index, 1, item.get("t1"))
+        writer.put(5, row_index, 2, item.get("t2"))
+        writer.put(5, row_index, 3, item.get("delta_t"))
+        writer.put(5, row_index, 4, item.get("delta_l"))
         writer.put(5, row_index, 5, item.get("run_status", "正常"), True)
         writer.put(5, row_index, 6, item.get("auto_stop", "是"), True)
         writer.put(5, row_index, 7, attachment_ref)
         writer.put(5, row_index, 8, item.get("validity", "有效"), True)
-        for col, key in enumerate(("sample_no", "t1", "l0", "delta_t", "delta_l", "alpha", "limit")):
-            writer.put(6, row_index, col, item.get(key))
-        writer.put(6, row_index, 7, item.get("conclusion") or "仅记录", True)
+        result_values = (
+            item.get("sample_no"),
+            f"{_text(item.get('t1'))}～{_text(item.get('t2'))}",
+            item.get("l0"),
+            item.get("delta_t"),
+            item.get("delta_l"),
+            item.get("alpha"),
+            (
+                f"样品标准值：{_text(item.get('sample_standard_value'))}；"
+                f"判定依据：{item.get('judgement_basis','')}；"
+                f"判定标准：{item.get('judgement_standard','')}"
+            ).strip("；"),
+        )
+        for col, value in enumerate(result_values):
+            writer.put(6, row_index, col, value)
+        writer.put(6, row_index, 7, item.get("judgement_result") or "符合", True)
         writer.put(6, row_index, 8, item.get("note") or "/")
     alphas = [float(x["alpha"]) for x in rows if x.get("alpha") not in (None, "")]
-    writer.put(8, 1, 0, "合格" if all(x.get("conclusion") in ("符合", "合格", "", None) for x in rows) else "不合格", True)
+    writer.put(8, 1, 0, "合格" if all(x.get("judgement_result") in ("符合", "合格", "", None) for x in rows) else "不合格", True)
     writer.put(8, 2, 1, round(mean(alphas), 3) if alphas else "")
     writer.put(8, 3, 1, max([float(x.get("delta_l")) for x in rows if x.get("delta_l") not in (None, "")], default=""))
     writer.put(8, 2, 3, f"{params.get('start_temperature','')} ℃ ～ {params.get('end_temperature','')} ℃")
@@ -382,15 +395,20 @@ def _bending(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any],
 
 
 def _vickers(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any], context: dict[str, Any], attachment_ref: str) -> None:
-    writer.put(2, 2, 1, params.get("standard_block_no"))
-    writer.put(2, 2, 5, params.get("standard_block_due"))
-    writer.put(2, 3, 3, params.get("standard_block_reading_1"))
-    writer.put(2, 3, 5, params.get("standard_block_reading_2"))
-    writer.put(2, 4, 1, params.get("standard_block_reading_3"))
+    writer.put(2, 1, 5, params.get("standard_block_due"))
+    writer.put(2, 2, 3, params.get("standard_block_reading_1"))
+    writer.put(2, 2, 5, params.get("standard_block_reading_2"))
+    writer.put(2, 3, 1, params.get("standard_block_reading_3"))
     values = [params.get(f"standard_block_reading_{i}") for i in range(1, 4)]
     valid = [float(x) for x in values if x not in (None, "")]
-    writer.put(2, 4, 3, round(mean(valid), 1) if len(valid) == 3 else "")
-    writer.put(2, 4, 5, params.get("standard_block_result"), True)
+    writer.put(2, 3, 3, round(mean(valid), 1) if len(valid) == 3 else "")
+    writer.put(2, 3, 5, params.get("standard_block_result"), True)
+    writer.put(2, 4, 5, "符合" if params.get("surface_condition") == "平整清洁" else "不符合", True)
+    writer.put(2, 5, 1, params.get("surface_condition"), True)
+    writer.put(2, 5, 5, params.get("perpendicularity"), True)
+    writer.put(3, 1, 1, params.get("indent_measurement_method", "切线测量"), True)
+    writer.put(3, 2, 3, "已导出" if params.get("report_exported") == "是" else "未导出", True)
+    writer.put(3, 2, 5, "是", True)
     for row_index in range(1, 13):
         if row_index > len(rows):
             writer.put_unused_row(5, row_index)
@@ -399,7 +417,7 @@ def _vickers(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any],
         mapping = ("sample_no", "face", "indent1", "indent2", "indent3", "mean")
         for col, key in enumerate(mapping):
             writer.put(5, row_index, col, item.get(key))
-        writer.put(5, row_index, 6, item.get("surface_confirm", "符合"), True)
+        writer.put(5, row_index, 6, item.get("indent_quality", "有效"), True)
         writer.put(5, row_index, 7, params.get("test_force"))
         writer.put(5, row_index, 8, params.get("dwell_time"))
     grouped: dict[str, list[dict[str, Any]]] = {}
@@ -412,17 +430,23 @@ def _vickers(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any],
         writer.put(6, row_index, 1, items[0].get("mean") if items else "")
         writer.put(6, row_index, 2, items[1].get("mean") if len(items) > 1 else "")
         writer.put(6, row_index, 3, items[0].get("limit") or "按委托/技术要求")
-        conclusion = "符合" if all(x.get("conclusion") in ("", "符合", "合格") for x in items) else "不符合"
-        writer.put(6, row_index, 4, conclusion, True)
+        writer.put(6, row_index, 4, "不判定", True)
         writer.put(6, row_index, 5, attachment_ref)
 
 
 def _thickness(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any], context: dict[str, Any], attachment_ref: str) -> None:
-    writer.put(2, 1, 2, f"清洁时间：{params.get('cleaning_time','')}")
+    batch = params.get("sample_production_date") or context.get("product_no", "")
+    production_date = params.get("production_date") or context.get("production_date", "")
+    writer.put(0, 7, 1, batch)
+    writer.put(0, 7, 3, production_date)
+    writer.put(0, 7, 5, params.get("design_file_no"))
+    writer.put(2, 1, 2, f"批号：{batch}；生产日期：{production_date}")
     writer.put(2, 2, 2, f"开始：{params.get('preheat_start','')} 结束：{params.get('preheat_end','')}")
     nominal, measured = params.get("calibration_nominal"), params.get("calibration_measured")
     error = None if nominal in (None, "") or measured in (None, "") else round(float(measured) - float(nominal), 4)
-    writer.put(2, 3, 2, f"量块编号：{params.get('calibration_scale','')} 标称值：{_text(nominal)} mm 实测值：{_text(measured)} mm 误差：{_text(error)} mm")
+    writer.put(2, 3, 2, f"标称值：{_text(nominal)} mm；实测值：{_text(measured)} mm；误差：{_text(error)} mm")
+    writer.put(2, 4, 2, f"倍率：{params.get('magnification') or '33倍'}")
+    writer.put(2, 6, 2, f"逐样照片编号：{attachment_ref}")
     data_rows = list(range(3, 18, 3))
     for sample_index, start_row in enumerate(data_rows):
         if sample_index >= len(rows):
@@ -592,6 +616,7 @@ def apply_controlled_mapping(
     attachment_ref: str,
 ) -> dict[str, str]:
     writer = Writer(template_name, values)
+    params = business_record.get("parameters") or {}
     mapper = MAPPERS.get(kind)
     if mapper:
         mapper(
@@ -601,5 +626,38 @@ def apply_controlled_mapping(
             context,
             attachment_ref,
         )
+    if kind == "cte":
+        # These confirmations already come from the task confirmation,
+        # equipment check and pre-check panels. Reflect them into the controlled
+        # mother template instead of asking the experimenter to repeat them.
+        all_conform = all(
+            item.get("judgement_result") in ("符合", "合格", "", None)
+            for item in (business_record.get("rows") or [])
+        )
+        for field in template_manifest(template_name):
+            original = str(field.get("template_text") or "")
+            combined = " ".join([
+                str(field.get("section") or ""),
+                str(field.get("label") or ""),
+                str(field.get("row_label") or ""),
+                str(field.get("col_header") or ""),
+            ])
+            if "制样/处理状态" in combined:
+                writer.values[field["key"]] = _box(
+                    original, params.get("sample_processing_state", "原始状态")
+                )
+            elif any(section in combined for section in (
+                "环境条件与试验安全确认",
+                "试验前准备与关键参数确认",
+            )) and ("□" in original or "☐" in original):
+                writer.values[field["key"]] = _box(
+                    original, ["是", "无", "正常", "已确认"]
+                )
+            elif "是否符合委托要求" in combined:
+                writer.values[field["key"]] = _box(
+                    original, "是" if all_conform else "否"
+                )
+            elif "复核意见" in combined:
+                writer.values[field["key"]] = "/"
     writer.finish_defaults()
     return writer.values

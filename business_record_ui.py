@@ -50,14 +50,12 @@ def _number_profile(key: str, label: str) -> tuple[float, str]:
 
 def _number_input(label: str, value: Any, key: str, field_key: str, help_text: str | None = None, default: Any = None, disabled: bool = False):
     step, number_format = _number_profile(field_key, label)
-    guidance = f"可直接用键盘输入；点击＋/－每次调整 {step:g}。"
     return st.number_input(
         label,
         value=_safe_number(value, _safe_number(default)),
         step=step,
         format=number_format,
         key=key,
-        help=f"{help_text}；{guidance}" if help_text else guidance,
         placeholder="请填写实测值",
         disabled=disabled,
     )
@@ -66,10 +64,9 @@ def _number_input(label: str, value: Any, key: str, field_key: str, help_text: s
 def _widget(field: dict[str, Any], value: Any, key: str, disabled: bool = False):
     typ = field.get("type", "text")
     label = field.get("label", field.get("key", "字段"))
-    help_text = field.get("help")
     if typ == "number":
         default = field.get("default") if field.get("default") not in ("", None) else None
-        return _number_input(label, value, key, field.get("key", ""), help_text, default, disabled)
+        return _number_input(label, value, key, field.get("key", ""), None, default, disabled)
     if typ == "date":
         parsed = value
         if isinstance(value, str) and value:
@@ -79,22 +76,22 @@ def _widget(field: dict[str, Any], value: Any, key: str, disabled: bool = False)
                 parsed = date.today()
         if not parsed:
             parsed = date.today()
-        return str(st.date_input(label, value=parsed, key=key, help=help_text, disabled=disabled))
+        return str(st.date_input(label, value=parsed, key=key, disabled=disabled))
     if typ == "datetime":
-        return st.text_input(label, value=str(value or ""), key=key, help=help_text or "格式：YYYY-MM-DD HH:MM", disabled=disabled)
+        return st.text_input(label, value=str(value or ""), key=key, disabled=disabled)
     if typ == "select":
         options = field.get("options") or [""]
         selected = value if value in options else options[0]
-        return st.selectbox(label, options, index=options.index(selected), key=key, help=help_text, disabled=disabled)
+        return st.selectbox(label, options, index=options.index(selected), key=key, disabled=disabled)
     if typ == "multiselect":
         options = field.get("options") or []
         default = value if isinstance(value, list) else []
-        return st.multiselect(label, options, default=default, key=key, help=help_text, disabled=disabled)
+        return st.multiselect(label, options, default=default, key=key, disabled=disabled)
     if typ == "checkbox":
-        return st.checkbox(label, value=bool(value), key=key, help=help_text, disabled=disabled)
+        return st.checkbox(label, value=bool(value), key=key, disabled=disabled)
     if typ in ("textarea",):
-        return st.text_area(label, value=str(value or ""), key=key, help=help_text, disabled=disabled)
-    return st.text_input(label, value=str(value or ""), key=key, help=help_text, disabled=disabled)
+        return st.text_area(label, value=str(value or ""), key=key, disabled=disabled)
+    return st.text_input(label, value=str(value or ""), key=key, disabled=disabled)
 
 
 def render_readonly_summary(task: dict[str, Any], group: dict[str, Any], commission: dict[str, Any], package: dict[str, Any], config: dict[str, Any]):
@@ -106,6 +103,8 @@ def render_readonly_summary(task: dict[str, Any], group: dict[str, Any], commiss
         ("样品名称", group.get("sample_name", "")),
         ("规格型号", group.get("model", "")),
         ("材料名称", task.get("material_name", "")),
+        ("样品批号", group.get("product_no", "")),
+        ("生产日期", group.get("production_date", "")),
         ("实体样品编号", "、".join(task.get("sample_nos_list") or [])),
         ("检测方法", task.get("method_code", "")),
         ("检测依据", task.get("standard", "")),
@@ -186,7 +185,6 @@ def render_prechecks(kind: str, record: dict[str, Any], key_prefix: str, editabl
         all_items,
         default=[x for x in selected if x in all_items],
         key=f"{key_prefix}_prechecks",
-        help="默认全部选中。取消任一项时，系统会要求填写说明。",
         disabled=not editable,
     )
     note = record.get("precheck_note", "")
@@ -201,6 +199,25 @@ def render_parameters(kind: str, record: dict[str, Any], key_prefix: str, editab
     params = dict(record.get("parameters") or {})
     fixed_fields, manual_fields = fixed_and_manual_fields(kind)
     st.subheader("环境与实验参数")
+    readonly_fields = [
+        field
+        for section in schema(kind).get("sections", [])
+        for field in section.get("fields", [])
+        if field.get("readonly") and field["key"] not in {
+            "detection_location", "equipment_name", "equipment_model", "equipment_no",
+            "calibration_certificate", "calibration_due",
+        }
+    ]
+    if readonly_fields:
+        readonly_cols = st.columns(min(3, len(readonly_fields)))
+        for index, field in enumerate(readonly_fields):
+            with readonly_cols[index % len(readonly_cols)]:
+                st.text_input(
+                    field["label"],
+                    value=str(params.get(field["key"]) or ""),
+                    disabled=True,
+                    key=f"{key_prefix}_readonly_{field['key']}",
+                )
 
     # Actual environmental data are entered here. Start/end are recorded by the timeline.
     env_fields = [x for x in manual_fields if x["key"] in {
@@ -220,7 +237,10 @@ def render_parameters(kind: str, record: dict[str, Any], key_prefix: str, editab
         summary_cols = st.columns(3)
         for index, field in enumerate(fixed_fields):
             with summary_cols[index % 3]:
-                st.text_input(field["label"], value=str(params.get(field["key"], field.get("default", ""))), disabled=True, key=f"{key_prefix}_fixed_display_{field['key']}")
+                fixed_value = params.get(field["key"], field.get("default", ""))
+                if kind == "rough" and field["key"] == "standard_block_nominal":
+                    fixed_value = f"{float(fixed_value or 0):.3f}"
+                st.text_input(field["label"], value=str(fixed_value), disabled=True, key=f"{key_prefix}_fixed_display_{field['key']}")
         fixed_mode = st.radio("固定参数执行情况", ["按默认参数执行", "存在偏离"], index=0 if fixed_mode != "存在偏离" else 1, horizontal=True, key=f"{key_prefix}_fixed_mode", disabled=editable_labels is not None and "固定参数执行情况" not in editable_labels)
         if fixed_mode == "存在偏离":
             st.warning("仅修改实际发生偏离的参数，并在异常与偏离说明中记录原因。")
@@ -246,6 +266,34 @@ def render_parameters(kind: str, record: dict[str, Any], key_prefix: str, editab
             for index, field in enumerate(process_manual):
                 with cols[index % 3]:
                     params[field["key"]] = _widget(field, params.get(field["key"]), f"{key_prefix}_process_{field['key']}", editable_labels is not None and field["label"] not in editable_labels)
+    if kind == "rough":
+        readings = [
+            _safe_number(params.get(f"repeat_check_{index}"))
+            for index in range(1, 4)
+        ]
+        if all(value is not None for value in readings):
+            params["standard_block_measured"] = round(sum(readings) / 3, 3)
+            st.metric(
+                "标准样板实测平均值/μm（自动计算）",
+                f"{params['standard_block_measured']:.3f}",
+            )
+        else:
+            params["standard_block_measured"] = None
+            st.info("填写标准样板实测值1、2、3后，系统将实时计算三次平均值。")
+    if kind == "hv":
+        readings = [
+            _safe_number(params.get(f"standard_block_reading_{index}"))
+            for index in range(1, 4)
+        ]
+        if all(value is not None for value in readings):
+            params["standard_block_measured"] = round(sum(readings) / 3, 1)
+            st.metric(
+                "标准硬度块实测平均值/HV（自动计算）",
+                f"{params['standard_block_measured']:.1f}",
+            )
+        else:
+            params["standard_block_measured"] = None
+            st.info("填写标准硬度块实测值1、2、3后，系统将实时计算平均值。")
     return params, fixed_mode
 
 
@@ -268,7 +316,7 @@ def _render_row_field(kind: str, field: tuple[str, str, str], row: dict[str, Any
 
 def render_sample_data(kind: str, record: dict[str, Any], key_prefix: str, editable_labels: set[str] | None = None) -> list[dict[str, Any]]:
     st.subheader("原始测量数据")
-    st.caption("按样品逐个填写。所有数值既可键盘直接输入，也可用＋/－按字段精度微调；平均值、计算结果和符合性会实时刷新。")
+    st.caption("按样品逐个填写；平均值和计算结果会实时刷新。")
     rows = [dict(x) for x in record.get("rows") or []]
     fields = [
         field for field in visible_row_fields(kind)
@@ -286,13 +334,39 @@ def render_sample_data(kind: str, record: dict[str, Any], key_prefix: str, edita
     for tab, sample_no in zip(tabs, sample_names):
         with tab:
             st.markdown(f"### {sample_no}")
-            for row_index, row in groups[sample_no]:
+            for direction_index, (row_index, row) in enumerate(groups[sample_no]):
                 face = row.get("face")
                 container = st.expander(str(face), expanded=True) if face else st.container(border=True)
                 with container:
                     visible = [f for f in fields if f[0] != "note"]
                     calculated_fields = [field for field in visible if field[2] == "calc"]
                     input_fields = [field for field in visible if field[2] != "calc"]
+                    if kind == "hv":
+                        input_fields = [field for field in input_fields if field[0] != "face"]
+                        direction_locked = (
+                            editable_labels is not None
+                            and "测量方向" not in editable_labels
+                        )
+                        if direction_index == 0:
+                            row["face"] = "Z轴方向"
+                            st.text_input(
+                                "测量方向",
+                                value="Z轴方向",
+                                disabled=True,
+                                key=f"{key_prefix}_row_{row_index}_face_fixed",
+                            )
+                        else:
+                            direction_options = ["X轴方向", "Y轴方向"]
+                            selected_direction = row.get("face")
+                            if selected_direction not in direction_options:
+                                selected_direction = "X轴方向"
+                            row["face"] = st.selectbox(
+                                "第二测量方向",
+                                direction_options,
+                                index=direction_options.index(selected_direction),
+                                key=f"{key_prefix}_row_{row_index}_face",
+                                disabled=direction_locked,
+                            )
                     if kind == "thickness":
                         measurement = [f for f in input_fields if f[0].startswith("r")]
                         input_fields = [f for f in input_fields if f not in measurement]
@@ -571,7 +645,6 @@ def render_template_supplement(
                         st.session_state[text_key]=prior
                     raw=st.text_input(
                         "填写实际记录",
-                        help="请按本次实验的实际情况填写。",
                         key=text_key,
                         disabled=editable_labels is not None and label not in editable_labels,
                     )

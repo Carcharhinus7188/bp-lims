@@ -75,23 +75,22 @@ SCHEMAS = {
         "sections": [
             {"title": "环境与设备", "fields": COMMON_ENV_FIELDS + COMMON_DEVICE_FIELDS},
             {"title": "试验参数与使用前确认", "fields": [
-                {"key": "standard_block", "label": "标准粗糙度样板编号", "type": "text"},
-                {"key": "standard_block_nominal", "label": "标准样板标称值/μm", "type": "number", "actual": True},
-                {"key": "standard_block_measured", "label": "标准样板实测值/μm", "type": "number", "actual": True},
-                {"key": "repeat_check_1", "label": "重复性核查1/μm", "type": "number", "actual": True},
-                {"key": "repeat_check_2", "label": "重复性核查2/μm", "type": "number", "actual": True},
-                {"key": "repeat_check_3", "label": "重复性核查3/μm", "type": "number", "actual": True},
+                {"key": "standard_block", "label": "标准粗糙度样板编号", "type": "text", "default": "BPGL-B001"},
+                {"key": "standard_block_nominal", "label": "标准样板标称值/μm", "type": "number", "default": 3.000},
+                {"key": "repeat_check_1", "label": "标准样板实测值1/μm", "type": "number", "actual": True},
+                {"key": "repeat_check_2", "label": "标准样板实测值2/μm", "type": "number", "actual": True},
+                {"key": "repeat_check_3", "label": "标准样板实测值3/μm", "type": "number", "actual": True},
                 {"key": "standard_block_result", "label": "标准样板核查结果", "type": "select", "options": ["合格", "不合格"]},
                 {"key": "calculation_standard", "label": "计算标准", "type": "text", "default": "ISO-97"},
                 {"key": "shape_removal", "label": "形状去除", "type": "text", "default": "自动"},
-                {"key": "filter_type", "label": "滤波器", "type": "text", "default": "Gaussian"},
+                {"key": "filter_type", "label": "滤波器", "type": "text", "default": "高斯"},
                 {"key": "lambda_s", "label": "λs", "type": "text", "default": "自动"},
                 {"key": "measurement_range", "label": "测量范围/μm", "type": "number", "default": 40.0},
                 {"key": "sampling_length", "label": "取样长度/mm", "type": "number", "default": 0.8},
                 {"key": "sampling_count", "label": "取样个数", "type": "number", "default": 5.0},
                 {"key": "evaluation_length", "label": "评定长度/mm", "type": "number", "default": 4.0},
                 {"key": "measuring_speed", "label": "测量速度/mm/s", "type": "number", "default": 0.5},
-                {"key": "cutoff_filter", "label": "滤波/计算标准", "type": "text"},
+                {"key": "cutoff_filter", "label": "滤波/计算标准", "type": "text", "default": "高斯"},
                 {"key": "probe_condition", "label": "探针状态", "type": "select", "options": ["正常", "异常"]},
                 {"key": "platform_level", "label": "工作台水平状态", "type": "select", "options": ["符合", "不符合"]},
                 {"key": "surface_state", "label": "试样表面状态", "type": "select", "options": ["原打印表面", "经处理表面", "其他"]},
@@ -212,12 +211,15 @@ SCHEMAS = {
     "cte": {
         "title": "热膨胀系数试验",
         "sections": [
-            {"title": "环境与设备", "fields": COMMON_ENV_FIELDS + COMMON_DEVICE_FIELDS},
+            {"title": "环境与设备", "fields": [
+                field for field in COMMON_ENV_FIELDS
+                if field["key"] not in {"start_time", "end_time"}
+            ] + COMMON_DEVICE_FIELDS},
             {"title": "试验参数", "fields": [
                 {"key": "start_temperature", "label": "起始温度/℃", "type": "number", "default": 25.0},
                 {"key": "end_temperature", "label": "终止温度/℃", "type": "number", "default": 550.0},
-                {"key": "heating_rate", "label": "升温速率/℃·min⁻¹", "type": "number"},
-                {"key": "atmosphere", "label": "试验气氛", "type": "text"},
+                {"key": "heating_rate", "label": "升温速率/℃·min⁻¹（允许5±1）", "type": "number", "default": 5.0},
+                {"key": "sample_processing_state", "label": "制样/处理状态", "type": "select", "options": ["原始状态", "热处理后", "其他"], "default": "原始状态", "actual": True},
                 {"key": "pv_range", "label": "PV值/稳定范围", "type": "text", "default": "50～60"},
                 {"key": "initial_pv", "label": "试验前PV实测值", "type": "number", "actual": True},
                 {"key": "sample_install", "label": "试样安装状态", "type": "select", "options": ["牢固", "异常"]},
@@ -226,14 +228,21 @@ SCHEMAS = {
         ],
         "columns": [
             ("sample_no", "试样编号", "text"), ("l0", "初始长度L0/mm", "number"),
-            ("width_or_diameter", "宽/直径/mm", "number"), ("thickness", "厚度/mm", "number"),
-            ("installation_direction", "安装方向", "select:正确|不适用"), ("sample_secure", "是否牢固", "select:是|否"),
-            ("run_start", "开始时间", "text"), ("run_end", "结束时间", "text"),
-            ("run_status", "升温状态", "select:正常|异常"), ("auto_stop", "自动停止", "select:是|否"), ("validity", "有效性", "select:有效|无效"),
+            ("diameter", "直径/mm", "number"),
+            ("installation_direction", "安装方向", "select:正确|不适用"),
+            ("sample_secure", "是否牢固", "select:是|否"),
+            ("run_status", "升温状态", "select:正常|异常"),
+            ("auto_stop", "自动停止", "select:是|否"),
+            ("validity", "有效性", "select:有效|无效"),
             ("t1", "起始温度/℃", "number"), ("t2", "终止温度/℃", "number"),
             ("delta_l", "长度变化ΔL/μm", "number"), ("delta_t", "温差ΔT/℃", "calc"),
-            ("alpha", "线膨胀系数/(10⁻⁶/K)", "calc"), ("curve_no", "曲线文件编号", "text"),
-            ("conclusion", "单样结论", "text"), ("note", "备注", "text"),
+            ("alpha", "线胀系数/(10⁻⁶/K)", "calc"),
+            ("nominal_value", "标称值/(10⁻⁶/K)", "number"),
+            ("sample_standard_value", "样品标准值/(10⁻⁶/K)", "number"),
+            ("judgement_basis", "判定依据", "text"),
+            ("judgement_standard", "判定标准", "text"),
+            ("judgement_result", "判定结果", "select:符合|不符合"),
+            ("curve_no", "设备数据文件编号", "text"), ("note", "备注", "text"),
         ],
     },
     "shock": {
@@ -308,29 +317,29 @@ SCHEMAS = {
         "sections": [
             {"title": "环境与设备", "fields": COMMON_ENV_FIELDS + COMMON_DEVICE_FIELDS},
             {"title": "硬度和试样表面确认", "fields": [
+                {"key": "sample_production_date", "label": "样品批号", "type": "text", "readonly": True},
                 {"key": "method", "label": "试验力级别", "type": "text", "default": "HV10"},
                 {"key": "test_force", "label": "试验力/N", "type": "number", "default": 98.07},
                 {"key": "dwell_time", "label": "保荷时间/s", "type": "number", "default": 15.0},
-                {"key": "standard_block_no", "label": "标准硬度块编号/标称值", "type": "text"},
+                {"key": "standard_block_no", "label": "标准硬度块编号", "type": "text", "default": "BPGL-B007"},
+                {"key": "standard_block_nominal", "label": "标准硬度块标称值/HV", "type": "number", "default": 466.0},
                 {"key": "standard_block_due", "label": "标准硬度块有效期", "type": "date"},
                 {"key": "standard_block_reading_1", "label": "标准硬度块实测值1/HV", "type": "number", "actual": True},
                 {"key": "standard_block_reading_2", "label": "标准硬度块实测值2/HV", "type": "number", "actual": True},
                 {"key": "standard_block_reading_3", "label": "标准硬度块实测值3/HV", "type": "number", "actual": True},
                 {"key": "standard_block_result", "label": "标准硬度块核查结果", "type": "select", "options": ["合格", "不合格"]},
-                {"key": "surface_roughness", "label": "测试面粗糙度Ra/μm", "type": "number"},
                 {"key": "surface_condition", "label": "测试面状态", "type": "select", "options": ["平整清洁", "异常"]},
                 {"key": "perpendicularity", "label": "试样垂直性确认", "type": "select", "options": ["符合", "不符合"]},
-                {"key": "objective", "label": "物镜/放大倍数", "type": "text"},
-                {"key": "indent_measurement_method", "label": "压痕测量方式", "type": "select", "options": ["软件自动", "切线测量", "人工复核"], "default": "软件自动"},
+                {"key": "indent_measurement_method", "label": "压痕测量方式", "type": "text", "default": "切线测量"},
                 {"key": "report_exported", "label": "硬度报告已导出", "type": "select", "options": ["是", "否"], "default": "是"},
             ]},
         ],
         "row_expansion": "faces",
         "columns": [
-            ("sample_no", "样品编号", "text"), ("face", "测试面", "text"),
+            ("sample_no", "样品编号", "text"), ("face", "测量方向", "text"),
             ("indent1", "压痕1/HV", "number"), ("indent2", "压痕2/HV", "number"), ("indent3", "压痕3/HV", "number"),
             ("mean", "测试面平均/HV", "calc"), ("indent_quality", "压痕有效性", "select:有效|无效"),
-            ("surface_confirm", "测试面状态确认", "select:符合|不符合"), ("conclusion", "单样结论", "text"), ("image_no", "压痕图像编号", "text"), ("note", "备注", "text"),
+            ("image_no", "压痕图像编号", "text"), ("note", "备注", "text"),
         ],
     },
     "thickness": {
@@ -338,19 +347,17 @@ SCHEMAS = {
         "sections": [
             {"title": "环境与设备", "fields": COMMON_ENV_FIELDS + COMMON_DEVICE_FIELDS},
             {"title": "影像测量参数", "fields": [
-                {"key": "magnification", "label": "测量放大倍率", "type": "text"},
-                {"key": "calibration_scale", "label": "标尺/校准片编号", "type": "text"},
+                {"key": "sample_production_date", "label": "样品批号", "type": "text", "readonly": True},
+                {"key": "production_date", "label": "生产日期", "type": "text", "readonly": True},
+                {"key": "magnification", "label": "测试放大倍数", "type": "text", "default": "33倍"},
                 {"key": "calibration_nominal", "label": "标准量块标称值/mm", "type": "number", "actual": True},
                 {"key": "calibration_measured", "label": "标准量块实测值/mm", "type": "number", "actual": True},
                 {"key": "calibration_result", "label": "校准核查结果", "type": "select", "options": ["合格", "不合格"]},
-                {"key": "cleaning_time", "label": "载物台清洁时间", "type": "text"},
                 {"key": "preheat_start", "label": "设备预热开始时间", "type": "text"},
                 {"key": "preheat_end", "label": "设备预热结束时间", "type": "text"},
-                {"key": "software_version", "label": "测量软件版本", "type": "text"},
                 {"key": "measurement_points", "label": "测量点位", "type": "text", "default": "固定端、中点、自由端"},
                 {"key": "repeat_count", "label": "每个试样重复测量次数", "type": "number", "default": 3.0},
                 {"key": "design_thickness", "label": "设计厚度/mm", "type": "number", "actual": True},
-                {"key": "image_path", "label": "原始测量图像路径", "type": "text"},
             ]},
         ],
         "columns": [
@@ -534,10 +541,6 @@ SUPPLEMENTAL_PROCESS_FIELDS = {
     "thickness": [
         {"key": "design_file_no", "label": "设计文件/图纸编号", "type": "text",
          "default": "委托资料未提供", "actual": True},
-        {"key": "conditioning_start", "label": "恒温平衡开始时间", "type": "datetime",
-         "default": "按任务实际记录", "actual": True},
-        {"key": "conditioning_end", "label": "恒温平衡结束时间", "type": "datetime",
-         "default": "按任务实际记录", "actual": True},
         {"key": "fixture_method_note", "label": "固定方式、测点布置及重复测量说明", "type": "text",
          "default": "固定端/中点/自由端各测3点并重复3次", "actual": True},
     ],
@@ -559,10 +562,13 @@ for _kind, _definition in SCHEMAS.items():
     if _kind == "generic":
         continue
     _existing = {f["key"] for s in _definition["sections"] for f in s["fields"]}
+    _excluded_common = {
+        "thickness": {"sample_preparation_actual", "method_execution_confirmation"},
+    }.get(_kind, set())
     _fields = [
         dict(field)
         for field in COMMON_PROCESS_OBSERVATIONS + SUPPLEMENTAL_PROCESS_FIELDS.get(_kind, [])
-        if field["key"] not in _existing
+        if field["key"] not in _existing and field["key"] not in _excluded_common
     ]
     if _fields:
         _definition["sections"].append({"title": "母版补充现场观察", "fields": _fields})

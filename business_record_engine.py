@@ -6,7 +6,7 @@ from datetime import datetime
 import re
 from typing import Any
 
-from experiment_engine import initial_parameters, initial_rows, calculate_rows, result_summary, schema
+from experiment_engine import initial_parameters, initial_rows, calculate_rows, normalize_rows, result_summary, schema
 from template_record_engine import (
     BLANK_RE,
     template_manifest,
@@ -64,7 +64,7 @@ PRECHECKS = {
     "shock": ["样品外观完好", "烘箱温度稳定", "冰水已准备", "计时器状态正常", "观察照度符合要求"],
     "bend": ["样品编号已核对", "试样表面无影响试验的缺陷", "夹具平行度已确认", "支点距离已确认", "挠度计接触状态正常", "加载前力值已清零"],
     "hv": ["样品编号已核对", "测试面平整清洁", "压头状态正常", "测量镜头清晰", "标准硬度块核查合格", "试样与压头轴线垂直"],
-    "thickness": ["样品编号已核对", "试样表面已清洁", "试样已完成恒温平衡", "测量系统核查合格", "测量点位已确认"],
+    "thickness": ["样品编号已核对", "试样及标签信息一致", "测量系统状态正常", "测量点位已确认"],
     "color": ["样品与对照编号已核对", "观察人员资格已确认", "D65灯箱状态正常", "照射条件已确认", "观察背景已准备"],
     "generic": ["样品编号已核对", "设备状态正常", "试验条件已确认"],
 }
@@ -82,6 +82,7 @@ SELECT_DEFAULTS = {
     "coolant": "持续供给",
     "baseline_after": "符合",
     "sample_install": "牢固",
+    "sample_processing_state": "原始状态",
     "crack": "无", "chipping": "无", "fracture": "无",
     "fixture_parallel": "是",
     "deflectometer_contact": "轻微接触",
@@ -112,9 +113,10 @@ SELECT_DEFAULTS = {
     "run_status": "正常",
     "auto_stop": "是",
     "validity": "有效",
+    "judgement_result": "符合",
     "surface_confirm": "符合",
     "start_permission": "可以开始试验",
-    "indent_measurement_method": "软件自动",
+    "indent_measurement_method": "切线测量",
     "report_exported": "是",
     "observer_qualification": "均已确认合格",
     "lamp_box_ready": "已完成",
@@ -144,6 +146,10 @@ PARAM_ALIASES = {
     "platform_level": ["工作台水平", "平台水平"],
     "surface_state": ["试样表面状态", "样品表面状态"],
     "measurement_direction": ["测量方向"],
+    "heating_rate": ["升温速率"],
+    "initial_pv": ["初始PV", "试验前PV实测值"],
+    "sample_install": ["试样安装状态"],
+    "sample_processing_state": ["制样状态", "处理状态"],
     "fixture_no": ["夹具编号"],
     "support_span": ["支承跨距", "支点距离", "实测跨距"],
     "loading_speed": ["加载速度"],
@@ -200,11 +206,14 @@ PARAM_ALIASES = {
     "test_force": ["试验力"],
     "dwell_time": ["保荷时间"],
     "standard_block_no": ["标准硬度块编号", "标称值"],
+    "standard_block_nominal": ["标准硬度块标称值", "标称值"],
+    "standard_block_measured": ["标准硬度块实测平均值", "实测平均值", "平均值"],
     "standard_block_result": ["标准硬度块核查结果"],
     "surface_roughness": ["测试面粗糙度", "Ra="],
     "surface_condition": ["测试面状态"],
     "perpendicularity": ["垂直性确认", "压头轴线垂直"],
     "objective": ["物镜", "放大倍数"],
+    "sample_production_date": ["样品批号", "产品编号", "批号"],
     "calibration_scale": ["标尺", "校准片编号", "量块编号"],
     "calibration_result": ["校准核查结果", "量块核查结果"],
     "measurement_points": ["测量点位"],
@@ -279,6 +288,13 @@ def initialize_business_record(
 ) -> dict[str, Any]:
     prior = prior or {}
     params = initial_parameters(kind, prior.get("parameters") or {}, detection_location)
+    if kind == "thickness":
+        for obsolete_key in (
+            "calibration_scale", "cleaning_time", "software_version", "image_path",
+            "conditioning_start", "conditioning_end", "sample_preparation_actual",
+            "method_execution_confirmation",
+        ):
+            params.pop(obsolete_key, None)
     legacy_temperature = params.get("temperature")
     legacy_humidity = params.get("humidity")
     if legacy_temperature not in (None, ""):
@@ -292,7 +308,7 @@ def initialize_business_record(
             key = field["key"]
             if field.get("type") == "select" and params.get(key) in (None, ""):
                 params[key] = SELECT_DEFAULTS.get(key) or (field.get("options") or [""])[0]
-    rows = prior.get("rows") or initial_rows(kind, sample_ids)
+    rows = normalize_rows(kind, prior.get("rows") or initial_rows(kind, sample_ids))
     rows = calculate_rows(kind, rows)
     checks = PRECHECKS.get(kind, PRECHECKS["generic"])
     return {
@@ -344,6 +360,20 @@ def visible_row_fields(kind: str) -> list[tuple[str, str, str]]:
 def calculate_business_record(kind: str, record: dict[str, Any]) -> dict[str, Any]:
     output = deepcopy(record)
     params = output.get("parameters") or {}
+    if kind == "rough":
+        try:
+            readings = [float(params.get(f"repeat_check_{index}")) for index in range(1, 4)]
+            params["standard_block_measured"] = round(sum(readings) / 3, 3)
+        except (TypeError, ValueError):
+            params["standard_block_measured"] = None
+        output["parameters"] = params
+    if kind == "hv":
+        try:
+            readings = [float(params.get(f"standard_block_reading_{index}")) for index in range(1, 4)]
+            params["standard_block_measured"] = round(sum(readings) / 3, 1)
+        except (TypeError, ValueError):
+            params["standard_block_measured"] = None
+        output["parameters"] = params
     if kind == "thickness":
         for row in output.get("rows") or []:
             row["_design_thickness"] = params.get("design_thickness")
@@ -366,10 +396,18 @@ def validate_business_record(kind: str, record: dict[str, Any], required_equipme
         issues.append("存在未通过的实验前检查项，但未填写说明")
 
     params = record.get("parameters") or {}
-    if not str(params.get("start_time") or "").strip():
-        issues.append("尚未通过时间轴记录实验开始时间")
-    if not str(params.get("end_time") or "").strip():
-        issues.append("尚未通过时间轴记录实验结束时间")
+    if kind != "cte":
+        if not str(params.get("start_time") or "").strip():
+            issues.append("尚未通过时间轴记录实验开始时间")
+        if not str(params.get("end_time") or "").strip():
+            issues.append("尚未通过时间轴记录实验结束时间")
+    if kind == "cte":
+        try:
+            heating_rate = float(params.get("heating_rate"))
+            if not 4.0 <= heating_rate <= 6.0:
+                issues.append("升温速率应在5±1 ℃/min范围内")
+        except (TypeError, ValueError):
+            issues.append("未填写：升温速率/℃·min⁻¹（允许5±1）")
     for field in fixed_and_manual_fields(kind)[1]:
         key = field["key"]
         if key in OPTIONAL_PARAMETER_KEYS:
