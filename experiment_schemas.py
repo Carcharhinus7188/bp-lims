@@ -96,7 +96,7 @@ SCHEMAS = {
                 {"key": "platform_level", "label": "工作台水平状态", "type": "select", "options": ["符合", "不符合"]},
                 {"key": "surface_state", "label": "试样表面状态", "type": "select", "options": ["原打印表面", "经处理表面", "其他"]},
                 {"key": "measurement_direction", "label": "测量方向/线位", "type": "text", "default": "3条平行、不重叠、代表性测量线"},
-                {"key": "three_length_mode", "label": "评定长度方式", "type": "select", "options": ["5L（默认）", "3L（已完成方法确认）"], "default": "5L（默认）"},
+                {"key": "three_length_mode", "label": "评定长度方式", "type": "select", "options": ["5L（默认）", "3L（已完成方法确认）"], "default": "5L（默认）"}
             ]},
         ],
         "columns": [
@@ -128,7 +128,7 @@ SCHEMAS = {
                 {"key": "em_source", "label": "杨氏模量来源", "type": "select", "options": ["说明书", "检测报告", "注册资料", "质保书", "其他"], "default": "说明书"},
                 {"key": "em_source_file", "label": "杨氏模量来源文件编号", "type": "text"},
                 {"key": "k_source", "label": "K系数来源", "type": "select", "options": ["YY 0621.1-2016标准图2人工查图", "FastTest软件计算", "其他"], "default": "YY 0621.1-2016标准图2人工查图"},
-                {"key": "orientation", "label": "试样放置方向", "type": "select", "options": ["金属面朝上、陶瓷面朝下", "其他"]},
+                {"key": "orientation", "label": "试样放置方向", "type": "select", "options": ["金属面朝上、陶瓷面朝下", "其他"]}
             ]},
         ],
         "columns": [
@@ -163,7 +163,7 @@ SCHEMAS = {
                 {"key": "exposure_count", "label": "曝光次数", "type": "number", "default": 1.0},
                 {"key": "parameter_adjustment", "label": "参数调整情况", "type": "select", "options": ["无调整", "有调整"], "default": "无调整"},
                 *XRAY_IQI_RAW_FIELDS,
-                {"key": "image_path", "label": "原始图像保存路径", "type": "text"},
+                {"key": "image_path", "label": "原始图像保存路径", "type": "text"}
             ]},
         ],
         "columns": [
@@ -198,7 +198,7 @@ SCHEMAS = {
                 {"key": "feed_speed", "label": "进给速度", "type": "number", "default": 0.1},
                 {"key": "baseline_after", "label": "切割后基准线确认", "type": "select", "options": ["符合", "不符合"]},
                 {"key": "image_before_path", "label": "切割前原始图像路径", "type": "text"},
-                {"key": "image_after_path", "label": "切割后原始图像路径", "type": "text"},
+                {"key": "image_after_path", "label": "切割后原始图像路径", "type": "text"}
             ]},
         ],
         "columns": [
@@ -221,7 +221,7 @@ SCHEMAS = {
                 {"key": "pv_range", "label": "PV值/稳定范围", "type": "text", "default": "50～60"},
                 {"key": "initial_pv", "label": "试验前PV实测值", "type": "number", "actual": True},
                 {"key": "sample_install", "label": "试样安装状态", "type": "select", "options": ["牢固", "异常"]},
-                {"key": "curve_path", "label": "热膨胀曲线文件路径", "type": "text"},
+                {"key": "curve_path", "label": "热膨胀曲线文件路径", "type": "text"}
             ]},
         ],
         "columns": [
@@ -262,7 +262,7 @@ SCHEMAS = {
                 {"key": "surface_temperature", "label": "观察前样品表面温度/℃", "type": "number", "actual": True},
                 {"key": "timer_no", "label": "计时器编号", "type": "text"},
                 {"key": "thermometer_no", "label": "温度计编号", "type": "text"},
-                *SHOCK_MONITOR_FIELDS,
+                *SHOCK_MONITOR_FIELDS
             ]},
         ],
         "columns": [
@@ -292,7 +292,7 @@ SCHEMAS = {
                 {"key": "max_gap", "label": "平行块/塞尺最大间隙/mm", "type": "number"},
                 {"key": "deflectometer_contact", "label": "挠度计状态", "type": "select", "options": ["轻微接触", "预压", "未接触"]},
                 {"key": "zero_force", "label": "清零后力值/N", "type": "number"},
-                {"key": "start_permission", "label": "开始试验条件", "type": "select", "options": ["可以开始试验", "需调整后再试验"], "default": "可以开始试验"},
+                {"key": "start_permission", "label": "开始试验条件", "type": "select", "options": ["可以开始试验", "需调整后再试验"], "default": "可以开始试验"}
             ]},
         ],
         "columns": [
@@ -322,7 +322,7 @@ SCHEMAS = {
                 {"key": "perpendicularity", "label": "试样垂直性确认", "type": "select", "options": ["符合", "不符合"]},
                 {"key": "objective", "label": "物镜/放大倍数", "type": "text"},
                 {"key": "indent_measurement_method", "label": "压痕测量方式", "type": "select", "options": ["软件自动", "切线测量", "人工复核"], "default": "软件自动"},
-                {"key": "report_exported", "label": "硬度报告已导出", "type": "select", "options": ["是", "否"], "default": "是"},
+                {"key": "report_exported", "label": "硬度报告已导出", "type": "select", "options": ["是", "否"], "default": "是"}
             ]},
         ],
         "row_expansion": "faces",
@@ -338,19 +338,13 @@ SCHEMAS = {
         "sections": [
             {"title": "环境与设备", "fields": COMMON_ENV_FIELDS + COMMON_DEVICE_FIELDS},
             {"title": "影像测量参数", "fields": [
-                {"key": "magnification", "label": "测量放大倍率", "type": "text"},
-                {"key": "calibration_scale", "label": "标尺/校准片编号", "type": "text"},
-                {"key": "calibration_nominal", "label": "标准量块标称值/mm", "type": "number", "actual": True},
-                {"key": "calibration_measured", "label": "标准量块实测值/mm", "type": "number", "actual": True},
-                {"key": "calibration_result", "label": "校准核查结果", "type": "select", "options": ["合格", "不合格"]},
-                {"key": "cleaning_time", "label": "载物台清洁时间", "type": "text"},
-                {"key": "preheat_start", "label": "设备预热开始时间", "type": "text"},
+                {"key": "magnification", "label": "测量放大倍率", "type": "text", "default": "33×"},
+	                {"key": "preheat_start", "label": "设备预热开始时间", "type": "text"},
                 {"key": "preheat_end", "label": "设备预热结束时间", "type": "text"},
-                {"key": "software_version", "label": "测量软件版本", "type": "text"},
                 {"key": "measurement_points", "label": "测量点位", "type": "text", "default": "固定端、中点、自由端"},
                 {"key": "repeat_count", "label": "每个试样重复测量次数", "type": "number", "default": 3.0},
                 {"key": "design_thickness", "label": "设计厚度/mm", "type": "number", "actual": True},
-                {"key": "image_path", "label": "原始测量图像路径", "type": "text"},
+                {"key": "image_path", "label": "原始测量图像路径", "type": "text"}
             ]},
         ],
         "columns": [
@@ -399,7 +393,7 @@ SCHEMAS = {
                 {"key": "water_distance_end", "label": "结束时水面距离/mm", "type": "number", "actual": True},
                 {"key": "lamp_box_ready", "label": "D65灯箱预热/稳定", "type": "select", "options": ["已完成", "未完成"], "default": "已完成"},
                 {"key": "observation_date", "label": "目视观察日期", "type": "date"},
-                *COLOR_MONITOR_FIELDS,
+                *COLOR_MONITOR_FIELDS
             ]},
         ],
         "columns": [
@@ -421,7 +415,7 @@ SCHEMAS = {
                 {"key": "sample_preparation", "label": "样品制备与状态确认", "type": "textarea"},
                 {"key": "test_conditions", "label": "试验条件与参数", "type": "textarea"},
                 {"key": "procedure_summary", "label": "操作过程摘要", "type": "textarea"},
-                {"key": "acceptance_criteria", "label": "接受准则/判定要求", "type": "textarea"},
+                {"key": "acceptance_criteria", "label": "接受准则/判定要求", "type": "textarea"}
             ]},
         ],
         "columns": [
@@ -452,7 +446,7 @@ COMMON_PROCESS_OBSERVATIONS = [
      "default": ["清洁", "干燥", "无明显粉尘", "无无关物品"], "actual": True},
     {"key": "equipment_traceability_confirmation", "label": "设备证书、有效期及溯源信息核对结果",
      "type": "select", "options": ["已核对且在有效期内", "存在异常"], "default": "已核对且在有效期内", "actual": True},
-    {"key": "sample_production_date", "label": "样品生产日期/批次日期", "type": "text",
+    {"key": "sample_production_date", "label": "样品批号", "type": "text",
      "default": "委托资料未提供", "actual": True},
     {"key": "sample_preparation_actual", "label": "本次样品制备及表面状态说明", "type": "text",
      "default": "已按方法要求确认", "actual": True},
@@ -532,12 +526,6 @@ SUPPLEMENTAL_PROCESS_FIELDS = {
          "options": ["正常", "异常"], "default": "正常", "actual": True},
     ],
     "thickness": [
-        {"key": "design_file_no", "label": "设计文件/图纸编号", "type": "text",
-         "default": "委托资料未提供", "actual": True},
-        {"key": "conditioning_start", "label": "恒温平衡开始时间", "type": "datetime",
-         "default": "按任务实际记录", "actual": True},
-        {"key": "conditioning_end", "label": "恒温平衡结束时间", "type": "datetime",
-         "default": "按任务实际记录", "actual": True},
         {"key": "fixture_method_note", "label": "固定方式、测点布置及重复测量说明", "type": "text",
          "default": "固定端/中点/自由端各测3点并重复3次", "actual": True},
     ],
@@ -555,14 +543,23 @@ SUPPLEMENTAL_PROCESS_FIELDS = {
     ],
 }
 
+# 厚度测量专属：从母版补充中排除不适用的通用观察项
+SUPPRESS_COMMON_OBSERVATIONS: dict[str, set[str]] = {
+    "thickness": {
+        "sample_preparation_actual",       # 删除"本次样品制备及表面状况说明"
+        "method_execution_confirmation",   # 删除"本次操作与受控方法一致性"
+    },
+}
+
 for _kind, _definition in SCHEMAS.items():
     if _kind == "generic":
         continue
+    _suppress = SUPPRESS_COMMON_OBSERVATIONS.get(_kind, set())
     _existing = {f["key"] for s in _definition["sections"] for f in s["fields"]}
     _fields = [
         dict(field)
         for field in COMMON_PROCESS_OBSERVATIONS + SUPPLEMENTAL_PROCESS_FIELDS.get(_kind, [])
-        if field["key"] not in _existing
+        if field["key"] not in _existing and field["key"] not in _suppress
     ]
     if _fields:
         _definition["sections"].append({"title": "母版补充现场观察", "fields": _fields})

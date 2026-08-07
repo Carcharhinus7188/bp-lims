@@ -127,8 +127,6 @@ EXPERIMENT_PHOTO_CHECKPOINTS = {
         ("INDENT", "各测试面有效压痕及软件测量结果", True),
     ],
     "增材制造金属试样厚度测量": [
-        ("GAUGE_BLOCK", "标准量块核查界面", True),
-        ("MEASURE_POSITION", "试样固定及测点位置", True),
         ("MEASURE_RESULT", "各截面测量图像和实测值", True),
     ],
     "牙科材料色稳定性试验": [
@@ -150,10 +148,16 @@ PHOTO_EXCLUSIONS: dict[str, set[str]] = {
     "表面粗糙度试验": {"STYLUS_POSITION"},
 }
 
+# 各实验恢复的通用拍照节点（覆盖 DEFAULT_PHOTO_EXCLUSIONS）
+PHOTO_INCLUSIONS: dict[str, set[str]] = {
+    "增材制造金属试样厚度测量": {"RESULT"},
+}
+
 
 def photo_checkpoints(experiment_name: str):
     excluded = DEFAULT_PHOTO_EXCLUSIONS | PHOTO_EXCLUSIONS.get(experiment_name, set())
-    common = [cp for cp in COMMON_PHOTO_CHECKPOINTS if cp[0] not in excluded]
+    included = PHOTO_INCLUSIONS.get(experiment_name, set())
+    common = [cp for cp in COMMON_PHOTO_CHECKPOINTS if cp[0] not in excluded or cp[0] in included]
     specific = [(code, label, req) for code, label, req in EXPERIMENT_PHOTO_CHECKPOINTS.get(experiment_name, [])
                 if code not in excluded]
     return common + specific
