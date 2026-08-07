@@ -44,7 +44,7 @@
       <label class="native-label" for="nativeCamera">无法切换时：调用系统相机（后置优先）</label>
       <input id="nativeCamera" type="file" accept="image/*" capture="environment">
     </div>
-    <div class="hint">安卓平板与iPad将优先使用后置镜头。首次使用请允许浏览器访问摄像头；系统相机入口用于兼容限制实时切换的浏览器。</div>
+    <div class="hint">Mac/笔记本通常仅有前置摄像头，系统将自动检测并切换。首次使用请允许浏览器访问摄像头；系统相机入口用于兼容限制实时切换的浏览器。</div>
   </section>
   <canvas id="canvas" hidden></canvas>
   <script>
@@ -73,6 +73,7 @@
     let stream=null;
     let facingMode="environment";
     let rendered=false;
+    let hasRearCamera=true;
 
     function stopStream(){
       if(stream){stream.getTracks().forEach(track=>track.stop());stream=null}
@@ -87,6 +88,28 @@
       nativeCamera.setAttribute("capture",facingMode);
     }
 
+    async function detectCameras(){
+      try{
+        var devices=await navigator.mediaDevices.enumerateDevices();
+        var videoDevices=devices.filter(function(d){return d.kind==="videoinput"});
+        var rear=videoDevices.some(function(d){
+          var lbl=d.label.toLowerCase();
+          return lbl.indexOf("back")>=0||lbl.indexOf("rear")>=0||d.label.indexOf("后")>=0;
+        });
+        var hasLabel=videoDevices.some(function(d){return d.label!==""});
+        if(hasLabel){
+          hasRearCamera=rear;
+          if(!rear&&facingMode==="environment"){
+            facingMode="user";
+            updateLens();
+          }
+        }
+        return videoDevices.length;
+      }catch(e){
+        return -1;
+      }
+    }
+
     async function requestCamera(mode){
       stopStream();
       facingMode=mode;
@@ -94,21 +117,29 @@
       preview.hidden=true;
       video.hidden=false;
       message.hidden=false;
-      message.textContent=`正在启动${mode==="environment"?"后置":"前置"}摄像头…`;
+      message.textContent=(mode==="environment"?"正在启动后置":"正在启动前置")+"摄像头…";
       captureButton.disabled=true;
       retakeButton.hidden=true;
+      var baseVideo={width:{ideal:1920},height:{ideal:1080}};
       try{
+        // Three-tier fallback: exact facingMode -> ideal facingMode -> no constraint (Mac/desktop)
         try{
           stream=await navigator.mediaDevices.getUserMedia({
-            audio:false,video:{facingMode:{exact:mode},width:{ideal:1920},height:{ideal:1080}}
+            audio:false,video:Object.assign({},baseVideo,{facingMode:{exact:mode}})
           });
-        }catch(firstError){
-          stream=await navigator.mediaDevices.getUserMedia({
-            audio:false,video:{facingMode:{ideal:mode},width:{ideal:1920},height:{ideal:1080}}
-          });
+        }catch(exactError){
+          try{
+            stream=await navigator.mediaDevices.getUserMedia({
+              audio:false,video:Object.assign({},baseVideo,{facingMode:{ideal:mode}})
+            });
+          }catch(idealError){
+            stream=await navigator.mediaDevices.getUserMedia({
+              audio:false,video:baseVideo
+            });
+          }
         }
-        const track=stream.getVideoTracks()[0];
-        const actual=(track&&track.getSettings&&track.getSettings().facingMode)||mode;
+        var track=stream.getVideoTracks()[0];
+        var actual=(track&&track.getSettings&&track.getSettings().facingMode)||mode;
         if(actual==="user"||actual==="environment")facingMode=actual;
         updateLens();
         video.srcObject=stream;
@@ -117,30 +148,37 @@
         captureButton.disabled=false;
       }catch(error){
         message.hidden=false;
-        message.textContent="无法自动打开摄像头。请允许摄像头权限，或使用下方“调用系统相机”入口。";
+        var errName=error.name||"";
+        if(errName==="NotAllowedError"||errName==="PermissionDeniedError"){
+          message.textContent="摄像头权限被拒绝。请在浏览器设置中允许访问摄像头，或使用下方系统相机入口。";
+        }else if(errName==="NotFoundError"||errName==="DevicesNotFoundError"){
+          message.textContent="未检测到摄像头设备。如使用外接摄像头请检查连接，或使用下方系统相机入口。";
+        }else{
+          message.textContent="无法启动摄像头："+(error.message||"未知错误")+"。请尝试下方系统相机入口。";
+        }
         captureButton.disabled=true;
       }
       Streamlit.height();
     }
 
     function sendPhoto(dataUrl,source){
-      const payload={
+      var payload={
         data_url:dataUrl,
-        capture_id:`${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        capture_id:(Date.now()+"-"+Math.random().toString(16).slice(2)),
         facing_mode:facingMode,
-        source
+        source:source
       };
       Streamlit.value(payload);
     }
 
     function captureVideo(){
       if(!video.videoWidth||!video.videoHeight)return;
-      const maxEdge=1920;
-      const scale=Math.min(1,maxEdge/Math.max(video.videoWidth,video.videoHeight));
+      var maxEdge=1920;
+      var scale=Math.min(1,maxEdge/Math.max(video.videoWidth,video.videoHeight));
       canvas.width=Math.round(video.videoWidth*scale);
       canvas.height=Math.round(video.videoHeight*scale);
       canvas.getContext("2d").drawImage(video,0,0,canvas.width,canvas.height);
-      const dataUrl=canvas.toDataURL("image/jpeg",0.92);
+      var dataUrl=canvas.toDataURL("image/jpeg",0.92);
       preview.src=dataUrl;
       preview.hidden=false;
       video.hidden=true;
@@ -151,18 +189,18 @@
       Streamlit.height();
     }
 
-    startButton.addEventListener("click",()=>requestCamera(facingMode));
-    switchButton.addEventListener("click",()=>requestCamera(facingMode==="environment"?"user":"environment"));
+    startButton.addEventListener("click",function(){requestCamera(facingMode)});
+    switchButton.addEventListener("click",function(){requestCamera(facingMode==="environment"?"user":"environment")});
     captureButton.addEventListener("click",captureVideo);
-    retakeButton.addEventListener("click",()=>{
+    retakeButton.addEventListener("click",function(){
       preview.hidden=true;video.hidden=false;captureButton.disabled=!stream;retakeButton.hidden=true;Streamlit.height();
     });
-    nativeCamera.addEventListener("change",event=>{
-      const file=event.target.files&&event.target.files[0];
+    nativeCamera.addEventListener("change",function(event){
+      var file=event.target.files&&event.target.files[0];
       if(!file)return;
-      const reader=new FileReader();
-      reader.onload=()=>{
-        const dataUrl=String(reader.result||"");
+      var reader=new FileReader();
+      reader.onload=function(){
+        var dataUrl=String(reader.result||"");
         preview.src=dataUrl;preview.hidden=false;video.hidden=true;message.hidden=true;
         captureButton.disabled=true;retakeButton.hidden=false;
         sendPhoto(dataUrl,"native_camera");
@@ -171,16 +209,21 @@
       reader.readAsDataURL(file);
     });
 
-    window.addEventListener("message",event=>{
+    window.addEventListener("message",async function(event){
       if(!event.data||event.data.type!=="streamlit:render")return;
-      const args=event.data.args||{};
+      var args=event.data.args||{};
       document.getElementById("label").textContent=args.label||"现场拍摄";
       if(!rendered){
         rendered=true;
         facingMode=args.default_facing==="user"?"user":"environment";
+        await detectCameras();
         updateLens();
         message.hidden=false;
-        message.textContent="点击“启动后置摄像头”开始取景；首次使用请允许摄像头权限。";
+        if(!hasRearCamera){
+          message.textContent="未检测到后置摄像头（Mac/笔记本通常仅配备前置摄像头），已自动切换。点击启动前置摄像头开始取景；首次使用请允许摄像头权限。";
+        }else{
+          message.textContent="点击启动后置摄像头开始取景；首次使用请允许摄像头权限。";
+        }
       }
       Streamlit.height();
     });
