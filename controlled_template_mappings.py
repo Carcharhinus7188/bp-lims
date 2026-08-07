@@ -454,22 +454,24 @@ def _thickness(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any
             row_index = start_row + repeat_offset
             writer.put(4, row_index, 0, item.get("sample_no"))
             writer.put(4, row_index, 1, repeat_offset + 1)
-            col = 2
-            section_values = []
-            for section in ("fixed", "middle", "free"):
-                values = [item.get(f"r{repeat_offset + 1}_{section}_p{point}") for point in range(1, 4)]
-                section_values.append(values)
-                for value in values:
-                    writer.put(4, row_index, col, value)
-                    col += 1
-            for values in section_values:
-                valid = [float(x) for x in values if x not in (None, "")]
-                writer.put(4, row_index, col, round(mean(valid), 4) if len(valid) == 3 else "")
-                col += 1
-            writer.put(4, row_index, 14, item.get("mean"))
-            writer.put(4, row_index, 15, attachment_ref)
-            writer.put(4, row_index, 16, attachment_ref)
-            writer.put(4, row_index, 17, item.get("note") or "/")
+            repeat_values = [
+                item.get(f"r{repeat_offset + 1}_{section}")
+                for section in ("fixed", "middle", "free")
+            ]
+            for col, value in enumerate(repeat_values, 2):
+                writer.put(4, row_index, col, value)
+            valid = [
+                float(value)
+                for value in repeat_values
+                if value not in (None, "")
+            ]
+            writer.put(
+                4, row_index, 5,
+                round(mean(valid), 4) if len(valid) == 3 else "",
+            )
+            writer.put(4, row_index, 6, attachment_ref)
+            writer.put(4, row_index, 7, attachment_ref)
+            writer.put(4, row_index, 8, item.get("note") or "/")
     for row_index in range(1, 6):
         if row_index > len(rows):
             writer.put_unused_row(5, row_index)
@@ -589,6 +591,167 @@ def _color(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any], c
     writer.put(11, 13, 5, "合格" if all(x.get("conclusion") == "符合" for x in rows) else "不合格", True)
 
 
+def _aggregate_result(rows: list[dict[str, Any]], key: str, positive: str = "合格") -> str:
+    values = [str(row.get(key) or "") for row in rows]
+    if any(value in ("不符合", "不合格") for value in values):
+        return "不合格"
+    if any(value in ("需复检", "需复核") for value in values):
+        return "需复检"
+    if values and all(value == "不适用" for value in values):
+        return "不适用"
+    return positive
+
+
+def _fixed_denture(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any], context: dict[str, Any], attachment_ref: str) -> None:
+    writer.put(1, 1, 2, params.get("preset_model_check"), True)
+    writer.put(1, 2, 2, params.get("design_sheet_check"), True)
+    writer.put(1, 4, 2, params.get("material_traceability"), True)
+    writer.put(1, 5, 2, params.get("production_record_check"), True)
+    writer.put(2, 1, 1, f"温度：{_text(params.get('temperature_before'))}℃；湿度：{_text(params.get('humidity_before'))}%RH")
+    writer.put(2, 1, 3, f"检测地点：{params.get('detection_location') or ''}")
+    writer.put(3, 1, 2, params.get("material_traceability"), True)
+    writer.put(3, 2, 2, params.get("design_sheet_check"), True)
+    writer.put(3, 3, 2, params.get("production_record_check"), True)
+    for row_index in range(1, 7):
+        if row_index > len(rows):
+            writer.put_unused_row(4, row_index)
+            writer.put_unused_row(6, row_index)
+            continue
+        item = rows[row_index - 1]
+        values = [
+            item.get("sample_no"), item.get("surface_property"), item.get("tissue_surface"),
+            item.get("fit"), item.get("pontic"), item.get("interface_thickness"),
+            item.get("base_thickness"), item.get("connector_area"),
+        ]
+        for col, value in enumerate(values):
+            writer.put(4, row_index, col, value, col in (1, 2, 3, 4))
+        writer.put(4, row_index, 8, item.get("conclusion"), True)
+        writer.put(4, row_index, 9, item.get("note") or "/")
+        visual_values = [
+            item.get("sample_no"), item.get("surface_property"), item.get("outline"),
+            item.get("adjacency"), item.get("occlusion"), item.get("fit"),
+            item.get("color"), item.get("interface_line"),
+        ]
+        for col, value in enumerate(visual_values):
+            writer.put(6, row_index, col, value, col > 0)
+        writer.put(6, row_index, 8, item.get("conclusion"), True)
+        writer.put(6, row_index, 9, item.get("note") or "/")
+    for row_index in range(1, 5):
+        if row_index > len(rows):
+            for table in (5, 7, 8):
+                writer.put_unused_row(table, row_index)
+            continue
+        item = rows[row_index - 1]
+        connector_values = [
+            item.get("sample_no"), context.get("material"), item.get("connector_location"),
+            item.get("connector_full_grids"), item.get("connector_traced_grids"),
+            "s=n+0.5×m", item.get("connector_area"), "按设计及标准要求",
+        ]
+        for col, value in enumerate(connector_values):
+            writer.put(5, row_index, col, value)
+        writer.put(5, row_index, 8, item.get("conclusion"), True)
+        writer.put(7, row_index, 0, item.get("sample_no"))
+        writer.put(7, row_index, 1, item.get("metal_exposed"), True)
+        writer.put(7, row_index, 2, params.get("roughness_block_no") or "/")
+        writer.put(7, row_index, 3, params.get("magnification") or "5×", True)
+        writer.put(7, row_index, 4, item.get("roughness_visual"), True)
+        writer.put(7, row_index, 5, item.get("roughness_tactile"), True)
+        writer.put(7, row_index, 7, item.get("conclusion"), True)
+        writer.put(7, row_index, 8, item.get("note") or "/")
+        for col, key in enumerate(("sample_no", "connector_location", "image_no", "pore_gt_30", "pore_40_150")):
+            writer.put(8, row_index, col, item.get(key) or (attachment_ref if key == "image_no" else ""))
+        writer.put(8, row_index, 5, item.get("pore_gt_150"), True)
+        writer.put(8, row_index, 7, item.get("conclusion"), True)
+    overall = _aggregate_result(rows, "conclusion")
+    writer.put(10, 1, 1, "是", True)
+    writer.put(10, 3, 1, "无" if overall == "合格" else "有", True)
+    writer.put(10, 4, 1, "否" if overall == "合格" else "是", True)
+    writer.put(10, 5, 1, overall, True)
+    writer.put(10, 6, 1, attachment_ref or "无")
+
+
+def _removable_denture(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any], context: dict[str, Any], attachment_ref: str) -> None:
+    writer.put(2, 1, 2, "YY/T 1937-2024")
+    writer.put(2, 1, 3, "是", True)
+    writer.put(2, 2, 2, params.get("detection_location"))
+    writer.put(2, 2, 3, "是", True)
+    writer.put(2, 3, 2, params.get("temperature_before"))
+    writer.put(2, 3, 3, params.get("temperature_compliance", "符合"), True)
+    writer.put(2, 4, 2, params.get("humidity_before"))
+    writer.put(2, 4, 3, params.get("humidity_compliance", "符合"), True)
+    writer.put(2, 5, 2, f"D65；{_text(params.get('d65_illuminance'))} lx")
+    writer.put(2, 5, 3, "是", True)
+    writer.put(2, 6, 2, "不适用")
+    writer.put(2, 6, 3, "不适用", True)
+    writer.put(4, 1, 2, params.get("material_traceability"), True)
+    writer.put(4, 2, 2, params.get("material_traceability"), True)
+    writer.put(4, 3, 2, params.get("design_sheet_check"), True)
+    writer.put(4, 4, 2, params.get("production_record_check"), True)
+    writer.put(4, 5, 2, params.get("design_sheet_check"), True)
+    inspection_keys = [
+        "exterior_surface", "root_embedding", "fit_base", "fit_clasp", "fit_rest",
+        "color", "tooth_arrangement", "occlusion", "marking_docs", "packaging",
+    ]
+    for row_index, key in enumerate(inspection_keys, 1):
+        value = _aggregate_result(rows, key)
+        writer.put(6, row_index, 3, value)
+        writer.put(6, row_index, 4, value, True)
+    for row_index in range(1, 5):
+        writer.put_unused_row(7, row_index)
+    type_rows = {
+        "全口义齿": (1, 2),
+        "可摘局部义齿": (3, 4),
+        "金属支架可摘局部义齿": (3, 4),
+    }
+    used_rows: set[int] = set()
+    for item in rows:
+        target = type_rows.get(str(item.get("sample_type") or ""))
+        if not target:
+            continue
+        for table_row, prefix in zip(target, ("edge", "middle")):
+            if table_row in used_rows:
+                continue
+            used_rows.add(table_row)
+            values = [item.get(f"{prefix}_{index}") for index in range(1, 4)]
+            for col, value in zip((3, 4, 5), values):
+                writer.put(7, table_row, col, value)
+            writer.put(7, table_row, 6, item.get(f"{prefix}_mean"))
+            writer.put(7, table_row, 7, item.get("thickness_conclusion"), True)
+    writer.put(8, 1, 3, _aggregate_result(rows, "tissue_stop"))
+    writer.put(8, 1, 4, _aggregate_result(rows, "tissue_stop"), True)
+    for row_index in range(3, 7):
+        writer.put(8, row_index, 3, _aggregate_result(rows, "major_connector"))
+        writer.put(8, row_index, 4, _aggregate_result(rows, "major_connector"), True)
+    writer.put(9, 2, 1, attachment_ref)
+    writer.put(9, 6, 1, attachment_ref)
+    writer.put(9, 10, 1, _aggregate_result(rows, "xray_quality"), True)
+    writer.put(10, 2, 3, _aggregate_result(rows, "finish_line"))
+    writer.put(10, 2, 4, _aggregate_result(rows, "finish_line"), True)
+    writer.put(10, 3, 3, _aggregate_result(rows, "finish_line"))
+    writer.put(10, 3, 4, _aggregate_result(rows, "finish_line"), True)
+    writer.put(11, 1, 7, _aggregate_result(rows, "porosity"), True)
+    writer.put(11, 2, 7, _aggregate_result(rows, "porosity"), True)
+    # The current SOP-015 is the approved "无色稳定性删减版".
+    # Preserve the legacy mother-table layout, but mark the whole section N/A.
+    for row_index in range(1, 7):
+        writer.put_unused_row(13, row_index)
+    for row_index in range(1, 4):
+        writer.put_unused_row(14, row_index)
+    summary_keys = [
+        ("material_traceability", 1, 1), ("exterior_surface", 2, 1),
+        ("color", 3, 1), ("tooth_arrangement", 4, 1),
+        ("tissue_stop", 5, 1), ("xray_quality", 6, 1),
+        ("porosity", 7, 1), ("marking_docs", 8, 1),
+        ("fit_base", 2, 3), ("thickness_conclusion", 3, 3),
+        ("occlusion", 4, 3), ("major_connector", 5, 3),
+        ("finish_line", 6, 3),
+        ("conclusion", 8, 3),
+    ]
+    for key, row_index, col in summary_keys:
+        writer.put(15, row_index, col, _aggregate_result(rows, key), True)
+    writer.put(15, 7, 3, "不适用", True)
+
+
 MAPPERS = {
     "rough": _rough,
     "mc_crack": _crack,
@@ -600,6 +763,8 @@ MAPPERS = {
     "hv": _vickers,
     "thickness": _thickness,
     "color": _color,
+    "fixed_denture": _fixed_denture,
+    "removable_denture": _removable_denture,
 }
 
 
@@ -655,5 +820,36 @@ def apply_controlled_mapping(
                 )
             elif "复核意见" in combined:
                 writer.values[field["key"]] = "/"
+    # ── DB 驱动的模板字段映射（补充硬编码映射，不覆盖已有值）──
+    try:
+        from lims_db import current_experiment_config, list_template_mappings
+        cfg = current_experiment_config(kind)
+        if cfg:
+            db_mappings = list_template_mappings(cfg["id"])
+            db_mappings = [m for m in db_mappings if m["template_name"] == template_name]
+            params = business_record.get("parameters") or {}
+            rows = business_record.get("rows") or []
+            for m in db_mappings:
+                key = f"t{m['table_index']}_r{m['row_index']}_c{m['col_index']}"
+                if writer.values.get(key) and str(writer.values[key]).strip():
+                    continue  # 硬编码映射已有值，不覆盖
+                value = None
+                if m["field_source"] == "params":
+                    value = params.get(m["field_key"])
+                elif m["field_source"] == "context":
+                    value = context.get(m["field_key"])
+                elif m["field_source"] == "rows" and rows:
+                    value = rows[0].get(m["field_key"])
+                if value is None or value == "":
+                    continue
+                transform = m.get("transform", "text")
+                if transform == "checkbox":
+                    selection = m.get("checkbox_selection", str(value))
+                    writer.put(m["table_index"], m["row_index"], m["col_index"],
+                              selection if selection else value, True)
+                else:
+                    writer.put(m["table_index"], m["row_index"], m["col_index"], value)
+    except Exception:
+        pass  # DB 映射失败不阻塞主流程
     writer.finish_defaults()
     return writer.values

@@ -52,12 +52,11 @@ COPY record_word_engine.py .
 COPY report_rules.py .
 COPY template_record_engine.py .
 COPY trace_excel_engine.py .
+COPY camera_component/ ./camera_component/
 
 # Copy templates and seed data
 COPY templates/ ./templates/
 COPY sample_catalog_seed.json .
-COPY equipment_binding_matrix.csv .
-COPY equipment_master.csv .
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash appuser \

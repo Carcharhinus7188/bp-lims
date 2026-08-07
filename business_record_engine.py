@@ -66,8 +66,101 @@ PRECHECKS = {
     "hv": ["样品编号已核对", "测试面平整清洁", "压头状态正常", "测量镜头清晰", "标准硬度块核查合格", "试样与压头轴线垂直"],
     "thickness": ["样品编号已核对", "试样及标签信息一致", "测量系统状态正常", "测量点位已确认"],
     "color": ["样品与对照编号已核对", "观察人员资格已确认", "D65灯箱状态正常", "照射条件已确认", "观察背景已准备"],
+    "fixed_denture": ["样品编号已核对", "设计单与模型已核对", "主要原材料可追溯", "适用检验项目已确认", "综合检验设备状态正常"],
+    "removable_denture": ["样品编号已核对", "设计单、模型与附件已核对", "主要原材料可追溯", "适用检验项目已确认", "综合检验设备状态正常"],
     "generic": ["样品编号已核对", "设备状态正常", "试验条件已确认"],
 }
+
+
+def _apply_db_validation_rules(kind: str, record: dict[str, Any], issues: list[str]) -> None:
+    """从数据库加载验证规则并执行，将违规项追加到 issues 列表。"""
+    try:
+        from lims_db import current_full_config
+        cfg = current_full_config(kind)
+        if not cfg or not cfg.get("validation_rules"):
+            return
+        params = record.get("parameters") or {}
+        rows = record.get("rows") or []
+        for rule in cfg["validation_rules"]:
+            try:
+                rule_type = rule.get("rule_type", "required")
+                target = rule.get("target_field", "")
+                rule_value = rule.get("rule_value", "")
+                error_msg = rule.get("error_message", "")
+                is_row = bool(rule.get("is_row_level", 0))
+
+                if rule_type == "required":
+                    if is_row:
+                        for idx, row in enumerate(rows, 1):
+                            sid = row.get("sample_no") or f"第{idx}条"
+                            if row.get(target) in (None, ""):
+                                issues.append(f"{sid} {error_msg}")
+                    else:
+                        if params.get(target) in (None, ""):
+                            issues.append(error_msg)
+
+                elif rule_type == "range":
+                    parts = str(rule_value).split("-")
+                    if len(parts) == 2:
+                        lo, hi = float(parts[0]), float(parts[1])
+                        val = float(params.get(target, 0))
+                        if not lo <= val <= hi:
+                            issues.append(error_msg)
+
+                elif rule_type == "expression":
+                    if is_row:
+                        for row in rows:
+                            _env = {
+                                **{k: v for k, v in row.items()},
+                                "round": round, "abs": abs, "sum": sum, "min": min, "max": max,
+                                "str": str, "float": float, "int": int, "len": len,
+                                "all": all, "any": any, "bool": bool,
+                            }
+                            if eval(rule_value, {"__builtins__": {}}, _env):
+                                issues.append(error_msg.format(**row))
+                    else:
+                        _env = {
+                            **{k: v for k, v in params.items()},
+                            "round": round, "abs": abs, "sum": sum, "min": min, "max": max,
+                            "str": str, "float": float, "int": int, "len": len,
+                            "all": all, "any": any, "bool": bool,
+                        }
+                        if eval(rule_value, {"__builtins__": {}}, _env):
+                            issues.append(error_msg)
+
+                elif rule_type == "skip_time":
+                    # 跳过 start_time/end_time 的必填检查（如 CTE 实验）
+                    pass  # 硬编码回退中已处理，DB规则仅标记
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _hardcoded_obsolete_keys(kind: str) -> set[str]:
+    return {
+        "mc_crack": {
+            "parallel_block_height_diff", "max_gap", "zero_force_before", "zero_force",
+            "loading_zero_confirmation", "k_source", "method_execution_confirmation",
+        },
+        "thickness": {
+            "calibration_scale", "cleaning_time", "software_version", "image_path",
+            "conditioning_start", "conditioning_end", "sample_preparation_actual",
+            "method_execution_confirmation",
+        },
+    }.get(kind, set())
+
+
+def _load_prechecks(kind: str) -> list[str]:
+    """加载前置检查项列表，优先数据库配置，回落硬编码默认值。"""
+    try:
+        from lims_db import current_full_config
+        cfg = current_full_config(kind)
+        if cfg and cfg.get("prechecks"):
+            return [cp["precheck_label"] for cp in cfg["prechecks"]]
+    except Exception:
+        pass
+    return PRECHECKS.get(kind, PRECHECKS["generic"])
 
 # Logical defaults for single-choice fields. They can be changed by the experimenter.
 SELECT_DEFAULTS = {
@@ -288,17 +381,17 @@ def initialize_business_record(
 ) -> dict[str, Any]:
     prior = prior or {}
     params = initial_parameters(kind, prior.get("parameters") or {}, detection_location)
-    obsolete_keys = {
-        "mc_crack": {
-            "parallel_block_height_diff", "max_gap", "zero_force_before", "zero_force",
-            "loading_zero_confirmation", "k_source", "method_execution_confirmation",
-        },
-        "thickness": {
-            "calibration_scale", "cleaning_time", "software_version", "image_path",
-            "conditioning_start", "conditioning_end", "sample_preparation_actual",
-            "method_execution_confirmation",
-        },
-    }.get(kind, set())
+    # 废弃字段：优先 DB 配置，回落硬编码
+    import json as _json
+    try:
+        from experiment_engine import _db_schema
+        db_s = _db_schema(kind)
+        if db_s and db_s.get("_obsolete_param_keys"):
+            obsolete_keys = set(_json.loads(db_s["_obsolete_param_keys"]))
+        else:
+            obsolete_keys = _hardcoded_obsolete_keys(kind)
+    except Exception:
+        obsolete_keys = _hardcoded_obsolete_keys(kind)
     for obsolete_key in obsolete_keys:
         params.pop(obsolete_key, None)
     legacy_temperature = params.get("temperature")
@@ -316,7 +409,7 @@ def initialize_business_record(
                 params[key] = SELECT_DEFAULTS.get(key) or (field.get("options") or [""])[0]
     rows = normalize_rows(kind, prior.get("rows") or initial_rows(kind, sample_ids))
     rows = calculate_rows(kind, rows)
-    checks = PRECHECKS.get(kind, PRECHECKS["generic"])
+    checks = _load_prechecks(kind)
     return {
         "task_confirmations": prior.get("task_confirmations") or {
             "sample_received": True,
@@ -390,6 +483,40 @@ def calculate_business_record(kind: str, record: dict[str, Any]) -> dict[str, An
     return output
 
 
+def merge_widget_values_into_business_draft(
+    kind: str,
+    record: dict[str, Any],
+    key_prefix: str,
+    widget_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Copy current form widgets into a durable, non-widget experiment draft."""
+    output = deepcopy(record)
+    params = output.setdefault("parameters", {})
+    parameter_keys = {
+        field["key"]
+        for section in schema(kind).get("sections", [])
+        for field in section.get("fields", [])
+    }
+    for field_key in parameter_keys:
+        for area in ("param", "manual", "process", "fixed_edit"):
+            widget_key = f"{key_prefix}_{area}_{field_key}"
+            if widget_key in widget_state:
+                params[field_key] = widget_state[widget_key]
+
+    rows = output.setdefault("rows", [])
+    input_row_keys = [
+        key
+        for key, _label, field_type in schema(kind).get("columns", [])
+        if key != "sample_no" and field_type != "calc"
+    ]
+    for row_index, row in enumerate(rows):
+        for field_key in input_row_keys:
+            widget_key = f"{key_prefix}_row_{row_index}_{field_key}"
+            if widget_key in widget_state:
+                row[field_key] = widget_state[widget_key]
+    return calculate_business_record(kind, output)
+
+
 def validate_business_record(kind: str, record: dict[str, Any], required_equipment: list[dict[str, Any]] | None = None) -> list[str]:
     issues: list[str] = []
     confirmations = record.get("task_confirmations") or {}
@@ -402,12 +529,22 @@ def validate_business_record(kind: str, record: dict[str, Any], required_equipme
         issues.append("存在未通过的实验前检查项，但未填写说明")
 
     params = record.get("parameters") or {}
+    # ---- DB驱动的验证规则 ----
+    _apply_db_validation_rules(kind, record, issues)
+    # ---- 硬编码回退（仅在 DB 配置不可用时生效）----
+    _db_cfg = None
+    try:
+        from lims_db import current_full_config
+        _db_cfg = current_full_config(kind)
+    except Exception:
+        pass
+    _has_db_rules = bool(_db_cfg and _db_cfg.get("validation_rules"))
     if kind != "cte":
         if not str(params.get("start_time") or "").strip():
             issues.append("尚未通过时间轴记录实验开始时间")
         if not str(params.get("end_time") or "").strip():
             issues.append("尚未通过时间轴记录实验结束时间")
-    if kind == "cte":
+    if kind == "cte" and not _has_db_rules:
         try:
             heating_rate = float(params.get("heating_rate"))
             if not 4.0 <= heating_rate <= 6.0:

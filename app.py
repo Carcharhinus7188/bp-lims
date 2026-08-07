@@ -15,7 +15,7 @@ from lims_db import *
 logger = get_logger(__name__)
 from experiment_engine import schema, initial_parameters, initial_rows, calculate_rows, dataframe, columns_for_editor
 from record_word_engine import export_record
-from business_record_engine import initialize_business_record, calculate_business_record, business_to_template_fields, business_completion_summary, template_supplement_requirements, template_supplement_missing
+from business_record_engine import initialize_business_record, calculate_business_record, merge_widget_values_into_business_draft, business_to_template_fields, business_completion_summary, template_supplement_requirements, template_supplement_missing
 from business_record_ui import render_readonly_summary, render_task_confirmations, render_equipment_confirmation, render_prechecks, render_parameters, render_sample_data, render_exception_and_summary, render_completion, render_template_supplement
 from equipment_registry import EQUIPMENT_BINDING_ROLES
 from experiment_schemas import SCHEMAS
@@ -188,7 +188,7 @@ def quality_evidence_choices(commission_no,selected_task_nos):
         task_row=task(task_no) or {};record_row=latest_record(task_no) or {}
         business=(record_row.get("payload") or {}).get("business_record") or {}
         kind=(task_config_snapshot(task_no) or {}).get("kind") or "generic"
-        definition=SCHEMAS.get(kind) or SCHEMAS["generic"];labels={}
+        definition=schema(kind);labels={}
         for section in definition.get("sections",[]):
             for field in section.get("fields",[]):labels[field["key"]]=field.get("label") or field["key"]
         for key,label,_field_type in definition.get("columns",[]):labels[key]=label
@@ -214,7 +214,7 @@ def quality_evidence_choices(commission_no,selected_task_nos):
 
 def review_correction_field_options(kind, business, template_name="", template_fields=None):
     """Return reviewer-facing Chinese field labels grouped by experiment step."""
-    definition=SCHEMAS.get(kind) or SCHEMAS["generic"]
+    definition=schema(kind)
     options=[
         "①任务与样品确认｜样品接收、编号或状态确认",
         "②设备与实验前检查｜设备状态、校准信息或异常说明",
@@ -317,7 +317,7 @@ def enforce_secondary_edit_scope(payload, prior, correction_fields, kind, supple
     if labels_by_step["②"]:
         for key in ("equipment_checks","prechecks","precheck_note"):
             merged[key]=new_business.get(key)
-    definition=SCHEMAS.get(kind) or SCHEMAS["generic"]
+    definition=schema(kind)
     parameter_keys={
         field.get("label"):field.get("key")
         for section in definition.get("sections",[])
@@ -429,6 +429,21 @@ def render_experiment_timeline(task_row, actor, key_prefix):
         except Exception as e:st.error(str(e))
     st.caption("时间由系统按中国大陆时区自动记录并进入审计时间轴，不再单独手工输入。")
     return start_at,end_at
+
+
+def _load_db_checkpoints(kind: str) -> dict[str, int]:
+    """从数据库加载拍照节点的 checkpoint_group 映射，失败时返回空字典。"""
+    try:
+        from lims_db import current_full_config
+        cfg = current_full_config(kind)
+        if cfg and cfg.get("photo_checkpoints"):
+            return {
+                cp["checkpoint_code"]: int(cp.get("checkpoint_group", 0))
+                for cp in cfg["photo_checkpoints"]
+            }
+    except Exception:
+        pass
+    return {}
 
 
 def render_inline_camera(
@@ -668,6 +683,20 @@ def navigate_to(target, message=""):
     st.rerun()
 
 
+def persist_active_experiment_table_draft():
+    """Preserve unsaved measurement cells before leaving the experiment screen."""
+    active=st.session_state.get("_active_experiment_draft") or {}
+    draft_key=active.get("draft_key")
+    key_prefix=active.get("key_prefix")
+    kind=active.get("kind")
+    draft=st.session_state.get(draft_key) if draft_key else None
+    if not draft_key or not key_prefix or not kind or not isinstance(draft,dict):
+        return
+    st.session_state[draft_key]=merge_widget_values_into_business_draft(
+        kind,draft,key_prefix,st.session_state,
+    )
+
+
 init_db()
 for exp,cfg in EXPERIMENTS.items():
     seed_template(exp,"原始记录表",cfg.get("template"));seed_template(exp,"SOP",cfg.get("sop"))
@@ -722,6 +751,7 @@ with st.sidebar:
                     type="primary" if nav_page==current_page else "secondary",
                     use_container_width=True,
                 ):
+                    persist_active_experiment_table_draft()
                     st.session_state["main_navigation"]=nav_page
                     st.rerun()
     page=st.session_state["main_navigation"]
@@ -1116,6 +1146,78 @@ elif page=="实验记录":
                 st.info("系统将自动打开首个指定字段所在步骤；其他指定字段可按前面的步骤编号进入。")
             st.success("上一版本已填写的实验数据、设备信息、照片原件和结论已完整保留在当前草稿中，请按复核意见修改后重新提交。")
 
+        # ── 实验配置版本选择器 ──
+        if version == 1:  # 仅首次编辑（未提交过）允许切换配置版本
+            experiment_code = t.get("experiment_code") or ""
+            available_versions = list_experiment_configs_for_experimenter(experiment_code) if experiment_code else []
+            if len(available_versions) > 1:
+                version_options = {
+                    f"{v['version']} ({v['status']})"
+                    + (f" — {v.get('note','')}" if v.get("note") else ""): v
+                    for v in available_versions
+                }
+                current_version_label = config_snapshot.get("config_version", "")
+                default_version_key = next(
+                    (k for k, v in version_options.items() if v["version"] == current_version_label),
+                    list(version_options.keys())[0] if version_options else "",
+                )
+                selected_version_key = st.selectbox(
+                    "🔧 实验配置版本",
+                    list(version_options.keys()),
+                    index=list(version_options.keys()).index(default_version_key) if default_version_key in version_options else 0,
+                    help="切换配置版本后，表单字段和测量列将按所选版本重新加载。已填写的相同字段数据会保留。",
+                    key=f"{key_prefix}_config_version_select",
+                )
+                selected_version = version_options.get(selected_version_key, {})
+                if selected_version and selected_version.get("config_id") != config_snapshot.get("config_id"):
+                    new_snapshot = build_partial_config_snapshot_from_version(selected_version["config_id"])
+                    if new_snapshot:
+                        # 合并：保留原快照中非版本相关字段（如温湿度计锁定信息等）
+                        merged = dict(config_snapshot)
+                        merged.update(new_snapshot)
+                        config_snapshot = merged
+                        kind = config_snapshot.get("kind") or EXPERIMENTS.get(t["experiment"], {}).get("kind", "generic")
+                        bound_devices = config_snapshot.get("equipment", [])
+                        template_name = config_snapshot.get("record_template_file", "") or EXPERIMENTS.get(t["experiment"], {}).get("template", "")
+                        st.warning(
+                            f"已切换到配置版本 **{selected_version['version']}**。"
+                            "检测记录将使用此版本的字段结构和设备配置。"
+                            "任务创建时的原始配置快照仍保留在审计记录中。"
+                        )
+                        # 重新初始化业务记录并保留已有数据
+                        prior_business = business
+                        business = initialize_business_record(kind, sample_ids, task_location, prior.get("business_record") or {})
+                        business.setdefault("parameters", {})["detection_location"] = task_location
+                        # 保留已有参数和行数据
+                        if prior_business:
+                            old_params = prior_business.get("parameters") or {}
+                            for key in list(business.get("parameters", {}).keys()):
+                                if key in old_params and old_params[key] not in (None, ""):
+                                    business["parameters"][key] = old_params[key]
+                            old_cols = {c[0] for c in schema(kind).get("columns", [])}
+                            new_rows = business.get("rows") or []
+                            old_rows = prior_business.get("rows") or []
+                            for i, new_row in enumerate(new_rows):
+                                if i < len(old_rows):
+                                    for ck in old_cols:
+                                        if ck in old_rows[i] and old_rows[i][ck] not in (None, ""):
+                                            new_row[ck] = old_rows[i][ck]
+                            business["equipment_checks"] = prior_business.get("equipment_checks") or []
+                            business["prechecks"] = prior_business.get("prechecks") or {}
+                            business["precheck_note"] = prior_business.get("precheck_note") or ""
+                            business["task_confirmations"] = prior_business.get("task_confirmations") or {}
+                            business["deviation"] = prior_business.get("deviation", "")
+                            business["retest"] = prior_business.get("retest", "否")
+                            business["report_summary"] = prior_business.get("report_summary", "")
+                            business["report_conclusion"] = prior_business.get("report_conclusion", "")
+                        # 将更新后的 business 写入 session_state 草稿
+                        st.session_state[draft_state_key] = dict(business)
+                        if session_token:
+                            try:
+                                save_form_draft(session_token, "实验记录", key_prefix, dict(business))
+                            except Exception:
+                                pass
+
         group0=group(t["group_id"]);commission0=commission(t["commission_no"]);package0=package(t["package_no"])
         sample_ids=t["sample_nos_list"]
         template_name=config_snapshot.get("record_template_file","") or EXPERIMENTS.get(t["experiment"],{}).get("template","")
@@ -1218,21 +1320,39 @@ elif page=="实验记录":
             business["parameters"]["end_time"]=str(end_at).replace("T"," ") if end_at else ""
             if start_at:business["parameters"]["test_date"]=str(start_at)[:10]
         all_checkpoints=photo_checkpoints(t["experiment"])
-        checkpoint_groups=[all_checkpoints[index::4] for index in range(4)]
-        if kind=="mc_crack":
-            checkpoint_groups=[
-                [x for x in all_checkpoints if x[0]=="SAMPLE_BEFORE"],
-                [x for x in all_checkpoints if x[0]=="SPAN_FIXTURE"],
-                [],
-                [x for x in all_checkpoints if x[0] in {"K_FACTOR","FASTTEST_RESULT","CRACK"}],
-            ]
-        elif kind=="thickness":
-            checkpoint_groups=[
-                [x for x in all_checkpoints if x[0]=="SAMPLE_BEFORE"],
-                [],
-                [],
-                [x for x in all_checkpoints if x[0] in {"MEASURE_RESULT","FINAL_CURVE"}],
-            ]
+        # 拍照节点分组——优先 DB 的 checkpoint_group，回落硬编码逻辑
+        db_checkpoints=_load_db_checkpoints(kind)
+        if db_checkpoints:
+            checkpoint_groups=[[],[],[],[]]
+            for cp in all_checkpoints:
+                group_idx=int(db_checkpoints.get(cp[0],0))
+                if 0<=group_idx<4:
+                    checkpoint_groups[group_idx].append(cp)
+                else:
+                    checkpoint_groups[0].append(cp)
+        else:
+            checkpoint_groups=[all_checkpoints[index::4] for index in range(4)]
+            if kind=="mc_crack":
+                checkpoint_groups=[
+                    [x for x in all_checkpoints if x[0]=="SAMPLE_BEFORE"],
+                    [x for x in all_checkpoints if x[0]=="SPAN_FIXTURE"],
+                    [],
+                    [x for x in all_checkpoints if x[0] in {"K_FACTOR","FASTTEST_RESULT","CRACK"}],
+                ]
+            elif kind=="thickness":
+                checkpoint_groups=[
+                    [x for x in all_checkpoints if x[0]=="SAMPLE_BEFORE"],
+                    [],
+                    [],
+                    [x for x in all_checkpoints if x[0] in {"MEASURE_RESULT","FINAL_CURVE"}],
+                ]
+            elif kind=="rough":
+                checkpoint_groups=[
+                    [x for x in all_checkpoints if x[0]=="REFERENCE_CHECK"],
+                    [x for x in all_checkpoints if x[0]=="SAMPLE_BEFORE"],
+                    [x for x in all_checkpoints if x[0]=="ROUGH_PARAMETERS"],
+                    [x for x in all_checkpoints if x[0]=="PROFILE"],
+                ]
         secondary_edit=bool(version>1 and latest and latest.get("status")!="已锁定")
         step1_labels=returned_step_labels(correction_fields,"①") if secondary_edit else None
         step2_labels=returned_step_labels(correction_fields,"②") if secondary_edit else None
@@ -1259,6 +1379,71 @@ elif page=="实验记录":
             _persist_draft()
         with tabs[1]:
             business["equipment_checks"]=render_equipment_confirmation(bound_devices,business.get("equipment_checks") or [],key_prefix,not secondary_edit or bool(step2_labels))
+            # ── 补充设备管理 ──
+            if not secondary_edit or bool(step2_labels):
+                with st.expander("➕ 补充设备（非配置绑定，按实验需求加设）", expanded=False):
+                    st.caption("配置绑定的设备已自动带入。如需使用额外设备，请从下方添加。补充设备数据将同步至实验记录和受控模板中。")
+                    existing_equip_nos = {d.get("management_no") for d in bound_devices}
+                    existing_equip_nos |= {e.get("management_no") for e in (business.get("equipment_checks") or [])}
+                    all_equip_list = list_equipment(True)
+                    available_equip = [
+                        e for e in all_equip_list
+                        if e.get("management_no") not in existing_equip_nos
+                        and e.get("enabled") and e.get("lifecycle_status") == "启用"
+                    ]
+                    if available_equip:
+                        supp_cols = st.columns([3, 2, 1, 1])
+                        selected_equip_no = supp_cols[0].selectbox(
+                            "选择设备",
+                            [e["management_no"] for e in available_equip],
+                            format_func=lambda x: f"{x}｜{(next((e for e in available_equip if e['management_no']==x), {})).get('equipment_name','')}",
+                            key=f"{key_prefix}_supp_equip_select",
+                        )
+                        from equipment_registry import EQUIPMENT_BINDING_ROLES
+                        supp_role = supp_cols[1].selectbox(
+                            "角色/用途",
+                            [""] + [r for r in EQUIPMENT_BINDING_ROLES if r not in ("环境监测",)],
+                            key=f"{key_prefix}_supp_role",
+                        )
+                        supp_required = supp_cols[2].checkbox("必需", key=f"{key_prefix}_supp_required")
+                        if supp_cols[3].button("添加", key=f"{key_prefix}_supp_add"):
+                            if selected_equip_no and supp_role:
+                                eq_info = next((e for e in available_equip if e["management_no"] == selected_equip_no), {})
+                                equipment_checks = list(business.get("equipment_checks") or [])
+                                equipment_checks.append({
+                                    "management_no": selected_equip_no,
+                                    "equipment_name": eq_info.get("equipment_name", ""),
+                                    "model": eq_info.get("model", ""),
+                                    "measuring_range": eq_info.get("measuring_range", ""),
+                                    "calibration_certificate": eq_info.get("calibration_certificate", ""),
+                                    "traceability_agency": eq_info.get("traceability_agency", ""),
+                                    "calibration_due": eq_info.get("calibration_due", ""),
+                                    "binding_role": supp_role,
+                                    "required": supp_required,
+                                    "is_supplementary": True,
+                                    "status": "正常",
+                                    "note": "",
+                                })
+                                business["equipment_checks"] = equipment_checks
+                                _persist_draft()
+                                st.rerun()
+                            else:
+                                st.warning("请选择设备和角色")
+                    else:
+                        st.info("所有启用设备已全部绑定或添加。")
+                    # 显示已添加的补充设备
+                    supp_devices = [e for e in (business.get("equipment_checks") or []) if e.get("is_supplementary")]
+                    if supp_devices:
+                        st.caption(f"已添加 {len(supp_devices)} 台补充设备：")
+                        for i, eq in enumerate(supp_devices):
+                            c1, c2 = st.columns([8, 1])
+                            c1.write(f"**{eq.get('equipment_name','')}**（{eq.get('management_no','')}）— {eq.get('binding_role','')}{' [必需]' if eq.get('required') else ''}")
+                            if c2.button("移除", key=f"{key_prefix}_supp_remove_{i}"):
+                                business["equipment_checks"] = [
+                                    e for e in (business.get("equipment_checks") or []) if not e.get("is_supplementary") or e.get("management_no") != eq.get("management_no")
+                                ]
+                                _persist_draft()
+                                st.rerun()
             business["prechecks"],business["precheck_note"]=render_prechecks(kind,business,key_prefix,not secondary_edit or bool(step2_labels))
             if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[1],username,user["display_name"],key_prefix,"设备与实验前检查照片")
             elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
@@ -1277,8 +1462,12 @@ elif page=="实验记录":
             business=calculate_business_record(kind,business)
             context["test_date"]=(business.get("parameters") or {}).get("test_date") or context["test_date"]
             attachments=list_attachments(task_no=tn)
+            # 合并配置绑定设备与补充设备，确保模板填充覆盖全部设备
+            all_equipment_for_template = list(bound_devices)
+            supp_equip = [e for e in (business.get("equipment_checks") or []) if e.get("is_supplementary")]
+            all_equipment_for_template.extend(supp_equip)
             process_template_fields=business_to_template_fields(
-                template_name,kind,context,bound_devices,business,attachments,
+                template_name,kind,context,all_equipment_for_template,business,attachments,
                 prior.get("template_fields") or {},
             )
             process_requirements=template_supplement_requirements(
@@ -1327,8 +1516,10 @@ elif page=="实验记录":
             business=calculate_business_record(kind,business)
             context["test_date"]=(business.get("parameters") or {}).get("test_date") or context["test_date"]
             attachments=list_attachments(task_no=tn)
+            all_equip_tpl = list(bound_devices)
+            all_equip_tpl.extend([e for e in (business.get("equipment_checks") or []) if e.get("is_supplementary")])
             template_fields=business_to_template_fields(
-                template_name,kind,context,bound_devices,business,attachments,prior.get("template_fields") or {}
+                template_name,kind,context,all_equip_tpl,business,attachments,prior.get("template_fields") or {}
             )
             supplement_requirements=template_supplement_requirements(template_name,template_fields)
             template_supplement=dict(st.session_state.get(
@@ -2568,7 +2759,7 @@ elif page=="实验配置版本":
     if not methods:st.info("请先在检测项目与方法库中新建实验");st.stop()
     selected_code=st.selectbox("选择实验",[x["experiment_code"] for x in methods],format_func=lambda x:f"{method_map[x]['experiment_name']}｜{method_map[x]['method_code']}")
     configs=list_experiment_configs(selected_code)
-    tabs=st.tabs(["①版本历史","②新建配置草稿","③编辑草稿信息","④配置设备关系","⑤批准发布"])
+    tabs=st.tabs(["①版本历史","②新建配置草稿","③编辑草稿信息","④配置设备关系","⑤批准发布","⑥配置表单字段","⑦配置测量列","⑧配置拍照与检查","⑨模板字段映射"])
     with tabs[0]:
         show_df(configs,["version","experiment_name","method_code","standard","kind","default_location","sop_version","record_template_version","status","effective_date","created_by","approved_by","approved_at","note"])
         current=current_experiment_config(selected_code)
@@ -2576,9 +2767,19 @@ elif page=="实验配置版本":
             st.subheader(f"现行配置 {current['version']} 的设备关系")
             show_df(config_equipment(current["id"],True),["management_no","equipment_name","model","binding_role","required","lifecycle_status","calibration_time","sort_order","note"])
     with tabs[1]:
-        version=st.text_input("新配置版本号","V1.1")
+        # 自动建议一个不冲突的版本号
+        existing_versions={c["version"] for c in configs}
+        suggested_version="V1.1"
+        while suggested_version in existing_versions:
+            parts=suggested_version.lstrip("Vv").split(".")
+            major=int(parts[0]);minor=int(parts[1]) if len(parts)>1 else 0
+            minor+=1;suggested_version=f"V{major}.{minor}"
+        version=st.text_input("新配置版本号",suggested_version,
+                              help=f"已有版本：{'、'.join(sorted(existing_versions)) or '无'}")
+        if version in existing_versions:
+            st.warning(f"版本 {version} 已存在，请使用其他版本号或先编辑现有草稿")
         copy_current=st.checkbox("复制现行配置及其设备关系",value=True)
-        if st.button("建立配置草稿",type="primary"):
+        if st.button("建立配置草稿",type="primary",disabled=version in existing_versions):
             try:
                 cid=create_experiment_config_version(selected_code,version,username,copy_current)
                 st.success(f"已建立草稿，配置ID：{cid}")
@@ -2605,9 +2806,32 @@ elif page=="实验配置版本":
                 software=c.text_input("软件名称/版本",cfg.get("software","") or "")
                 effective=a.date_input("计划生效日期",pd.to_datetime(cfg.get("effective_date") or china_today()).date())
                 note=st.text_area("配置变更说明",cfg.get("note","") or "")
+                # ── 高级配置 expander ──
+                with st.expander("高级配置：结果摘要 / 行扩展 / 废弃参数"):
+                    st.caption("这些配置影响实验结果报告的标题、单位和取值字段，以及数据行的展开方式。")
+                    r1,r2,r3=st.columns(3)
+                    result_title=r1.text_input("结果标题",cfg.get("result_title","") or "",help="如：平均Ra、结合强度")
+                    result_unit=r2.text_input("结果单位",cfg.get("result_unit","") or "",help="如：μm、MPa、HV10")
+                    result_value_key=r3.text_input("取值字段",cfg.get("result_value_key","") or "",help="如：mean、tau、delta")
+                    result_face_suffix=st.checkbox("结果附加面标识（如HV的面方向）",value=bool(cfg.get("result_face_suffix",0)))
+                    t1,t2=st.columns(2)
+                    row_expansion=t1.selectbox("行扩展模式",["","faces"],index=1 if cfg.get("row_expansion")=="faces" else 0,
+                                                help="faces=每个样品按面展开多行（如HV硬度Z轴/X轴方向）")
+                    face_labels=t2.text_input("面标签JSON",cfg.get("face_labels","") or "",placeholder='["Z轴方向","X轴方向"] 或 ["面1","面2"]')
+                    obsolete_keys=st.text_area("废弃参数字段（JSON数组）",cfg.get("obsolete_param_keys","") or "",placeholder='["field1","field2"]')
                 if st.form_submit_button("保存配置草稿",type="primary"):
                     try:
-                        save_experiment_config(cid,{"experiment_name":exp_name,"method_code":method,"standard":standard,"category":category,"kind":kind,"default_location":location,"sop_version":sop,"record_template_version":rec,"software":software,"effective_date":str(effective),"note":note},username)
+                        save_experiment_config(cid,{
+                            "experiment_name":exp_name,"method_code":method,"standard":standard,
+                            "category":category,"kind":kind,"default_location":location,
+                            "sop_version":sop,"record_template_version":rec,"software":software,
+                            "effective_date":str(effective),"note":note,
+                            "result_title":result_title,"result_unit":result_unit,
+                            "result_value_key":result_value_key,
+                            "result_face_suffix":result_face_suffix,
+                            "row_expansion":row_expansion,"face_labels":face_labels,
+                            "obsolete_param_keys":obsolete_keys,
+                        },username)
                         st.rerun()
                     except Exception as e:st.error(str(e))
     with tabs[3]:
@@ -2643,6 +2867,302 @@ elif page=="实验配置版本":
             if st.button("批准并发布为现行配置",type="primary"):
                 try:publish_experiment_config(cid,username,reason);st.success("配置已发布");st.rerun()
                 except Exception as e:st.error(str(e))
+    with tabs[5]:
+        st.subheader("实验参数字段管理")
+        st.caption("按实验步骤（section）组织表单字段。字段类型决定前端控件：text→文本框、number→数字框、select→下拉框、date→日期框、text_area→多行文本。选项用「|」分隔，如：符合|不符合。")
+        if not drafts:st.info("请先在②中建立配置草稿")
+        else:
+            editor_cid=st.selectbox("选择草稿配置",[x["id"] for x in drafts],format_func=lambda x:next(f"{c['version']}｜{c['experiment_name']}" for c in drafts if c["id"]==x),key="field_editor_cid")
+            field_sections=config_fields_by_section(editor_cid)
+            # 显示当前字段结构
+            for sec_idx,sec in enumerate(field_sections):
+                with st.expander(f"步骤：{sec['title']} ({len(sec['fields'])}个字段)",expanded=sec_idx==0):
+                    field_data=[]
+                    for f in sec["fields"]:
+                        field_data.append({"字段标识":f["key"],"标签":f["label"],"类型":f["type"],"默认值":f.get("default",""),"必填":"是" if f.get("required") else "","只读":"是" if f.get("readonly") else "","实测":"是" if f.get("actual") else ""})
+                    show_df(pd.DataFrame(field_data))
+                    # 删除字段
+                    del_key=st.selectbox(f"选择要删除的字段",[""]+[f["key"] for f in sec["fields"]],key=f"del_field_{editor_cid}_{sec_idx}")
+                    if del_key and st.button("删除选中字段",key=f"confirm_del_field_{editor_cid}_{sec_idx}"):
+                        updated_sections=[]
+                        for s in field_sections:
+                            filtered=[f for f in s["fields"] if not (s["title"]==sec["title"] and f["key"]==del_key)]
+                            if filtered:
+                                updated_sections.append({"title":s["title"],"fields":filtered})
+                        save_config_fields(editor_cid,updated_sections,username)
+                        st.success(f"已删除字段 {del_key}")
+                        st.rerun()
+                    # 修改字段
+                    edit_field=st.selectbox(f"选择要编辑的字段",[""]+[f["key"] for f in sec["fields"]],key=f"edit_field_{editor_cid}_{sec_idx}")
+                    if edit_field:
+                        existing_field=next(f for f in sec["fields"] if f["key"]==edit_field)
+                        with st.form(f"edit_field_form_{editor_cid}_{sec_idx}"):
+                            x1,x2=st.columns(2)
+                            new_label=x1.text_input("字段标签",existing_field.get("label",""))
+                            new_type=x2.selectbox("字段类型",["text","number","select","date","text_area","select:符合|不符合"],index=["text","number","select","date","text_area","select:符合|不符合"].index(existing_field.get("type","text")) if existing_field.get("type","text") in ["text","number","select","date","text_area","select:符合|不符合"] else 0)
+                            new_default=st.text_input("默认值",str(existing_field.get("default","")))
+                            z1,z2,z3=st.columns(3)
+                            new_required=z1.checkbox("必填",value=bool(existing_field.get("required")))
+                            new_readonly=z2.checkbox("只读",value=bool(existing_field.get("readonly")))
+                            new_actual=z3.checkbox("实测值",value=bool(existing_field.get("actual")))
+                            if st.form_submit_button("保存修改"):
+                                updated_sections=[]
+                                for s in field_sections:
+                                    updated_fields=[]
+                                    for f in s["fields"]:
+                                        if s["title"]==sec["title"] and f["key"]==edit_field:
+                                            updated_fields.append({"key":edit_field,"label":new_label,"type":new_type,"default":new_default,"options":[],"required":new_required,"readonly":new_readonly,"actual":new_actual})
+                                        else:
+                                            updated_fields.append(f)
+                                    updated_sections.append({"title":s["title"],"fields":updated_fields})
+                                save_config_fields(editor_cid,updated_sections,username)
+                                st.success(f"已保存字段 {edit_field}")
+                                st.rerun()
+            # 添加新步骤/字段
+            st.divider();st.subheader("添加字段")
+            with st.form(f"add_field_form_{editor_cid}"):
+                p1,p2=st.columns(2)
+                section_title=p1.text_input("所属步骤标题（新步骤或现有步骤名）",placeholder="如：环境与实验参数")
+                section_order=p2.number_input("步骤排序",min_value=1,value=1,step=1)
+                q1,q2=st.columns(2)
+                field_key=q1.text_input("字段标识（英文key）",placeholder="如：temperature_before")
+                field_label=q2.text_input("字段中文标签",placeholder="如：实验前温度")
+                r1,r2=st.columns(2)
+                field_type=r1.selectbox("字段类型",["text","number","select","date","text_area","select:符合|不符合"])
+                field_default=r2.text_input("默认值","")
+                s1,s2,s3=st.columns(3)
+                is_required=s1.checkbox("必填",value=False)
+                is_readonly=s2.checkbox("只读",value=False)
+                is_actual=s3.checkbox("实测值",value=False)
+                if st.form_submit_button("添加字段到配置",type="primary"):
+                    if not field_key.strip():
+                        st.error("字段标识不能为空")
+                    elif not field_label.strip():
+                        st.error("字段中文标签不能为空")
+                    else:
+                        existing_keys={f["key"] for s in field_sections for f in s["fields"]}
+                        sections=list(field_sections)
+                        found=False
+                        for s in sections:
+                            if s["title"]==section_title:
+                                s["fields"].append({"key":field_key.strip(),"label":field_label.strip(),"type":field_type,"default":field_default,"options":[],"required":is_required,"readonly":is_readonly,"actual":is_actual})
+                                found=True
+                                break
+                        if not found:
+                            sections.append({"title":section_title or "默认步骤","fields":[{"key":field_key.strip(),"label":field_label.strip(),"type":field_type,"default":field_default,"options":[],"required":is_required,"readonly":is_readonly,"actual":is_actual}]})
+                        save_config_fields(editor_cid,sections,username)
+                        st.success(f"已添加字段 {field_key}")
+                        st.rerun()
+    with tabs[6]:
+        st.subheader("测量数据列管理")
+        st.caption("定义原始记录表的测量列（如Ra1/Ra2/Ra3、平均值、结论等）。列类型：number=数值输入、calc=自动计算、select=下拉选择、text=文本。")
+        if not drafts:st.info("请先在②中建立配置草稿")
+        else:
+            col_cid=st.selectbox("选择草稿配置",[x["id"] for x in drafts],format_func=lambda x:next(f"{c['version']}｜{c['experiment_name']}" for c in drafts if c["id"]==x),key="col_editor_cid")
+            col_items=config_columns(col_cid)
+            if col_items:
+                col_data=[{"列标识":c["column_key"],"列标签":c["column_label"],"类型":c["column_type"]} for c in col_items]
+                show_df(pd.DataFrame(col_data))
+            else:
+                st.info("尚无测量列配置，请添加。")
+            # 删除列
+            if col_items:
+                del_col=st.selectbox("选择要删除的列",[""]+[c["column_key"] for c in col_items],key=f"del_col_{col_cid}")
+                if del_col and st.button("删除选中列",key=f"confirm_del_col_{col_cid}"):
+                    updated=[c for c in col_items if c["column_key"]!=del_col]
+                    save_config_columns(col_cid,updated,username)
+                    st.success(f"已删除列 {del_col}")
+                    st.rerun()
+            # 添加列
+            st.divider();st.subheader("添加测量列")
+            st.caption("calc类型列可设置计算表达式，支持 round/abs/sum/min/max 函数，列名作为变量。如：round((ra1+ra2+ra3)/3, 3)")
+            with st.form(f"add_col_form_{col_cid}"):
+                a1,a2,a3=st.columns(3)
+                col_key=a1.text_input("列标识（英文key）",placeholder="如：ra1")
+                col_label=a2.text_input("列中文标签",placeholder="如：Ra1（μm）")
+                col_type=a3.selectbox("列类型",["number","calc","select","text","select:符合|不符合"])
+                b1,b2,b3=st.columns(3)
+                col_default=b1.text_input("默认值（数字）",placeholder="如：15.0",help="仅 number/calc 类型生效")
+                col_calc=b2.text_input("计算表达式",placeholder="如：round((ra1+ra2+ra3)/3, 3)",help="仅 calc 类型生效，使用列名作变量")
+                col_precision=b3.number_input("小数位数",min_value=0,value=3,step=1)
+                if st.form_submit_button("添加测量列",type="primary"):
+                    if not col_key.strip():
+                        st.error("列标识不能为空")
+                    elif not col_label.strip():
+                        st.error("列中文标签不能为空")
+                    else:
+                        def_val=None
+                        if col_default.strip():
+                            try:def_val=float(col_default.strip())
+                            except ValueError:pass
+                        updated=list(col_items)+[{
+                            "column_key":col_key.strip(),"column_label":col_label.strip(),
+                            "column_type":col_type,"column_default":def_val,
+                            "calc_expression":col_calc.strip(),
+                            "calc_precision":int(col_precision),
+                        }]
+                        save_config_columns(col_cid,updated,username)
+                        st.success(f"已添加列 {col_key}")
+                        st.rerun()
+    with tabs[7]:
+        st.subheader("拍照节点与前检查项")
+        if not drafts:st.info("请先在②中建立配置草稿")
+        else:
+            photo_cid=st.selectbox("选择草稿配置",[x["id"] for x in drafts],format_func=lambda x:next(f"{c['version']}｜{c['experiment_name']}" for c in drafts if c["id"]==x),key="photo_editor_cid")
+            # 拍照节点
+            st.markdown("#### 📷 拍照节点")
+            photo_items=config_photo_checkpoints(photo_cid)
+            if photo_items:
+                photo_data=[{"节点标识":p["checkpoint_code"],"节点标签":p["checkpoint_label"],"必拍":"是" if p.get("is_required") else "否","样品级":"是" if p.get("is_sample_level") else "否"} for p in photo_items]
+                show_df(pd.DataFrame(photo_data))
+                del_cp=st.selectbox("选择要删除的拍照节点",[""]+[p["checkpoint_code"] for p in photo_items],key=f"del_photo_{photo_cid}")
+                if del_cp and st.button("删除选中节点",key=f"confirm_del_photo_{photo_cid}"):
+                    updated=[p for p in photo_items if p["checkpoint_code"]!=del_cp]
+                    save_config_photo_checkpoints(photo_cid,updated,username)
+                    st.success(f"已删除节点 {del_cp}")
+                    st.rerun()
+            else:
+                st.info("尚无拍照节点。")
+            with st.form(f"add_photo_form_{photo_cid}"):
+                a1,a2=st.columns(2)
+                cp_code=a1.text_input("节点标识（英文）",placeholder="如：SAMPLE_BEFORE")
+                cp_label=a2.text_input("节点中文标签",placeholder="如：实验前样品标签")
+                b1,b2,b3=st.columns(3)
+                cp_required=b1.checkbox("必须拍摄",value=True)
+                cp_sample=b2.checkbox("样品级别（每样品独立拍摄）",value=False)
+                cp_group=b3.selectbox("所属步骤Tab",[0,1,2,3],format_func=lambda x:f"步骤{x+1}（{'任务确认'if x==0 else'设备与检查'if x==1 else'环境与参数'if x==2 else'原始数据'}）")
+                if st.form_submit_button("添加拍照节点",type="primary"):
+                    if not cp_code.strip() or not cp_label.strip():
+                        st.error("节点标识和中文标签不能为空")
+                    else:
+                        updated=list(photo_items)+[{
+                            "checkpoint_code":cp_code.strip(),"checkpoint_label":cp_label.strip(),
+                            "is_required":int(cp_required),"is_sample_level":int(cp_sample),
+                            "checkpoint_group":int(cp_group),
+                        }]
+                        save_config_photo_checkpoints(photo_cid,updated,username)
+                        st.success(f"已添加节点 {cp_code}")
+                        st.rerun()
+            # 前置检查项
+            st.divider();st.markdown("#### ✅ 前置检查项")
+            precheck_items=config_prechecks(photo_cid)
+            if precheck_items:
+                pre_data=[{"检查标识":p["precheck_code"],"检查项":p["precheck_label"],"必需":"是" if p.get("is_required") else "否"} for p in precheck_items]
+                show_df(pd.DataFrame(pre_data))
+                del_pc=st.selectbox("选择要删除的前置检查项",[""]+[p["precheck_code"] for p in precheck_items],key=f"del_precheck_{photo_cid}")
+                if del_pc and st.button("删除选中检查项",key=f"confirm_del_precheck_{photo_cid}"):
+                    updated=[p for p in precheck_items if p["precheck_code"]!=del_pc]
+                    save_config_prechecks(photo_cid,updated,username)
+                    st.success(f"已删除检查项 {del_pc}")
+                    st.rerun()
+            else:
+                st.info("尚无前置检查项。")
+            with st.form(f"add_precheck_form_{photo_cid}"):
+                a1,a2=st.columns(2)
+                pc_code=a1.text_input("检查标识（英文）",placeholder="如：env_confirm")
+                pc_label=a2.text_input("检查项描述",placeholder="如：环境条件确认")
+                pc_required=st.checkbox("必需检查",value=True)
+                if st.form_submit_button("添加前置检查项",type="primary"):
+                    if not pc_code.strip() or not pc_label.strip():
+                        st.error("检查标识和描述不能为空")
+                    else:
+                        updated=list(precheck_items)+[{"precheck_code":pc_code.strip(),"precheck_label":pc_label.strip(),"is_required":int(pc_required)}]
+                        save_config_prechecks(photo_cid,updated,username)
+                        st.success(f"已添加检查项 {pc_code}")
+                        st.rerun()
+            # ── 验证规则 ──
+            st.divider();st.markdown("#### ⚙️ 验证规则")
+            st.caption("定义实验数据提交时的校验规则。支持：required（必填）、range（数值范围）、expression（自定义Python表达式）。表达式中的变量为参数key或行数据列名。")
+            val_rules=config_validation_rules(photo_cid)
+            if val_rules:
+                val_data=[{"类型":r["rule_type"],"目标字段":r["target_field"],"规则值":r.get("rule_value",""),"错误提示":r["error_message"],"行级":"是" if r.get("is_row_level") else "否"} for r in val_rules]
+                show_df(pd.DataFrame(val_data))
+                del_vr=st.selectbox("选择要删除的规则",[""]+[f"{r['rule_type']}:{r['target_field']}" for r in val_rules],key=f"del_rule_{photo_cid}")
+                if del_vr and st.button("删除选中规则",key=f"confirm_del_rule_{photo_cid}"):
+                    idx=next(i for i,r in enumerate(val_rules) if f"{r['rule_type']}:{r['target_field']}"==del_vr)
+                    updated=[r for i,r in enumerate(val_rules) if i!=idx]
+                    save_config_validation_rules(photo_cid,updated,username)
+                    st.success(f"已删除规则 {del_vr}")
+                    st.rerun()
+            else:
+                st.info("暂无验证规则。")
+            with st.form(f"add_rule_form_{photo_cid}"):
+                a1,a2,a3=st.columns(3)
+                rule_type=a1.selectbox("规则类型",["required","range","expression"])
+                target_field=a2.text_input("目标字段",placeholder="如：heating_rate")
+                rule_value=a3.text_input("规则值",placeholder="required不填；range填4.0-6.0；expression填表达式")
+                b1,b2=st.columns(2)
+                error_msg=b1.text_input("错误提示信息",placeholder="如：升温速率应在5±1 ℃/min范围内")
+                is_row=b2.checkbox("行级规则（应用于每行数据）",value=False)
+                if st.form_submit_button("添加验证规则",type="primary"):
+                    if not target_field.strip() or not error_msg.strip():
+                        st.error("目标字段和错误提示不能为空")
+                    else:
+                        updated=list(val_rules)+[{
+                            "rule_type":rule_type,"target_field":target_field.strip(),
+                            "rule_value":rule_value.strip(),
+                            "error_message":error_msg.strip(),
+                            "is_row_level":int(is_row),
+                        }]
+                        save_config_validation_rules(photo_cid,updated,username)
+                        st.success(f"已添加验证规则 {rule_type}:{target_field}")
+                        st.rerun()
+    with tabs[8]:
+        st.subheader("模板字段映射")
+        st.caption("定义实验配置字段到受控 DOCX 模板中具体表格单元格的映射关系。硬编码映射优先；此处定义的映射补充或覆盖未填写的单元格。")
+        if not drafts:
+            st.info("请先在②中建立配置草稿")
+        else:
+            tpl_cid = st.selectbox(
+                "选择草稿配置",
+                [x["id"] for x in drafts],
+                format_func=lambda x: next(f"{c['version']}｜{c['experiment_name']}" for c in drafts if c["id"] == x),
+                key="tpl_mapping_editor_cid",
+            )
+            existing = list_template_mappings(tpl_cid)
+            if existing:
+                tpl_data = [{
+                    "来源": m["field_source"], "字段键": m["field_key"],
+                    "模板": m["template_name"], "表": m["table_index"],
+                    "行": m["row_index"], "列": m["col_index"],
+                    "转换": m["transform"], "勾选项": m.get("checkbox_selection", ""),
+                } for m in existing]
+                show_df(pd.DataFrame(tpl_data))
+                del_tpl = st.selectbox("选择要删除的映射", [""] + [f"{m['field_source']}:{m['field_key']} → t{m['table_index']}r{m['row_index']}c{m['col_index']}" for m in existing], key=f"del_tpl_{tpl_cid}")
+                if del_tpl and st.button("删除选中映射", key=f"confirm_del_tpl_{tpl_cid}"):
+                    idx = next(i for i, m in enumerate(existing) if f"{m['field_source']}:{m['field_key']} → t{m['table_index']}r{m['row_index']}c{m['col_index']}" == del_tpl)
+                    updated = [m for i, m in enumerate(existing) if i != idx]
+                    save_template_mappings(tpl_cid, updated, username)
+                    st.success(f"已删除映射")
+                    st.rerun()
+            else:
+                st.info("暂无模板字段映射。")
+            with st.form(f"add_tpl_mapping_{tpl_cid}"):
+                st.markdown("**添加新映射**")
+                c1, c2, c3 = st.columns(3)
+                src = c1.selectbox("字段来源", ["params", "rows", "context"], key=f"tpl_src_{tpl_cid}")
+                fkey = c2.text_input("字段键（field_key / column_key）", key=f"tpl_fkey_{tpl_cid}", placeholder="如：temperature_before 或 mean")
+                tname = c3.text_input("模板文件名", key=f"tpl_tname_{tpl_cid}", placeholder="如：RECORD_R001_ROUGHNESS.docx")
+                r1, r2, r3, r4 = st.columns(4)
+                ti = r1.number_input("表索引", 0, 20, 0, key=f"tpl_ti_{tpl_cid}")
+                ri = r2.number_input("行索引", 0, 50, 1, key=f"tpl_ri_{tpl_cid}")
+                ci = r3.number_input("列索引", 0, 30, 1, key=f"tpl_ci_{tpl_cid}")
+                trans = r4.selectbox("转换类型", ["text", "checkbox", "number"], key=f"tpl_trans_{tpl_cid}")
+                chk_sel = st.text_input("复选框勾选内容（仅checkbox类型需要）", key=f"tpl_chk_{tpl_cid}", placeholder="如：符合 或 是")
+                if st.form_submit_button("添加映射", type="primary"):
+                    if not fkey.strip() or not tname.strip():
+                        st.error("字段键和模板文件名不能为空")
+                    else:
+                        updated = list(existing) + [{
+                            "field_source": src, "field_key": fkey.strip(),
+                            "template_name": tname.strip(),
+                            "table_index": int(ti), "row_index": int(ri), "col_index": int(ci),
+                            "transform": trans,
+                            "checkbox_selection": chk_sel.strip() if trans == "checkbox" else "",
+                        }]
+                        save_template_mappings(tpl_cid, updated, username)
+                        st.success(f"已添加映射 {src}:{fkey}")
+                        st.rerun()
 
 elif page=="设备库":
     header("DLBP-CX-P05-R10设备台账动态管理")

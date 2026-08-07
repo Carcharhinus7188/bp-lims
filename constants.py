@@ -5,7 +5,7 @@ COMPANY_CN = "大连标普检测有限公司"
 COMPANY_EN = "DALIAN BIAOPU TESTING CO., LTD."
 SYSTEM_CN = "大连标普实验室样品全过程追溯系统"
 SYSTEM_EN = "BPLab Sample Lifecycle Tracking System"
-APP_VERSION = "BPLab Trace V9.4.2 任务包接收修复版"
+APP_VERSION = "BPLab Trace V10.2 R014-R015模板更新版"
 TIMEZONE_NAME = "Asia/Shanghai"
 
 STORAGE_AREAS = ["A区域", "B区域"]
@@ -79,6 +79,8 @@ REPORT_DECISIVE_PHOTO_CODES = {
     "维氏硬度试验": ["INDENT"],
     "增材制造金属试样厚度测量": ["FINAL_CURVE", "MEASURE_RESULT"],
     "牙科材料色稳定性试验": ["D65_COMPARE", "OBSERVER_RESULT"],
+    "定制式固定义齿综合检验": ["FIXED_DENTURE_RESULT", "MICRO_RESULT"],
+    "定制式活动义齿综合检验": ["REMOVABLE_DENTURE_RESULT", "XRAY_RESULT"],
 }
 
 EXPERIMENT_PHOTO_CHECKPOINTS = {
@@ -146,12 +148,37 @@ EXPERIMENT_PHOTO_CHECKPOINTS = {
         ("D65_COMPARE", "D65环境下色泽比较状态", True),
         ("OBSERVER_RESULT", "三名观察者独立比较结果", True),
     ],
+    "定制式固定义齿综合检验": [
+        ("DESIGN_TRACE", "设计单、模型及原材料追溯核查", True),
+        ("FIXED_DENTURE_RESULT", "表面、适合性、咬合及尺寸综合检验结果", True),
+        ("MICRO_RESULT", "粗糙度或孔隙度显微检查结果", False),
+    ],
+    "定制式活动义齿综合检验": [
+        ("DESIGN_TRACE", "设计单、模型及原材料追溯核查", True),
+        ("REMOVABLE_DENTURE_RESULT", "外形、适合性、厚度及咬合综合检验结果", True),
+        ("XRAY_RESULT", "金属内部质量X射线结果", False),
+        ("COLOR_RESULT", "色泽检查结果", False),
+    ],
 }
 
 
 def photo_checkpoints(experiment_name: str):
-    # 粗糙度与热膨胀按最新受控流程使用精简后的专属节点，
-    # 不再叠加温湿度、设备铭牌、装夹、实验后状态等通用照片。
+    """获取实验拍照节点列表，优先数据库配置，回落硬编码默认值。"""
+    # 1) 尝试从数据库读取当前现行版本的拍照节点配置
+    try:
+        from lims_db import experiment_method_by_name, current_full_config
+        method = experiment_method_by_name(experiment_name)
+        if method:
+            cfg = current_full_config(method["experiment_code"])
+            if cfg and cfg.get("photo_checkpoints"):
+                return [
+                    (cp["checkpoint_code"], cp["checkpoint_label"], bool(cp["is_required"]))
+                    for cp in cfg["photo_checkpoints"]
+                ]
+    except Exception:
+        pass
+
+    # 2) 回落到硬编码默认值
     if experiment_name in {
         "表面粗糙度试验", "金属-陶瓷结合裂纹萌生试验",
         "热膨胀系数试验", "维氏硬度试验", "增材制造金属试样厚度测量",
@@ -232,6 +259,22 @@ EXPERIMENTS = {
         "method": "YY 0710", "kind": "color",
         "template": "RECORD_R012_COLOR_STABILITY.docx",
         "sop": "SOP_R012_COLOR_STABILITY.docx",
+    },
+    "定制式固定义齿综合检验": {
+        "key": "I011", "category": "定制式义齿综合检验",
+        "std": "YY/T 1936-2024",
+        "method": "YY/T 1936", "kind": "fixed_denture",
+        "record_code": "R014", "sop_code": "SOP-014",
+        "template": "RECORD_R014_FIXED_DENTURE.docx",
+        "sop": "SOP_R014_FIXED_DENTURE.docx",
+    },
+    "定制式活动义齿综合检验": {
+        "key": "I012", "category": "定制式义齿综合检验",
+        "std": "YY/T 1937-2024",
+        "method": "YY/T 1937", "kind": "removable_denture",
+        "record_code": "R015", "sop_code": "SOP-015",
+        "template": "RECORD_R015_REMOVABLE_DENTURE.docx",
+        "sop": "SOP_R015_REMOVABLE_DENTURE.docx",
     },
 }
 

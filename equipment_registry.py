@@ -1189,6 +1189,36 @@ EXPERIMENT_EQUIPMENT_BINDINGS = {'表面粗糙度试验': [{'management_no': 'BP
                 {'management_no': 'BPGL-C031', 'role': '移液器具', 'required': False, 'note': '2 mL移液管，备用试液移取'},
                 {'management_no': 'BPGL-C032', 'role': '移液器具', 'required': False, 'note': '5 mL移液管，试液移取'}]}
 
+# R014/R015 are one comprehensive task each.  Their internal measurements reuse
+# existing controlled equipment but must not be seeded as separate experiment tasks.
+EXPERIMENT_DEFAULT_LOCATIONS.update({
+    '定制式固定义齿综合检验': '外观检测室',
+    '定制式活动义齿综合检验': '外观检测室',
+})
+EXPERIMENT_EQUIPMENT_BINDINGS.update({
+    '定制式固定义齿综合检验': [
+        {'management_no': 'BPGL-C002', 'role': '外观检查', 'required': True, 'note': '放大观察表面、组织面、交界线及缺陷'},
+        {'management_no': 'BPGL-A001', 'role': '尺寸测量', 'required': True, 'note': '交界线厚度、基底厚度及连接体尺寸测量'},
+        {'management_no': 'BPGL-B003', 'role': '标准器', 'required': False, 'note': '颜色比较'},
+        {'management_no': 'BPGL-B004', 'role': '标准器', 'required': False, 'note': '基托材料颜色比较'},
+        {'management_no': 'BPGL-A028', 'role': '光照设备', 'required': False, 'note': 'D65条件下颜色检查'},
+        {'management_no': 'BPGL-A018', 'role': '制样设备', 'required': False, 'note': '孔隙度检查切割制样'},
+        {'management_no': 'BPGL-A019', 'role': '制样设备', 'required': False, 'note': '孔隙度检查研磨抛光'},
+        {'management_no': 'BPGL-A026', 'role': '显微测量', 'required': False, 'note': '孔隙和尺寸图像测量'},
+    ],
+    '定制式活动义齿综合检验': [
+        {'management_no': 'BPGL-C002', 'role': '外观检查', 'required': True, 'note': '外形、表面、适合性和缺陷观察'},
+        {'management_no': 'BPGL-A001', 'role': '尺寸测量', 'required': True, 'note': '基托厚度、组织面终止点和大连接体测量'},
+        {'management_no': 'BPGL-A028', 'role': '光照设备', 'required': False, 'note': 'D65色泽检查'},
+        {'management_no': 'BPGL-A039', 'role': '光照确认', 'required': False, 'note': '色泽检查照度确认'},
+        {'management_no': 'BPGL-A032', 'role': 'X射线设备', 'required': False, 'note': '金属内部质量检查'},
+        {'management_no': 'BPGL-A033', 'role': '成像设备', 'required': False, 'note': 'X射线影像输出'},
+        {'management_no': 'BPGL-A029', 'role': '测量设备', 'required': False, 'note': '密度或灰度辅助判定'},
+        {'management_no': 'BPGL-A018', 'role': '制样设备', 'required': False, 'note': '内外终止线和孔隙度水冷切割制样'},
+        {'management_no': 'BPGL-A019', 'role': '制样设备', 'required': False, 'note': '切割断面研磨抛光'},
+    ],
+})
+
 EQUIPMENT_BINDING_ROLES = ['主设备',
  '成像设备',
  '测量设备',

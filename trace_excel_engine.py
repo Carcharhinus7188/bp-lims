@@ -9,7 +9,7 @@ from typing import Any
 import xlsxwriter
 
 from constants import REPORT_DECISIVE_PHOTO_CODES
-from experiment_schemas import SCHEMAS
+from experiment_engine import schema
 
 
 def _json_list(value: Any) -> list[str]:
@@ -30,7 +30,7 @@ def _text(value: Any) -> str:
 
 
 def _field_labels(kind: str) -> dict[str, str]:
-    definition = SCHEMAS.get(kind) or SCHEMAS["generic"]
+    definition = schema(kind)
     labels: dict[str, str] = {}
     for section in definition.get("sections", []):
         for field in section.get("fields", []):

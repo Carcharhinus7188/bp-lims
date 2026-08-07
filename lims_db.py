@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, date
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Any, Iterable
-import base64, calendar, hashlib, json, os, re, secrets, sqlite3
+import base64, calendar, contextlib, hashlib, json, logging, os, re, secrets, sqlite3, threading, time
 
 try:
     import streamlit as st
@@ -101,30 +101,130 @@ class PasswordValidationError(ValueError):
     """Raised when a password does not meet the complexity requirements."""
 
 
-def connect() -> sqlite3.Connection:
+def connect(retries: int = 3, retry_delay: float = 0.1) -> sqlite3.Connection:
+    """Create a new SQLite connection with performance pragmas.
+
+    Retries on OperationalError (e.g. SQLITE_BUSY) up to *retries* times.
+    """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
     SIGNATURE_DIR.mkdir(parents=True, exist_ok=True)
+    last_error = None
+    for attempt in range(retries):
+        try:
+            c = sqlite3.connect(DB_PATH, factory=ClosingConnection)
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA foreign_keys=ON")
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA synchronous=NORMAL")
+            c.execute("PRAGMA cache_size=-64000")  # 64 MB
+            c.execute("PRAGMA busy_timeout=5000")
+            return c
+        except sqlite3.OperationalError as exc:
+            last_error = exc
+            if attempt < retries - 1:
+                time.sleep(retry_delay * (attempt + 1))
+    raise last_error  # type: ignore[misc]
+
+
+# ── Thread-local connection pool for read-heavy hot paths ──
+_conn_pool: dict[int, ClosingConnection] = {}
+_pool_lock = threading.Lock()
+
+
+def _pool_connect() -> ClosingConnection:
+    """Create a fresh connection for the pool (no extra PRAGMA logging)."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(DB_PATH, factory=ClosingConnection)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
-    # Performance pragmas — safe to set before any transaction starts
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA synchronous=NORMAL")
-    c.execute("PRAGMA cache_size=-64000")  # 64 MB
+    c.execute("PRAGMA cache_size=-64000")
     c.execute("PRAGMA busy_timeout=5000")
     return c
 
 
+def _pool_get() -> ClosingConnection:
+    """Return a reusable thread-local connection, creating one if needed."""
+    tid = threading.get_ident()
+    with _pool_lock:
+        conn = _conn_pool.get(tid)
+    if conn is None:
+        conn = _pool_connect()
+        with _pool_lock:
+            _conn_pool[tid] = conn
+    # Health check — recreate on failure
+    try:
+        conn.execute("SELECT 1")
+    except Exception:
+        conn = _pool_connect()
+        with _pool_lock:
+            _conn_pool[tid] = conn
+    return conn
+
+
+def _pool_invalidate() -> None:
+    """Close and discard the current thread's pooled connection."""
+    tid = threading.get_ident()
+    with _pool_lock:
+        conn = _conn_pool.pop(tid, None)
+    if conn:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def pool_close_all() -> None:
+    """Close all pooled connections (call during application shutdown)."""
+    with _pool_lock:
+        for conn in list(_conn_pool.values()):
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _conn_pool.clear()
+
+
+@contextlib.contextmanager
+def timed_connection(label: str = ""):
+    """Context manager that logs slow connections (>1s wall-clock time)."""
+    t0 = time.perf_counter()
+    c = connect()
+    try:
+        yield c
+    finally:
+        elapsed = time.perf_counter() - t0
+        if elapsed > 1.0:
+            logging.getLogger("bplab.db").warning(
+                "Slow DB connection: %s took %.2fs", label, elapsed
+            )
+        c.close()
+
+
 def rows(sql: str, args: Iterable[Any] = ()) -> list[dict[str, Any]]:
-    with connect() as c:
+    """Execute a read query, reusing a pooled connection when possible."""
+    try:
+        c = _pool_get()
         return [dict(x) for x in c.execute(sql, tuple(args)).fetchall()]
+    except Exception:
+        _pool_invalidate()
+        with connect() as c:
+            return [dict(x) for x in c.execute(sql, tuple(args)).fetchall()]
 
 
 def one(sql: str, args: Iterable[Any] = ()) -> dict[str, Any] | None:
-    with connect() as c:
+    """Execute a single-row read query, reusing a pooled connection when possible."""
+    try:
+        c = _pool_get()
         r = c.execute(sql, tuple(args)).fetchone()
-    return dict(r) if r else None
+        return dict(r) if r else None
+    except Exception:
+        _pool_invalidate()
+        with connect() as c:
+            r = c.execute(sql, tuple(args)).fetchone()
+        return dict(r) if r else None
 
 
 def _password_hash(password: str) -> str:
@@ -210,6 +310,63 @@ CREATE TABLE IF NOT EXISTS experiment_config_equipment(
   required INTEGER DEFAULT 0, sort_order INTEGER DEFAULT 0, note TEXT,
   created_at TEXT, updated_at TEXT,
   PRIMARY KEY(config_id, management_no)
+);
+-- ── 数据库驱动实验配置（管理员后台可编辑，无需改代码）──
+CREATE TABLE IF NOT EXISTS experiment_config_fields(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  config_id INTEGER NOT NULL REFERENCES experiment_config_versions(id) ON DELETE CASCADE,
+  section_title TEXT NOT NULL DEFAULT '',
+  section_order INTEGER NOT NULL DEFAULT 1,
+  field_key TEXT NOT NULL,
+  field_label TEXT NOT NULL,
+  field_type TEXT NOT NULL DEFAULT 'text',
+  field_default TEXT DEFAULT '',
+  field_options TEXT DEFAULT '',
+  is_required INTEGER DEFAULT 0,
+  is_readonly INTEGER DEFAULT 0,
+  is_actual INTEGER DEFAULT 0,
+  sort_order INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS experiment_config_columns(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  config_id INTEGER NOT NULL REFERENCES experiment_config_versions(id) ON DELETE CASCADE,
+  column_key TEXT NOT NULL,
+  column_label TEXT NOT NULL,
+  column_type TEXT NOT NULL DEFAULT 'number',
+  is_required INTEGER DEFAULT 0,
+  sort_order INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS experiment_config_photo_checkpoints(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  config_id INTEGER NOT NULL REFERENCES experiment_config_versions(id) ON DELETE CASCADE,
+  checkpoint_code TEXT NOT NULL,
+  checkpoint_label TEXT NOT NULL,
+  is_required INTEGER DEFAULT 1,
+  is_sample_level INTEGER DEFAULT 0,
+  sort_order INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS experiment_config_prechecks(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  config_id INTEGER NOT NULL REFERENCES experiment_config_versions(id) ON DELETE CASCADE,
+  precheck_code TEXT NOT NULL,
+  precheck_label TEXT NOT NULL,
+  is_required INTEGER DEFAULT 1,
+  sort_order INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS template_field_mappings(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  config_id INTEGER NOT NULL REFERENCES experiment_config_versions(id) ON DELETE CASCADE,
+  field_source TEXT NOT NULL DEFAULT 'params',
+  field_key TEXT NOT NULL,
+  template_name TEXT NOT NULL,
+  table_index INTEGER NOT NULL,
+  row_index INTEGER NOT NULL,
+  col_index INTEGER NOT NULL,
+  transform TEXT NOT NULL DEFAULT 'text',
+  checkbox_selection TEXT DEFAULT '',
+  sort_order INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS task_config_snapshots(
   task_no TEXT PRIMARY KEY, config_id INTEGER, config_version TEXT,
@@ -783,10 +940,53 @@ CREATE TABLE IF NOT EXISTS form_drafts(
             "CREATE INDEX IF NOT EXISTS idx_objections_report ON objections(report_no)",
             "CREATE INDEX IF NOT EXISTS idx_equipment_incidents_task ON equipment_incidents(task_no)",
             "CREATE INDEX IF NOT EXISTS idx_form_drafts_lookup ON form_drafts(session_token,page,draft_key)",
+            "CREATE INDEX IF NOT EXISTS idx_cfg_fields_config ON experiment_config_fields(config_id)",
+            "CREATE INDEX IF NOT EXISTS idx_cfg_columns_config ON experiment_config_columns(config_id)",
+            "CREATE INDEX IF NOT EXISTS idx_cfg_photos_config ON experiment_config_photo_checkpoints(config_id)",
+            "CREATE INDEX IF NOT EXISTS idx_cfg_prechecks_config ON experiment_config_prechecks(config_id)",
         ]
         for _sql in _indexes:
             c.execute(_sql)
 
+        # Migrate hardcoded Python schemas → database-driven config (first run only)
+        # ---- 数据库驱动实验配置列扩展（ALTER TABLE 迁移）----
+        cfgv_cols = {item[1] for item in c.execute("PRAGMA table_info(experiment_config_versions)").fetchall()}
+        for col_name, col_type in [
+            ("row_expansion", "TEXT DEFAULT ''"),
+            ("face_labels", "TEXT DEFAULT ''"),
+            ("result_title", "TEXT DEFAULT ''"),
+            ("result_unit", "TEXT DEFAULT ''"),
+            ("result_value_key", "TEXT DEFAULT ''"),
+            ("result_face_suffix", "INTEGER DEFAULT 0"),
+            ("obsolete_param_keys", "TEXT DEFAULT ''"),
+        ]:
+            if col_name not in cfgv_cols:
+                c.execute(f"ALTER TABLE experiment_config_versions ADD COLUMN {col_name} {col_type}")
+
+        cfgc_cols = {item[1] for item in c.execute("PRAGMA table_info(experiment_config_columns)").fetchall()}
+        for col_name, col_type in [
+            ("column_default", "REAL"),
+            ("calc_expression", "TEXT DEFAULT ''"),
+            ("calc_precision", "INTEGER DEFAULT 3"),
+        ]:
+            if col_name not in cfgc_cols:
+                c.execute(f"ALTER TABLE experiment_config_columns ADD COLUMN {col_name} {col_type}")
+
+        phot_cols = {item[1] for item in c.execute("PRAGMA table_info(experiment_config_photo_checkpoints)").fetchall()}
+        if "checkpoint_group" not in phot_cols:
+            c.execute("ALTER TABLE experiment_config_photo_checkpoints ADD COLUMN checkpoint_group INTEGER DEFAULT 0")
+
+        # 验证规则表
+        c.execute("""CREATE TABLE IF NOT EXISTS experiment_config_validation_rules(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            config_id INTEGER NOT NULL REFERENCES experiment_config_versions(id) ON DELETE CASCADE,
+            rule_type TEXT NOT NULL DEFAULT 'required',
+            target_field TEXT NOT NULL,
+            rule_value TEXT,
+            error_message TEXT NOT NULL,
+            is_row_level INTEGER DEFAULT 0,
+            sort_order INTEGER DEFAULT 0
+        )""")
         # Clean up expired form drafts (>30 days old)
         c.execute(
             "DELETE FROM form_drafts WHERE updated_at < ?",
@@ -815,6 +1015,11 @@ CREATE TABLE IF NOT EXISTS form_drafts(
                         item.get("notes", ""), now(), now(),
                     ),
                 )
+
+    # 回填已有配置的扩展字段（结果标签/列默认值/计算表达式/验证规则）
+    # 必须在 init_db 外层 with 块之后调用，否则会导致 database locked
+    _backfill_existing_configs()
+    _seed_config_from_schemas()
 
 
 def audit(
@@ -1089,6 +1294,11 @@ def experiment_method(experiment_code: str) -> dict[str, Any] | None:
 
 def experiment_method_by_name(experiment_name: str) -> dict[str, Any] | None:
     return one("SELECT * FROM experiment_methods WHERE experiment_name=?", (experiment_name,))
+
+
+def experiment_method_by_kind(kind: str) -> dict[str, Any] | None:
+    """通过 schema kind（如 rough/mc_crack）查找实验方法。"""
+    return one("SELECT * FROM experiment_methods WHERE kind=? AND enabled=1 LIMIT 1", (kind,))
 
 
 def _next_internal_experiment_key() -> str:
@@ -1514,15 +1724,71 @@ def list_experiment_configs(experiment_code: str | None = None) -> list[dict[str
     return rows(q + " ORDER BY experiment_name,id DESC", args)
 
 
+def list_experiment_configs_for_experimenter(experiment_code: str) -> list[dict[str, Any]]:
+    """返回实验员可选的配置版本列表（现行 + 历史，排除草稿）。"""
+    return rows(
+        """SELECT id,version,status,effective_date,note,kind,sop_version,record_template_version
+           FROM experiment_config_versions
+           WHERE experiment_code=? AND status IN ('现行','历史')
+           ORDER BY CASE status WHEN '现行' THEN 0 ELSE 1 END, id DESC""",
+        (experiment_code,),
+    )
+
+
+def build_partial_config_snapshot_from_version(config_id: int) -> dict[str, Any]:
+    """从指定配置版本构建内存快照（不写入 task_config_snapshots 表）。
+    用于实验员在实验记录过程中切换配置版本。"""
+    cfg = experiment_config(config_id)
+    if not cfg:
+        return {}
+    equipment = config_equipment(config_id, True)
+    sop = template_for_version(cfg["experiment_name"], "SOP", cfg.get("sop_version") or "") if cfg.get("sop_version") else active_version(cfg["experiment_name"], "SOP")
+    record_tpl = template_for_version(cfg["experiment_name"], "原始记录表", cfg.get("record_template_version") or "") if cfg.get("record_template_version") else active_version(cfg["experiment_name"], "原始记录表")
+    if not sop or not record_tpl:
+        from constants import EXPERIMENTS
+        base = EXPERIMENTS.get(cfg["experiment_name"], {})
+        if not sop and base.get("sop"):
+            sop = {"version": cfg.get("sop_version") or "A/0", "file_name": base.get("sop")}
+        if not record_tpl and base.get("template"):
+            record_tpl = {"version": cfg.get("record_template_version") or "A/0", "file_name": base.get("template")}
+    snapshot = {
+        "config_id": cfg["id"], "config_version": cfg["version"],
+        "experiment_code": cfg["experiment_code"], "experiment_name": cfg["experiment_name"],
+        "method_code": cfg["method_code"], "standard": cfg.get("standard", ""),
+        "category": cfg.get("category", ""), "kind": cfg.get("kind") or "generic",
+        "default_location": cfg.get("default_location", ""), "software": cfg.get("software", ""),
+        "sop_version": (sop or {}).get("version", cfg.get("sop_version", "")),
+        "sop_file": (sop or {}).get("file_name", ""),
+        "record_template_version": (record_tpl or {}).get("version", cfg.get("record_template_version", "")),
+        "record_template_file": (record_tpl or {}).get("file_name", ""),
+        "equipment": [_equipment_snapshot_row(x) for x in equipment],
+        "published_at": cfg.get("approved_at", ""), "snapshot_created_at": now(),
+        "status": cfg.get("status", ""),
+    }
+    return snapshot
+
+
 def experiment_config(config_id: int) -> dict[str, Any] | None:
     return one("SELECT * FROM experiment_config_versions WHERE id=?", (config_id,))
 
 
-def current_experiment_config(experiment_code: str) -> dict[str, Any] | None:
-    return one(
+def current_experiment_config(experiment_code_or_kind: str) -> dict[str, Any] | None:
+    """获取现行配置。参数可以是内部 experiment_code (I001) 或 schema kind (rough)。"""
+    # 先尝试直接匹配 experiment_code
+    cfg = one(
         "SELECT * FROM experiment_config_versions WHERE experiment_code=? AND status='现行' ORDER BY id DESC LIMIT 1",
-        (experiment_code,),
+        (experiment_code_or_kind,),
     )
+    if cfg:
+        return cfg
+    # 如果不是内部编号，按 kind 列查找
+    method = experiment_method_by_kind(experiment_code_or_kind)
+    if method:
+        return one(
+            "SELECT * FROM experiment_config_versions WHERE experiment_code=? AND status='现行' ORDER BY id DESC LIMIT 1",
+            (method["experiment_code"],),
+        )
+    return None
 
 
 def config_equipment(config_id: int, include_unavailable: bool = True) -> list[dict[str, Any]]:
@@ -1597,7 +1863,9 @@ def save_experiment_config(config_id: int, data: dict[str, Any], actor: str) -> 
         c.execute(
             """UPDATE experiment_config_versions SET
                experiment_name=?,method_code=?,standard=?,category=?,kind=?,default_location=?,
-               sop_version=?,record_template_version=?,software=?,effective_date=?,note=?
+               sop_version=?,record_template_version=?,software=?,effective_date=?,note=?,
+               row_expansion=?,face_labels=?,result_title=?,result_unit=?,result_value_key=?,
+               result_face_suffix=?,obsolete_param_keys=?
                WHERE id=?""",
             (
                 str(data.get("experiment_name", "")).strip(),
@@ -1606,6 +1874,13 @@ def save_experiment_config(config_id: int, data: dict[str, Any], actor: str) -> 
                 location,data.get("sop_version", ""),data.get("record_template_version", ""),
                 data.get("software", ""),data.get("effective_date", ""),
                 data.get("note", ""),config_id,
+                data.get("row_expansion", ""),
+                str(data.get("face_labels", "")),
+                data.get("result_title", ""),
+                data.get("result_unit", ""),
+                data.get("result_value_key", ""),
+                int(data.get("result_face_suffix", 0)),
+                str(data.get("obsolete_param_keys", "")),
             ),
         )
     audit("experiment_config", str(config_id), actor, "保存配置草稿", new_value=json.dumps(data,ensure_ascii=False))
@@ -1747,6 +2022,731 @@ def current_config_overview() -> list[dict[str, Any]]:
             "status": config.get("status", "未发布") if config else "未发布",
         })
     return result
+
+
+# ── 数据库驱动实验配置：字段 / 测量列 / 拍照节点 / 前置检查 ──
+
+def config_fields(config_id: int) -> list[dict[str, Any]]:
+    """读取某配置版本的全部参数字段，按步骤+排序返回。"""
+    return rows(
+        """SELECT * FROM experiment_config_fields
+           WHERE config_id=? ORDER BY section_order, sort_order""",
+        (config_id,),
+    )
+
+
+def config_fields_by_section(config_id: int) -> list[dict[str, Any]]:
+    """按步骤分组返回字段列表，格式与 experiment_schemas.SCHEMAS['kind']['sections'] 兼容。"""
+    raw = config_fields(config_id)
+    sections: dict[tuple[int, str], list[dict[str, Any]]] = {}
+    for row in raw:
+        key = (row["section_order"], row["section_title"])
+        sections.setdefault(key, []).append({
+            "key": row["field_key"], "label": row["field_label"],
+            "type": row["field_type"], "default": json.loads(row["field_default"]) if row["field_default"] and row["field_default"].startswith("[") else row["field_default"],
+            "options": json.loads(row["field_options"]) if row["field_options"] else [],
+            "required": bool(row["is_required"]), "readonly": bool(row["is_readonly"]),
+            "actual": bool(row["is_actual"]),
+        })
+    return [
+        {"title": title, "fields": fields}
+        for (_order, title), fields in sorted(sections.items(), key=lambda x: x[0][0])
+    ]
+
+
+def save_config_fields(config_id: int, sections: list[dict[str, Any]], actor: str) -> None:
+    """全量替换某配置版本的参数字段。"""
+    with connect() as c:
+        c.execute("DELETE FROM experiment_config_fields WHERE config_id=?", (config_id,))
+        for section_order, section in enumerate(sections, 1):
+            for sort_order, field in enumerate(section.get("fields", []), 1):
+                default = field.get("default", "")
+                if isinstance(default, (list, dict)):
+                    default = json.dumps(default, ensure_ascii=False)
+                options = field.get("options", [])
+                if isinstance(options, list) and options:
+                    options_str = json.dumps(options, ensure_ascii=False)
+                else:
+                    options_str = ""
+                c.execute(
+                    """INSERT INTO experiment_config_fields
+                       (config_id,section_title,section_order,field_key,field_label,
+                        field_type,field_default,field_options,is_required,is_readonly,is_actual,sort_order)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        config_id, section["title"], section_order,
+                        field["key"], field["label"], field.get("type", "text"),
+                        str(default), options_str,
+                        int(field.get("required", False)),
+                        int(field.get("readonly", False)),
+                        int(field.get("actual", False)),
+                        sort_order,
+                    ),
+                )
+    audit("experiment_config", str(config_id), actor, "更新参数字段",
+          new_value=f"{len(sections)}个步骤")
+
+
+def config_columns(config_id: int) -> list[dict[str, Any]]:
+    """读取某配置版本的测量列定义。"""
+    return rows(
+        """SELECT * FROM experiment_config_columns
+           WHERE config_id=? ORDER BY sort_order""",
+        (config_id,),
+    )
+
+
+def save_config_columns(config_id: int, columns: list[dict[str, Any]], actor: str) -> None:
+    """全量替换某配置版本的测量列。"""
+    with connect() as c:
+        c.execute("DELETE FROM experiment_config_columns WHERE config_id=?", (config_id,))
+        for sort_order, col in enumerate(columns, 1):
+            c.execute(
+                """INSERT INTO experiment_config_columns
+                   (config_id,column_key,column_label,column_type,is_required,sort_order,
+                    column_default,calc_expression,calc_precision)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    config_id, col["column_key"], col["column_label"],
+                    col.get("column_type", "number"), int(col.get("is_required", False)), sort_order,
+                    col.get("column_default"), col.get("calc_expression", ""),
+                    int(col.get("calc_precision", 3)),
+                ),
+            )
+    audit("experiment_config", str(config_id), actor, "更新测量列",
+          new_value=f"{len(columns)}列")
+
+
+def config_photo_checkpoints(config_id: int) -> list[dict[str, Any]]:
+    """读取某配置版本的拍照节点。"""
+    return rows(
+        """SELECT * FROM experiment_config_photo_checkpoints
+           WHERE config_id=? ORDER BY sort_order""",
+        (config_id,),
+    )
+
+
+def save_config_photo_checkpoints(config_id: int, checkpoints: list[dict[str, Any]], actor: str) -> None:
+    """全量替换某配置版本的拍照节点。"""
+    with connect() as c:
+        c.execute("DELETE FROM experiment_config_photo_checkpoints WHERE config_id=?", (config_id,))
+        for sort_order, cp in enumerate(checkpoints, 1):
+            c.execute(
+                """INSERT INTO experiment_config_photo_checkpoints
+                   (config_id,checkpoint_code,checkpoint_label,is_required,is_sample_level,sort_order,checkpoint_group)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (
+                    config_id, cp["checkpoint_code"], cp["checkpoint_label"],
+                    int(cp.get("is_required", True)), int(cp.get("is_sample_level", False)), sort_order,
+                    int(cp.get("checkpoint_group", 0)),
+                ),
+            )
+    audit("experiment_config", str(config_id), actor, "更新拍照节点",
+          new_value=f"{len(checkpoints)}个节点")
+
+
+def config_prechecks(config_id: int) -> list[dict[str, Any]]:
+    """读取某配置版本的前置检查项。"""
+    return rows(
+        """SELECT * FROM experiment_config_prechecks
+           WHERE config_id=? ORDER BY sort_order""",
+        (config_id,),
+    )
+
+
+def save_config_prechecks(config_id: int, prechecks: list[dict[str, Any]], actor: str) -> None:
+    """全量替换某配置版本的前置检查项。"""
+    with connect() as c:
+        c.execute("DELETE FROM experiment_config_prechecks WHERE config_id=?", (config_id,))
+        for sort_order, pc in enumerate(prechecks, 1):
+            c.execute(
+                """INSERT INTO experiment_config_prechecks
+                   (config_id,precheck_code,precheck_label,is_required,sort_order)
+                   VALUES(?,?,?,?,?)""",
+                (config_id, pc["precheck_code"], pc["precheck_label"], int(pc.get("is_required", True)), sort_order),
+            )
+    audit("experiment_config", str(config_id), actor, "更新前置检查",
+          new_value=f"{len(prechecks)}项")
+
+
+def config_validation_rules(config_id: int) -> list[dict[str, Any]]:
+    """读取某配置版本的验证规则。"""
+    return rows(
+        "SELECT * FROM experiment_config_validation_rules WHERE config_id=? ORDER BY sort_order",
+        (config_id,),
+    )
+
+
+def save_config_validation_rules(config_id: int, rules: list[dict[str, Any]], actor: str) -> None:
+    """全量替换某配置版本的验证规则。"""
+    with connect() as c:
+        c.execute("DELETE FROM experiment_config_validation_rules WHERE config_id=?", (config_id,))
+        for sort_order, rule in enumerate(rules, 1):
+            c.execute(
+                """INSERT INTO experiment_config_validation_rules
+                   (config_id,rule_type,target_field,rule_value,error_message,is_row_level,sort_order)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (
+                    config_id,
+                    rule.get("rule_type", "required"),
+                    rule["target_field"],
+                    rule.get("rule_value", ""),
+                    rule["error_message"],
+                    int(rule.get("is_row_level", 0)),
+                    sort_order,
+                ),
+            )
+    audit("experiment_config", str(config_id), actor, "更新验证规则",
+          new_value=f"{len(rules)}条规则")
+
+
+# ── 模板字段映射（DB 驱动）──
+
+def list_template_mappings(config_id: int) -> list[dict[str, Any]]:
+    """列出某配置版本的全部模板字段映射。"""
+    return rows(
+        "SELECT * FROM template_field_mappings WHERE config_id=? ORDER BY sort_order",
+        (config_id,),
+    )
+
+
+def save_template_mappings(config_id: int, mappings: list[dict[str, Any]], actor: str) -> None:
+    """全量替换某配置版本的模板字段映射（仅草稿可编辑）。"""
+    config = experiment_config(config_id)
+    if not config or config.get("status") != "草稿":
+        raise ValueError("只能编辑草稿配置的模板映射")
+    with connect() as c:
+        c.execute("DELETE FROM template_field_mappings WHERE config_id=?", (config_id,))
+        for sort_order, m in enumerate(mappings, 1):
+            c.execute(
+                """INSERT INTO template_field_mappings
+                   (config_id,field_source,field_key,template_name,table_index,row_index,col_index,
+                    transform,checkbox_selection,sort_order,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    config_id,
+                    str(m.get("field_source", "params")),
+                    str(m.get("field_key", "")),
+                    str(m.get("template_name", "")),
+                    int(m.get("table_index", 0)),
+                    int(m.get("row_index", 0)),
+                    int(m.get("col_index", 0)),
+                    str(m.get("transform", "text")),
+                    str(m.get("checkbox_selection", "")),
+                    sort_order,
+                    now(), now(),
+                ),
+            )
+    audit("experiment_config", str(config_id), actor, "更新模板字段映射",
+          new_value=f"{len(mappings)}条映射")
+
+
+# ── 完整配置组装 ──
+
+def build_full_config(config_id: int) -> dict[str, Any]:
+    """组装完整的实验配置（含字段/列/拍照/前置检查/设备），供运行时使用。"""
+    cfg = experiment_config(config_id)
+    if not cfg:
+        return {}
+    return {
+        **cfg,
+        "sections": config_fields_by_section(config_id),
+        "columns": config_columns(config_id),
+        "photo_checkpoints": config_photo_checkpoints(config_id),
+        "prechecks": config_prechecks(config_id),
+        "equipment": config_equipment(config_id, True),
+        "validation_rules": config_validation_rules(config_id),
+    }
+
+
+def current_full_config(experiment_code: str) -> dict[str, Any] | None:
+    """获取某实验当前现行版本的完整配置。无配置时返回 None。"""
+    cfg = current_experiment_config(experiment_code)
+    if not cfg:
+        return None
+    return build_full_config(cfg["id"])
+
+
+# ── 硬编码默认值 → 数据库迁移（首次运行时自动执行）──
+
+def _backfill_existing_configs() -> int:
+    """回填已有配置行的扩展字段（结果标签/列默认值/计算表达式/验证规则）。
+    仅在对应字段为 NULL/空时更新，已有数据不覆盖。返回回填的配置数。"""
+    _EXTENDED = {
+        "rough": {
+            "result_title": "平均Ra", "result_unit": "μm", "result_value_key": "mean",
+            "column_defaults": {"limit": 15.0},
+            "field_defaults": {
+                "sampling_length": 2.5, "sampling_count": 3.0,
+                "evaluation_length": 7.5, "three_length_mode": "3L（已完成方法确认）",
+            },
+            "calc_expressions": [
+                ("mean", "round((ra1+ra2+ra3)/3, 3)", 3),
+                ("conclusion", "'符合' if mean <= float(row.get('limit', 15)) else '不符合'", 0),
+            ],
+            "validation_rules": [], "obsolete_param_keys": [],
+        },
+        "mc_crack": {
+            "result_title": "结合强度", "result_unit": "MPa", "result_value_key": "tau",
+            "column_defaults": {},
+            "calc_expressions": [
+                ("dm_mean", "round((dm1+dm2+dm3)/3, 4)", 4),
+                ("tau", "round(k*ffail, 2)", 2),
+                ("conclusion", "'符合' if tau > 25 else '不符合'", 0),
+            ],
+            "validation_rules": [],
+            "obsolete_param_keys": ["parallel_block_height_diff", "max_gap", "zero_force_before",
+                                      "zero_force", "loading_zero_confirmation", "k_source",
+                                      "method_execution_confirmation"],
+        },
+        "xray": {
+            "result_title": "ROI平均灰度", "result_unit": "", "result_value_key": "roi_mean",
+            "column_defaults": {}, "calc_expressions": [], "validation_rules": [], "obsolete_param_keys": [],
+        },
+        "warp": {
+            "result_title": "翘曲变化量ΔH", "result_unit": "mm", "result_value_key": "delta",
+            "column_defaults": {"limit": 0.5},
+            "calc_expressions": [
+                ("delta", "round(h1-h2, 4)", 4),
+                ("conclusion", "'合格' if abs(float(row.get('delta', 0) or 0)) <= float(row.get('limit', 0.5)) else '不合格'", 0),
+            ],
+            "validation_rules": [], "obsolete_param_keys": [],
+        },
+        "cte": {
+            "result_title": "线膨胀系数α", "result_unit": "×10⁻⁶/K", "result_value_key": "alpha",
+            "column_defaults": {"t1": 25.0, "t2": 550.0},
+            "calc_expressions": [
+                ("delta_t", "round(t2-t1, 3)", 3),
+                ("alpha", "round((delta_l/1000.0)/(l0*delta_t)*1000000, 3)", 3),
+            ],
+            "validation_rules": [
+                ("range", "heating_rate", "4.0-6.0", "升温速率应在5±1 ℃/min范围内", 0),
+            ],
+            "obsolete_param_keys": [],
+        },
+        "shock": {
+            "result_title": "耐急冷急热结果", "result_unit": "", "result_value_key": "conclusion",
+            "column_defaults": {},
+            "calc_expressions": [
+                ("conclusion", "'符合' if all(str(row.get(k, '无')) == '无' for k in ('crack', 'chipping', 'fracture')) else '不符合'", 0),
+            ],
+            "validation_rules": [], "obsolete_param_keys": [],
+        },
+        "bend": {
+            "result_title": "0.2%规定非比例弯曲应力", "result_unit": "MPa", "result_value_key": "stress_02",
+            "column_defaults": {"length": 25.0, "width": 2.0, "height": 2.0, "span": 20.0, "speed": 1.0},
+            "calc_expressions": [
+                ("conclusion", "'符合' if float(row.get('stress_02', 0) or 0) >= 800 else '不符合'", 0),
+            ],
+            "validation_rules": [], "obsolete_param_keys": [],
+        },
+        "hv": {
+            "result_title": "平均维氏硬度", "result_unit": "HV10", "result_value_key": "mean",
+            "result_face_suffix": 1, "row_expansion": "faces",
+            "face_labels": '["Z轴方向", "X轴方向"]',
+            "column_defaults": {},
+            "calc_expressions": [
+                ("mean", "round((indent1+indent2+indent3)/3, 1)", 1),
+            ],
+            "validation_rules": [], "obsolete_param_keys": [],
+        },
+        "thickness": {
+            "result_title": "平均厚度", "result_unit": "mm", "result_value_key": "mean",
+            "column_defaults": {},
+            "calc_expressions": [], "validation_rules": [],
+            "obsolete_param_keys": ["calibration_scale", "cleaning_time", "software_version", "image_path",
+                                      "conditioning_start", "conditioning_end", "sample_preparation_actual",
+                                      "method_execution_confirmation"],
+        },
+        "color": {
+            "result_title": "目视比较结果", "result_unit": "", "result_value_key": "overall",
+            "column_defaults": {}, "calc_expressions": [], "validation_rules": [], "obsolete_param_keys": [],
+        },
+        "fixed_denture": {
+            "result_title": "综合检验结果", "result_unit": "", "result_value_key": "conclusion",
+            "row_expansion": "samples", "face_labels": "",
+            "column_defaults": {}, "calc_expressions": [], "validation_rules": [],
+            "obsolete_param_keys": [],
+        },
+        "removable_denture": {
+            "result_title": "综合检验结果", "result_unit": "", "result_value_key": "conclusion",
+            "row_expansion": "samples", "face_labels": "",
+            "column_defaults": {}, "calc_expressions": [], "validation_rules": [],
+            "obsolete_param_keys": [],
+        },
+    }
+
+    backfilled = 0
+    with connect() as c:
+        # 回填 config_versions 扩展字段
+        for kind, ext in _EXTENDED.items():
+            method = experiment_method_by_kind(kind)
+            if not method:
+                continue
+            internal_code = method["experiment_code"]
+            cfg = one(
+                "SELECT id,result_title,result_unit,result_value_key FROM experiment_config_versions WHERE experiment_code=?",
+                (internal_code,),
+            )
+            if not cfg:
+                continue
+            # 仅回填空值
+            updates = []
+            params = []
+            if not cfg.get("result_title"):
+                updates.append("result_title=?"); params.append(ext.get("result_title", ""))
+            if not cfg.get("result_unit") and ext.get("result_unit"):
+                updates.append("result_unit=?"); params.append(ext.get("result_unit", ""))
+            if not cfg.get("result_value_key") and ext.get("result_value_key"):
+                updates.append("result_value_key=?"); params.append(ext.get("result_value_key", ""))
+            if "result_face_suffix" in ext:
+                updates.append("result_face_suffix=?"); params.append(ext["result_face_suffix"])
+            if ext.get("row_expansion"):
+                updates.append("row_expansion=?"); params.append(ext["row_expansion"])
+            if ext.get("face_labels"):
+                updates.append("face_labels=?"); params.append(ext["face_labels"])
+            if ext.get("obsolete_param_keys"):
+                updates.append("obsolete_param_keys=?"); params.append(json.dumps(ext["obsolete_param_keys"], ensure_ascii=False))
+            if updates:
+                params.append(cfg["id"])
+                c.execute(f"UPDATE experiment_config_versions SET {','.join(updates)} WHERE id=?", params)
+                backfilled += 1
+
+            # 回填 column_defaults
+            for col_key, col_default in ext.get("column_defaults", {}).items():
+                c.execute(
+                    "UPDATE experiment_config_columns SET column_default=? WHERE config_id=? AND column_key=? AND column_default IS NULL",
+                    (col_default, cfg["id"], col_key),
+                )
+
+            # 回填 field_defaults（仅当字段已有默认值且与旧版预期值匹配时才更新，避免覆盖用户自定义值）
+            for field_key, field_default in ext.get("field_defaults", {}).items():
+                c.execute(
+                    "UPDATE experiment_config_fields SET field_default=? WHERE config_id=? AND field_key=? AND (field_default IS NULL OR field_default='')",
+                    (str(field_default), cfg["id"], field_key),
+                )
+            # 粗糙度取样参数定向迁移（V10.1 旧→新默认值）
+            if kind == "rough":
+                _rough_field_migration = {
+                    "sampling_length": ("0.8", "2.5"),
+                    "sampling_count": ("5.0", "3"),
+                    "evaluation_length": ("4.0", "7.5"),
+                    "three_length_mode": ("5L（默认）", "3L（已完成方法确认）"),
+                }
+                for fkey, (old_val, new_val) in _rough_field_migration.items():
+                    c.execute(
+                        "UPDATE experiment_config_fields SET field_default=? WHERE config_id=? AND field_key=? AND field_default=?",
+                        (new_val, cfg["id"], fkey, old_val),
+                    )
+
+            # 回填 calc_expressions
+            for target, expr, precision in ext.get("calc_expressions", []):
+                c.execute(
+                    "UPDATE experiment_config_columns SET calc_expression=?, calc_precision=? WHERE config_id=? AND column_key=? AND (calc_expression IS NULL OR calc_expression='')",
+                    (expr, precision, cfg["id"], target),
+                )
+
+            # 回填 validation_rules（仅当该配置尚无任何规则时）
+            existing_rules = c.execute(
+                "SELECT COUNT(*) cnt FROM experiment_config_validation_rules WHERE config_id=?",
+                (cfg["id"],),
+            ).fetchone()[0]
+            if existing_rules == 0:
+                for sort_order, (rule_type, target_field, rule_value, error_msg, is_row) in enumerate(
+                    ext.get("validation_rules", []), 1
+                ):
+                    c.execute(
+                        """INSERT INTO experiment_config_validation_rules
+                           (config_id,rule_type,target_field,rule_value,error_message,is_row_level,sort_order)
+                           VALUES(?,?,?,?,?,?,?)""",
+                        (cfg["id"], rule_type, target_field, rule_value, error_msg, is_row, sort_order),
+                    )
+    return backfilled
+
+
+def _seed_config_from_schemas() -> int:
+    """将 experiment_schemas.py 和 constants.py 的硬编码配置导入数据库。
+    仅在对应 experiment_code 尚无任何 config_version 时执行。
+    返回导入的配置数量。"""
+    from experiment_schemas import SCHEMAS as _PY_SCHEMAS
+    from constants import EXPERIMENT_PHOTO_CHECKPOINTS as _PY_PHOTOS
+    from constants import COMMON_PHOTO_CHECKPOINTS as _PY_COMMON_PHOTOS
+
+    # ── 每实验的扩展配置（结果标签 / 列默认值 / 计算表达式 / 验证规则）──
+    _EXTENDED = {
+        "rough": {
+            "result_title": "平均Ra", "result_unit": "μm", "result_value_key": "mean",
+            "column_defaults": {"limit": 15.0},
+            "calc_expressions": [
+                {"target": "mean", "expression": "round((ra1+ra2+ra3)/3, 3)", "precision": 3},
+                {"target": "conclusion", "expression": "'符合' if mean <= float(row.get('limit', 15)) else '不符合'",
+                 "precision": 0},
+            ],
+            "validation_rules": [], "obsolete_param_keys": [],
+        },
+        "mc_crack": {
+            "result_title": "结合强度", "result_unit": "MPa", "result_value_key": "tau",
+            "column_defaults": {},
+            "calc_expressions": [
+                {"target": "dm_mean", "expression": "round((dm1+dm2+dm3)/3, 4)", "precision": 4},
+                {"target": "tau", "expression": "round(k*ffail, 2)", "precision": 2},
+                {"target": "conclusion", "expression": "'符合' if tau > 25 else '不符合'", "precision": 0},
+            ],
+            "validation_rules": [],
+            "obsolete_param_keys": ["parallel_block_height_diff", "max_gap", "zero_force_before",
+                                      "zero_force", "loading_zero_confirmation", "k_source",
+                                      "method_execution_confirmation"],
+        },
+        "xray": {
+            "result_title": "ROI平均灰度", "result_unit": "", "result_value_key": "roi_mean",
+            "column_defaults": {}, "calc_expressions": [], "validation_rules": [], "obsolete_param_keys": [],
+        },
+        "warp": {
+            "result_title": "翘曲变化量ΔH", "result_unit": "mm", "result_value_key": "delta",
+            "column_defaults": {"limit": 0.5},
+            "calc_expressions": [
+                {"target": "delta", "expression": "round(h1-h2, 4)", "precision": 4},
+                {"target": "conclusion", "expression": "'合格' if abs(float(row.get('delta', 0) or 0)) <= float(row.get('limit', 0.5)) else '不合格'",
+                 "precision": 0},
+            ],
+            "validation_rules": [], "obsolete_param_keys": [],
+        },
+        "cte": {
+            "result_title": "线膨胀系数α", "result_unit": "×10⁻⁶/K", "result_value_key": "alpha",
+            "column_defaults": {"t1": 25.0, "t2": 550.0},
+            "calc_expressions": [
+                {"target": "delta_t", "expression": "round(t2-t1, 3)", "precision": 3},
+                {"target": "alpha", "expression": "round((delta_l/1000.0)/(l0*delta_t)*1000000, 3)",
+                 "precision": 3},
+            ],
+            "validation_rules": [
+                {"rule_type": "range", "target_field": "heating_rate", "rule_value": "4.0-6.0",
+                 "error_message": "升温速率应在5±1 ℃/min范围内", "is_row_level": 0},
+            ],
+            "obsolete_param_keys": [],
+        },
+        "shock": {
+            "result_title": "耐急冷急热结果", "result_unit": "", "result_value_key": "conclusion",
+            "column_defaults": {},
+            "calc_expressions": [
+                {"target": "conclusion", "expression": "'符合' if all(str(row.get(k, '无')) == '无' for k in ('crack', 'chipping', 'fracture')) else '不符合'",
+                 "precision": 0},
+            ],
+            "validation_rules": [], "obsolete_param_keys": [],
+        },
+        "bend": {
+            "result_title": "0.2%规定非比例弯曲应力", "result_unit": "MPa", "result_value_key": "stress_02",
+            "column_defaults": {"length": 25.0, "width": 2.0, "height": 2.0, "span": 20.0, "speed": 1.0},
+            "calc_expressions": [
+                {"target": "conclusion", "expression": "'符合' if float(row.get('stress_02', 0) or 0) >= 800 else '不符合'",
+                 "precision": 0},
+            ],
+            "validation_rules": [], "obsolete_param_keys": [],
+        },
+        "hv": {
+            "result_title": "平均维氏硬度", "result_unit": "HV10", "result_value_key": "mean",
+            "result_face_suffix": 1, "row_expansion": "faces",
+            "face_labels": '["Z轴方向", "X轴方向"]',
+            "column_defaults": {},
+            "calc_expressions": [
+                {"target": "mean", "expression": "round((indent1+indent2+indent3)/3, 1)", "precision": 1},
+            ],
+            "validation_rules": [], "obsolete_param_keys": [],
+        },
+        "thickness": {
+            "result_title": "平均厚度", "result_unit": "mm", "result_value_key": "mean",
+            "column_defaults": {},
+            "calc_expressions": [], "validation_rules": [],
+            "obsolete_param_keys": ["calibration_scale", "cleaning_time", "software_version", "image_path",
+                                      "conditioning_start", "conditioning_end", "sample_preparation_actual",
+                                      "method_execution_confirmation"],
+        },
+        "color": {
+            "result_title": "目视比较结果", "result_unit": "", "result_value_key": "overall",
+            "column_defaults": {}, "calc_expressions": [], "validation_rules": [], "obsolete_param_keys": [],
+        },
+        "fixed_denture": {
+            "result_title": "综合检验结果", "result_unit": "", "result_value_key": "conclusion",
+            "row_expansion": "samples", "face_labels": "",
+            "column_defaults": {}, "calc_expressions": [], "validation_rules": [],
+            "obsolete_param_keys": [],
+        },
+        "removable_denture": {
+            "result_title": "综合检验结果", "result_unit": "", "result_value_key": "conclusion",
+            "row_expansion": "samples", "face_labels": "",
+            "column_defaults": {}, "calc_expressions": [], "validation_rules": [],
+            "obsolete_param_keys": [],
+        },
+    }
+
+    # ── 通用拍照节点的 checkpoint_group 分配 ──
+    _COMMON_GROUP_MAP = {
+        "T_AND_H": 0, "DEVICE_LABEL": 1, "SAMPLE_SETUP": 1, "END_CONDITION": 2,
+        "AFTER_TEST": 3, "HARDNESS_BLOCK": 1, "REFERENCE_AFTER": 3,
+        # 粗糙度实验专属
+        "REFERENCE_CHECK": 0, "SAMPLE_BEFORE": 1,
+        "ROUGH_PARAMETERS": 2, "PROFILE": 3,
+    }
+
+    seeded = 0
+    for exp_code, schema_def in _PY_SCHEMAS.items():
+        if exp_code == "generic":
+            continue
+
+        method = experiment_method_by_kind(exp_code)
+        if not method:
+            continue
+
+        internal_code = method["experiment_code"]
+        existing_version = one(
+            "SELECT id FROM experiment_config_versions WHERE experiment_code=?",
+            (internal_code,),
+        )
+
+        ext = _EXTENDED.get(exp_code, {})
+
+        with connect() as c:
+            if existing_version:
+                # 已有版本行，检查是否已有字段/列数据
+                field_count = c.execute(
+                    "SELECT COUNT(*) FROM experiment_config_fields WHERE config_id=?",
+                    (existing_version["id"],),
+                ).fetchone()[0]
+                if field_count > 0:
+                    continue  # 已完整播种
+                config_id = existing_version["id"]
+            else:
+                now_ts = now()
+                c.execute(
+                    """INSERT INTO experiment_config_versions
+                       (experiment_code,version,experiment_name,method_code,standard,category,kind,
+                        default_location,sop_version,record_template_version,software,status,effective_date,
+                        row_expansion,face_labels,result_title,result_unit,result_value_key,
+                        result_face_suffix,obsolete_param_keys,created_by,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,'现行',?,
+                              ?,?,?,?,?,?,?,?,?)""",
+                    (
+                        internal_code, "V1.0", schema_def.get("title", method["experiment_name"]),
+                        method["method_code"], method.get("standard", ""),
+                        method.get("category", ""), method.get("kind", "generic"),
+                        method.get("default_location", ""), "A/0", "A/0", "",
+                        now_ts,
+                        ext.get("row_expansion", ""),
+                        str(ext.get("face_labels", "")),
+                        ext.get("result_title", ""),
+                        ext.get("result_unit", ""),
+                        ext.get("result_value_key", ""),
+                        int(ext.get("result_face_suffix", 0)),
+                        json.dumps(ext.get("obsolete_param_keys", []), ensure_ascii=False),
+                        "system", now_ts,
+                    ),
+                )
+                config_id = c.lastrowid
+
+            # 参数字段
+            for section_order, section in enumerate(schema_def.get("sections", []), 1):
+                for sort_order, field in enumerate(section.get("fields", []), 1):
+                    default = field.get("default", "")
+                    if isinstance(default, (list, dict)):
+                        default = json.dumps(default, ensure_ascii=False)
+                    options = field.get("options", [])
+                    options_str = json.dumps(options, ensure_ascii=False) if options else ""
+                    c.execute(
+                        """INSERT INTO experiment_config_fields
+                           (config_id,section_title,section_order,field_key,field_label,
+                            field_type,field_default,field_options,is_required,is_readonly,is_actual,sort_order)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            config_id, section["title"], section_order,
+                            field["key"], field["label"], field.get("type", "text"),
+                            str(default), options_str,
+                            1 if field.get("required") else 0,
+                            1 if field.get("readonly") else 0,
+                            1 if field.get("actual") else 0,
+                            sort_order,
+                        ),
+                    )
+
+            # 测量列（含默认值 & 计算表达式）
+            col_defaults = ext.get("column_defaults", {})
+            col_calcs = {cc["target"]: cc for cc in ext.get("calc_expressions", [])}
+            for sort_order, col_def in enumerate(schema_def.get("columns", []), 1):
+                key, label, ctype = col_def[0], col_def[1], col_def[2]
+                calc = col_calcs.get(key, {})
+                c.execute(
+                    """INSERT INTO experiment_config_columns
+                       (config_id,column_key,column_label,column_type,is_required,sort_order,
+                        column_default,calc_expression,calc_precision)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (
+                        config_id, key, label, ctype, 0, sort_order,
+                        col_defaults.get(key),
+                        str(calc.get("expression", "")),
+                        int(calc.get("precision", 3)),
+                    ),
+                )
+
+            # 拍照节点（含 checkpoint_group）
+            exp_title = schema_def.get("title", "")
+            if exp_code in {"rough", "mc_crack", "cte", "hv", "thickness"}:
+                checkpoints = _PY_PHOTOS.get(exp_title, [])
+            else:
+                checkpoints = _PY_COMMON_PHOTOS + _PY_PHOTOS.get(exp_title, [])
+            for sort_order, cp in enumerate(checkpoints, 1):
+                code, label, required = cp[0], cp[1], cp[2] if len(cp) > 2 else True
+                sample_level = code in {
+                    "SAMPLE_BEFORE", "SAMPLE_AFTER", "DAMAGE", "CRACK", "FRACTURE",
+                    "INDENT", "MEASURE_RESULT", "FINAL_CURVE", "OBSERVER_RESULT",
+                    "PROFILE", "H1", "H2", "ROI", "ROUGH_PARAMETERS", "CTE_PARAMETERS",
+                }
+                group = _COMMON_GROUP_MAP.get(code, 0)
+                c.execute(
+                    """INSERT INTO experiment_config_photo_checkpoints
+                       (config_id,checkpoint_code,checkpoint_label,is_required,is_sample_level,sort_order,checkpoint_group)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (config_id, code, label, int(required), int(sample_level), sort_order, group),
+                )
+
+            # 通用前置检查项
+            _generic_prechecks = [
+                ("env", "环境条件确认（温湿度/振动/气流）"),
+                ("device_calibration", "设备校准/核查在有效期内"),
+                ("device_status", "设备使用前状态检查正常"),
+                ("sample_condition", "样品外观/状态确认"),
+                ("consumables", "耗材/标准物质有效性确认"),
+            ]
+            for sort_order, (code, label) in enumerate(_generic_prechecks, 1):
+                c.execute(
+                    """INSERT INTO experiment_config_prechecks
+                       (config_id,precheck_code,precheck_label,is_required,sort_order)
+                       VALUES(?,?,?,?,?)""",
+                    (config_id, code, label, 1, sort_order),
+                )
+
+            # 验证规则（仅当该配置尚无任何规则时插入，避免与 _backfill 重复）
+            existing_rules = c.execute(
+                "SELECT COUNT(*) FROM experiment_config_validation_rules WHERE config_id=?",
+                (config_id,),
+            ).fetchone()[0]
+            if existing_rules == 0:
+                for sort_order, rule in enumerate(ext.get("validation_rules", []), 1):
+                    c.execute(
+                        """INSERT INTO experiment_config_validation_rules
+                           (config_id,rule_type,target_field,rule_value,error_message,is_row_level,sort_order)
+                           VALUES(?,?,?,?,?,?,?)""",
+                        (
+                            config_id,
+                            rule.get("rule_type", "required"),
+                            rule.get("target_field", ""),
+                            rule.get("rule_value", ""),
+                            rule.get("error_message", ""),
+                            int(rule.get("is_row_level", 0)),
+                            sort_order,
+                        ),
+                    )
+
+        seeded += 1
+    return seeded
 
 # ---------------------- Task packages ----------------------
 def available_groups_for_assignment() -> list[dict[str, Any]]:

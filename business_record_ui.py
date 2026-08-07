@@ -112,6 +112,8 @@ def render_readonly_summary(task: dict[str, Any], group: dict[str, Any], commiss
         with cols[index % 3]:
             st.text_input(label, value=str(value or ""), disabled=True, key=f"readonly_{task['task_no']}_{index}")
     st.caption(f"实验配置版本：{config.get('config_version','')}｜原始记录模板：{config.get('record_template_file','')}。以上信息来自委托、入库、任务和配置快照，实验员不可修改。")
+    if not config.get("sop_file"):
+        st.warning("当前实验配置尚未绑定现行SOP。请在形成受控正式记录前，由管理员补充并批准正确SOP。")
 
 
 def render_task_confirmations(record: dict[str, Any], key_prefix: str, editable: bool = True) -> dict[str, bool]:
