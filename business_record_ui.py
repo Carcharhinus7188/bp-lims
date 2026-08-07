@@ -103,8 +103,6 @@ def render_readonly_summary(task: dict[str, Any], group: dict[str, Any], commiss
         ("样品名称", group.get("sample_name", "")),
         ("规格型号", group.get("model", "")),
         ("材料名称", task.get("material_name", "")),
-        ("样品批号", group.get("product_no", "")),
-        ("生产日期", group.get("production_date", "")),
         ("实体样品编号", "、".join(task.get("sample_nos_list") or [])),
         ("检测方法", task.get("method_code", "")),
         ("检测依据", task.get("standard", "")),

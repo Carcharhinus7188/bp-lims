@@ -5,7 +5,7 @@ COMPANY_CN = "大连标普检测有限公司"
 COMPANY_EN = "DALIAN BIAOPU TESTING CO., LTD."
 SYSTEM_CN = "大连标普实验室样品全过程追溯系统"
 SYSTEM_EN = "BPLab Sample Lifecycle Tracking System"
-APP_VERSION = "BPLab Trace V9.3.3 厚度测量流程更新版"
+APP_VERSION = "BPLab Trace V9.3.4 金瓷结合流程更新版"
 TIMEZONE_NAME = "Asia/Shanghai"
 
 STORAGE_AREAS = ["A区域", "B区域"]
@@ -48,8 +48,8 @@ COMMON_PHOTO_CHECKPOINTS = [
 # 温湿度表、设备铭牌、软件参数、夹具和结果界面均按整个实验任务留档一次。
 SAMPLE_LEVEL_PHOTO_CODES = {
     "SAMPLE_BEFORE", "SAMPLE_AFTER", "DAMAGE", "CRACK", "FRACTURE",
-    "INDENT", "MEASURE_RESULT", "OBSERVER_RESULT", "PROFILE", "H1", "H2", "ROI",
-    "ROUGH_PARAMETERS", "CTE_PARAMETERS", "FINAL_CURVE",
+    "INDENT", "MEASURE_RESULT", "FINAL_CURVE", "OBSERVER_RESULT", "PROFILE", "H1", "H2", "ROI",
+    "ROUGH_PARAMETERS", "CTE_PARAMETERS",
 }
 
 # 确定报告结论时真正使用的结果证据。报告生成器按此顺序选图，
@@ -75,8 +75,9 @@ EXPERIMENT_PHOTO_CHECKPOINTS = {
         ("ROUGH_PARAMETERS", "设备参数与软件数据界面", True),
     ],
     "金属-陶瓷结合裂纹萌生试验": [
-        ("SPAN_FIXTURE", "三点弯曲夹具和跨距", True),
-        ("K_FACTOR", "K系数取值依据", True),
+        ("SAMPLE_BEFORE", "实验前试样及标签", True),
+        ("SPAN_FIXTURE", "金瓷结合试验夹具和跨距", True),
+        ("K_FACTOR", "K值确定依据", True),
         ("FASTTEST_RESULT", "FastTest的Ffail、k和τb结果界面", True),
         ("CRACK", "裂纹萌生或陶瓷剥离状态", True),
     ],
@@ -138,8 +139,8 @@ def photo_checkpoints(experiment_name: str):
     # 粗糙度与热膨胀按最新受控流程使用精简后的专属节点，
     # 不再叠加温湿度、设备铭牌、装夹、实验后状态等通用照片。
     if experiment_name in {
-        "表面粗糙度试验", "热膨胀系数试验", "维氏硬度试验",
-        "增材制造金属试样厚度测量",
+        "表面粗糙度试验", "金属-陶瓷结合裂纹萌生试验",
+        "热膨胀系数试验", "维氏硬度试验", "增材制造金属试样厚度测量",
     }:
         return EXPERIMENT_PHOTO_CHECKPOINTS.get(experiment_name, [])
     return COMMON_PHOTO_CHECKPOINTS + EXPERIMENT_PHOTO_CHECKPOINTS.get(experiment_name, [])

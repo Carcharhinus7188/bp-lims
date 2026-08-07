@@ -150,15 +150,15 @@ def _rough(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any], c
 
 def _crack(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any], context: dict[str, Any], attachment_ref: str) -> None:
     _environment(writer, 1, params, 2, 3, 4)
-    writer.put(3, 1, 2, f"夹具编号：{params.get('fixture_no','')}")
+    writer.put(3, 1, 2, f"金瓷结合试验夹具编号：{params.get('fixture_no','') or 'BPGL-B009'}")
     writer.put(3, 2, 2, f"实测跨距：{_text(params.get('support_span'))}mm（要求20mm）")
     writer.put(3, 3, 2, f"R = {_text(params.get('roller_radius'))} mm（要求1.0 mm）")
-    writer.put(3, 6, 2, f"编号：{params.get('parallel_block_no','')}；规格：（30×6×5） mm")
-    writer.put(3, 7, 2, f"平行度：{_text(params.get('parallel_block_parallelism'))} mm；两块高度差：{_text(params.get('parallel_block_height_diff'))}mm")
-    writer.put(3, 9, 2, f"左侧：☑正常 □过紧 □过松；右侧：☑正常 □过紧 □过松；最大间隙：{_text(params.get('max_gap'))} mm")
-    writer.put(4, 1, 1, f"名称：{params.get('metal_name') or context.get('material','')}；批号：{params.get('metal_batch','')}")
+    writer.put(3, 6, 2, f"编号：{params.get('parallel_block_no') or 'BGGL-B019'}；规格：（30×6×5） mm")
+    writer.put(3, 7, 2, f"平行块平行度：{_text(params.get('parallel_block_parallelism'))} mm")
+    writer.put(3, 9, 2, f"夹具平行与居中：{params.get('parallel_check','符合')}")
+    writer.put(4, 1, 1, f"试样名称：{params.get('metal_name') or context.get('sample_name','')}；批号：{params.get('metal_batch') or context.get('product_no','')}")
     writer.put(4, 2, 1, f"EM = {_text(rows[0].get('em') if rows else '')} GPa；来源：{params.get('em_source','')}；文件编号：{params.get('em_source_file','')}")
-    writer.put(4, 3, 1, params.get("k_source"), True)
+    writer.put(4, 3, 1, "各试样K值及计算结果见原始数据表", True)
     for row_index in range(1, 7):
         if row_index > len(rows):
             writer.put_unused_row(6, row_index)
@@ -435,18 +435,14 @@ def _vickers(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any],
 
 
 def _thickness(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any], context: dict[str, Any], attachment_ref: str) -> None:
-    batch = params.get("sample_production_date") or context.get("product_no", "")
-    production_date = params.get("production_date") or context.get("production_date", "")
-    writer.put(0, 7, 1, batch)
-    writer.put(0, 7, 3, production_date)
-    writer.put(0, 7, 5, params.get("design_file_no"))
-    writer.put(2, 1, 2, f"批号：{batch}；生产日期：{production_date}")
+    writer.put(0, 7, 1, f"样品批号：{params.get('sample_production_date') or context.get('product_no','')}")
+    writer.put(0, 7, 3, f"生产日期：{params.get('production_date') or context.get('production_date','')}")
+    writer.put(0, 7, 5, f"设计文件编号：{params.get('design_file_no','')}")
+    writer.put(2, 1, 2, f"测试放大倍数：{params.get('magnification') or '33倍'}")
     writer.put(2, 2, 2, f"开始：{params.get('preheat_start','')} 结束：{params.get('preheat_end','')}")
     nominal, measured = params.get("calibration_nominal"), params.get("calibration_measured")
     error = None if nominal in (None, "") or measured in (None, "") else round(float(measured) - float(nominal), 4)
-    writer.put(2, 3, 2, f"标称值：{_text(nominal)} mm；实测值：{_text(measured)} mm；误差：{_text(error)} mm")
-    writer.put(2, 4, 2, f"倍率：{params.get('magnification') or '33倍'}")
-    writer.put(2, 6, 2, f"逐样照片编号：{attachment_ref}")
+    writer.put(2, 3, 2, f"标准量块标称值：{_text(nominal)} mm 实测值：{_text(measured)} mm 误差：{_text(error)} mm")
     data_rows = list(range(3, 18, 3))
     for sample_index, start_row in enumerate(data_rows):
         if sample_index >= len(rows):

@@ -21,11 +21,7 @@ from trace_excel_engine import build_internal_trace_workbook
 from camera_evidence import save_live_camera_photo
 from pdf_preview import build_preview_pdf, pdf_page_images
 from docx_preview import DocxPreviewError, docx_page_images, docx_review_html
-from quick_demo import (
-    create_pending_review_demo,
-    create_full_document_demo,
-    create_objection_application_demo,
-)
+from quick_demo import create_pending_review_demo, create_full_document_demo, create_objection_application_demo
 
 ROOT=Path(__file__).parent
 TEMPLATE_DIR=ROOT/"templates"
@@ -895,9 +891,9 @@ elif page=="新建委托与入库":
         a,b,c=st.columns(3)
         base_default=increment_base(next_sample_base(),len(st.session_state.intake_groups))
         product_no=a.text_input("产品编号/批号（必填）")
-        production_date=b.date_input("生产日期",china_today())
+        production_date=b.date_input("生产日期")
         qty=int(c.number_input("接收数量（自动生成 -S01～-Sxx）",1,99,1))
-        group_no=a.text_input("样品组基础编号",value=base_default)
+        group_no=st.text_input("样品组基础编号",value=base_default)
         condition=b.selectbox("样品状态",SAMPLE_CONDITIONS)
         storage=c.selectbox("入库区域",STORAGE_AREAS)
         unit=a.text_input("单位",value=cat["unit"])
@@ -929,10 +925,7 @@ elif page=="新建委托与入库":
                     "notes":group_notes,
                 });st.rerun()
     if st.session_state.intake_groups:
-        show_df(st.session_state.intake_groups,[
-            "group_no","sample_name","model","material_name","product_no","production_date",
-            "quantity","condition","storage_area","experiment_labels",
-        ])
+        show_df(st.session_state.intake_groups,["group_no","sample_name","model","material_name","product_no","production_date","quantity","condition","storage_area","experiment_labels"])
         remove_index=st.selectbox("删除一条草稿明细",range(len(st.session_state.intake_groups)),
             format_func=lambda i:f"{i+1}. {st.session_state.intake_groups[i]['group_no']} {st.session_state.intake_groups[i]['sample_name']}")
         if st.button("删除所选草稿"):st.session_state.intake_groups.pop(remove_index);st.rerun()
@@ -959,7 +952,7 @@ elif page=="新建委托与入库":
 elif page=="委托与样品管理":
     header("委托、样品组、实体样品和全过程时间轴");cs=list_commissions();show_df(cs,["commission_no","client_name","production_org_name","production_relation","commission_date","due_date","status","created_by"])
     if cs:
-        cn=st.selectbox("选择委托",[x["commission_no"] for x in cs]);groups=commission_groups(cn,True);show_df(groups,["id","group_no","sample_name","model","material_name","product_no","production_date","quantity","status","is_void","void_reason"])
+        cn=st.selectbox("选择委托",[x["commission_no"] for x in cs]);groups=commission_groups(cn,True);show_df(groups,["id","group_no","sample_name","model","material_name","quantity","status","is_void","void_reason"])
         active=[g for g in groups if not g["is_void"]]
         if active:
             gid=st.selectbox("查看样品组",[g["id"] for g in active],format_func=lambda x:next(f"{g['group_no']} {g['sample_name']}" for g in active if g["id"]==x));samples0=group_samples(gid);show_df(samples0,["sample_no","sample_name","model","material_name","status","current_location","current_holder"])
@@ -1134,6 +1127,9 @@ elif page=="实验记录":
         business.setdefault("parameters",{})["detection_location"]=task_location
         if kind=="hv":
             business["parameters"]["sample_production_date"]=group0.get("product_no","")
+        if kind=="mc_crack":
+            business["parameters"]["metal_name"]=group0.get("sample_name","")
+            business["parameters"]["metal_batch"]=group0.get("product_no","")
         if kind=="thickness":
             business["parameters"]["sample_production_date"]=group0.get("product_no","")
             business["parameters"]["production_date"]=group0.get("production_date","")
@@ -1157,17 +1153,21 @@ elif page=="实验记录":
             business["parameters"]["end_time"]=str(end_at).replace("T"," ") if end_at else ""
             if start_at:business["parameters"]["test_date"]=str(start_at)[:10]
         all_checkpoints=photo_checkpoints(t["experiment"])
-        if kind=="thickness":
-            # 厚度测量的照片严格跟随业务位置：逐样标签在任务确认，
-            # 两类测量结果证据全部放在对应样品的原始数据步骤。
+        checkpoint_groups=[all_checkpoints[index::4] for index in range(4)]
+        if kind=="mc_crack":
             checkpoint_groups=[
-                [item for item in all_checkpoints if item[0]=="SAMPLE_BEFORE"],
+                [x for x in all_checkpoints if x[0]=="SAMPLE_BEFORE"],
+                [x for x in all_checkpoints if x[0]=="SPAN_FIXTURE"],
                 [],
-                [],
-                [item for item in all_checkpoints if item[0] in {"MEASURE_RESULT","FINAL_CURVE"}],
+                [x for x in all_checkpoints if x[0] in {"K_FACTOR","FASTTEST_RESULT","CRACK"}],
             ]
-        else:
-            checkpoint_groups=[all_checkpoints[index::4] for index in range(4)]
+        elif kind=="thickness":
+            checkpoint_groups=[
+                [x for x in all_checkpoints if x[0]=="SAMPLE_BEFORE"],
+                [],
+                [],
+                [x for x in all_checkpoints if x[0] in {"MEASURE_RESULT","FINAL_CURVE"}],
+            ]
         secondary_edit=bool(version>1 and latest and latest.get("status")!="已锁定")
         step1_labels=returned_step_labels(correction_fields,"①") if secondary_edit else None
         step2_labels=returned_step_labels(correction_fields,"②") if secondary_edit else None

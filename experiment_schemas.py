@@ -110,23 +110,18 @@ SCHEMAS = {
         "sections": [
             {"title": "环境与设备", "fields": COMMON_ENV_FIELDS + COMMON_DEVICE_FIELDS},
             {"title": "裂纹萌生试验参数", "fields": [
-                {"key": "fixture_no", "label": "三点弯曲夹具编号", "type": "text"},
+                {"key": "fixture_no", "label": "金瓷结合试验夹具编号", "type": "text", "default": "BPGL-B009"},
                 {"key": "support_span", "label": "支承跨距/mm", "type": "number", "default": 20.0},
                 {"key": "roller_radius", "label": "压头/支点半径R/mm", "type": "number", "default": 1.0},
-                {"key": "parallel_block_no", "label": "平行块编号", "type": "text"},
+                {"key": "parallel_block_no", "label": "平行块编号", "type": "text", "default": "BGGL-B019"},
                 {"key": "parallel_block_parallelism", "label": "平行块平行度/mm", "type": "number", "actual": True},
-                {"key": "parallel_block_height_diff", "label": "两块高度差/mm", "type": "number", "actual": True},
-                {"key": "max_gap", "label": "左右接触最大间隙/mm", "type": "number", "actual": True},
                 {"key": "loading_speed", "label": "加载速度/mm/min", "type": "number", "default": 1.5},
-                {"key": "observation_method", "label": "裂纹萌生观察方式", "type": "select", "options": ["负荷突变", "声响/目视", "曲线判读", "组合判定"]},
+                {"key": "observation_method", "label": "裂纹萌生观察方式", "type": "select", "options": ["声响", "目视"], "default": "目视"},
                 {"key": "parallel_check", "label": "夹具平行与居中确认", "type": "select", "options": ["符合", "不符合"]},
-                {"key": "zero_force_before", "label": "清零前力值/N", "type": "number", "actual": True},
-                {"key": "zero_force", "label": "清零后力值/N", "type": "number", "actual": True},
-                {"key": "metal_name", "label": "金属材料名称", "type": "text"},
-                {"key": "metal_batch", "label": "金属材料批号", "type": "text"},
+                {"key": "metal_name", "label": "试样名称", "type": "text", "readonly": True},
+                {"key": "metal_batch", "label": "批号", "type": "text", "readonly": True},
                 {"key": "em_source", "label": "杨氏模量来源", "type": "select", "options": ["说明书", "检测报告", "注册资料", "质保书", "其他"], "default": "说明书"},
                 {"key": "em_source_file", "label": "杨氏模量来源文件编号", "type": "text"},
-                {"key": "k_source", "label": "K系数来源", "type": "select", "options": ["YY 0621.1-2016标准图2人工查图", "FastTest软件计算", "其他"], "default": "YY 0621.1-2016标准图2人工查图"},
                 {"key": "orientation", "label": "试样放置方向", "type": "select", "options": ["金属面朝上、陶瓷面朝下", "其他"]},
             ]},
         ],
@@ -481,10 +476,8 @@ SUPPLEMENTAL_PROCESS_FIELDS = {
     "mc_crack": [
         {"key": "centering_confirmation", "label": "试样居中及跨距确认", "type": "select",
          "options": ["符合", "不符合"], "default": "符合", "actual": True},
-        {"key": "loading_zero_confirmation", "label": "加载前力值清零确认", "type": "select",
-         "options": ["已清零", "未清零"], "default": "已清零", "actual": True},
         {"key": "crack_observation_note", "label": "裂纹萌生/陶瓷剥离观察说明", "type": "text",
-         "default": "按软件曲线及现场观察共同判定", "actual": True},
+         "default": "按声响或目视结果判定", "actual": True},
     ],
     "xray": [
         {"key": "sample_surface_xray", "label": "样品表面清洁、干燥状态", "type": "select",
@@ -562,13 +555,14 @@ for _kind, _definition in SCHEMAS.items():
     if _kind == "generic":
         continue
     _existing = {f["key"] for s in _definition["sections"] for f in s["fields"]}
-    _excluded_common = {
+    _excluded_common_fields = {
+        "mc_crack": {"sample_production_date", "method_execution_confirmation"},
         "thickness": {"sample_preparation_actual", "method_execution_confirmation"},
     }.get(_kind, set())
     _fields = [
         dict(field)
         for field in COMMON_PROCESS_OBSERVATIONS + SUPPLEMENTAL_PROCESS_FIELDS.get(_kind, [])
-        if field["key"] not in _existing and field["key"] not in _excluded_common
+        if field["key"] not in _existing and field["key"] not in _excluded_common_fields
     ]
     if _fields:
         _definition["sections"].append({"title": "母版补充现场观察", "fields": _fields})

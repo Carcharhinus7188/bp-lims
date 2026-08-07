@@ -1197,7 +1197,7 @@ def create_commission(data: dict[str, Any], groups: list[dict[str, Any]], actor:
                 (group_no,commission_no,group_data.get("catalog_id"),group_data["sample_name"],
                  group_data["model"],group_data["material_name"],data["production_org_id"],
                  data["production_org_name"],data["production_relation"],group_data.get("product_no",""),
-                 str(group_data.get("production_date") or ""),qty,group_data.get("unit","件"),group_data.get("condition","完好"),
+                 group_data.get("production_date",""),qty,group_data.get("unit","件"),group_data.get("condition","完好"),
                  group_data.get("condition_note",""),group_data.get("storage_area","A区域"),
                  group_data.get("notes",""),ts,ts),
             )

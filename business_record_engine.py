@@ -57,7 +57,7 @@ OPTIONAL_ROW_KEYS = {
 
 PRECHECKS = {
     "rough": ["样品编号已核对", "Z轴方向标识清晰", "试样表面清洁", "探针状态正常", "测量平台水平稳定"],
-    "mc_crack": ["样品编号已核对", "金属与陶瓷层外观正常", "夹具跨距已确认", "试样居中放置", "加载前力值已清零"],
+    "mc_crack": ["样品编号已核对", "金属与陶瓷层外观正常", "金瓷结合试验夹具跨距已确认", "试样居中放置"],
     "xray": ["样品表面清洁干燥", "检测区域无无关人员", "辐射警示装置正常", "防护装置有效", "操作人员已授权"],
     "warp": ["打印及后处理已完成", "样品表面无污染", "样品无裂纹", "样品编号已核对", "切割前基准线清晰"],
     "cte": ["样品编号已核对", "试样安装牢固", "测温系统状态正常", "升温程序已核对", "基线稳定"],
@@ -288,13 +288,19 @@ def initialize_business_record(
 ) -> dict[str, Any]:
     prior = prior or {}
     params = initial_parameters(kind, prior.get("parameters") or {}, detection_location)
-    if kind == "thickness":
-        for obsolete_key in (
+    obsolete_keys = {
+        "mc_crack": {
+            "parallel_block_height_diff", "max_gap", "zero_force_before", "zero_force",
+            "loading_zero_confirmation", "k_source", "method_execution_confirmation",
+        },
+        "thickness": {
             "calibration_scale", "cleaning_time", "software_version", "image_path",
             "conditioning_start", "conditioning_end", "sample_preparation_actual",
             "method_execution_confirmation",
-        ):
-            params.pop(obsolete_key, None)
+        },
+    }.get(kind, set())
+    for obsolete_key in obsolete_keys:
+        params.pop(obsolete_key, None)
     legacy_temperature = params.get("temperature")
     legacy_humidity = params.get("humidity")
     if legacy_temperature not in (None, ""):
