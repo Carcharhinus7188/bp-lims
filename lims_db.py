@@ -388,6 +388,12 @@ CREATE TABLE IF NOT EXISTS equipment_incident_actions(
   id INTEGER PRIMARY KEY AUTOINCREMENT, incident_no TEXT NOT NULL, actor TEXT NOT NULL,
   action TEXT NOT NULL, comment TEXT, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS form_drafts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_token TEXT NOT NULL, page TEXT NOT NULL, draft_key TEXT NOT NULL,
+  payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE(session_token, page, draft_key)
+);
 """
         )
         # Non-destructive migration for databases created by V5.7 and earlier.
@@ -776,9 +782,16 @@ CREATE TABLE IF NOT EXISTS equipment_incident_actions(
             "CREATE INDEX IF NOT EXISTS idx_notifications_recipient ON notifications(recipient)",
             "CREATE INDEX IF NOT EXISTS idx_objections_report ON objections(report_no)",
             "CREATE INDEX IF NOT EXISTS idx_equipment_incidents_task ON equipment_incidents(task_no)",
+            "CREATE INDEX IF NOT EXISTS idx_form_drafts_lookup ON form_drafts(session_token,page,draft_key)",
         ]
         for _sql in _indexes:
             c.execute(_sql)
+
+        # Clean up expired form drafts (>30 days old)
+        c.execute(
+            "DELETE FROM form_drafts WHERE updated_at < ?",
+            ((datetime.now(CHINA_TZ) - timedelta(days=30)).isoformat(timespec="seconds"),),
+        )
 
         seed_file = ROOT / "sample_catalog_seed.json"
         if seed_file.exists():
@@ -916,6 +929,51 @@ def obsolete_prior_versions(entity_type: str, entity_id: str, active_version: in
             (actor, now(), reason, entity_type, entity_id, active_version),
         )
     audit(entity_type, entity_id, actor, "历史版本作废", new_value=f"V{active_version}以前", reason=reason)
+
+
+# ── Form draft persistence (survives browser refresh) ──
+
+def save_form_draft(session_token: str, page: str, draft_key: str, payload: dict) -> None:
+    """Persist form data so it survives browser refresh / accidental rerun."""
+    with connect() as c:
+        c.execute(
+            """INSERT INTO form_drafts(session_token,page,draft_key,payload,created_at,updated_at)
+               VALUES(?,?,?,?,?,?)
+               ON CONFLICT(session_token,page,draft_key) DO UPDATE SET
+               payload=excluded.payload,updated_at=excluded.updated_at""",
+            (session_token, page, draft_key, json.dumps(payload, ensure_ascii=False), now(), now()),
+        )
+
+
+def load_form_draft(session_token: str, page: str, draft_key: str) -> dict | None:
+    """Load previously saved form draft. Returns None if no draft exists."""
+    row = one(
+        "SELECT payload FROM form_drafts WHERE session_token=? AND page=? AND draft_key=?",
+        (session_token, page, draft_key),
+    )
+    if row:
+        try:
+            return json.loads(row["payload"])
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return None
+
+
+def delete_form_draft(session_token: str, page: str, draft_key: str) -> None:
+    """Remove draft after successful form submission."""
+    with connect() as c:
+        c.execute(
+            "DELETE FROM form_drafts WHERE session_token=? AND page=? AND draft_key=?",
+            (session_token, page, draft_key),
+        )
+
+
+def cleanup_expired_drafts(max_age_days: int = 30) -> int:
+    """Delete form drafts older than max_age_days. Returns count of removed rows."""
+    cutoff = (datetime.now(CHINA_TZ) - timedelta(days=max_age_days)).isoformat(timespec="seconds")
+    with connect() as c:
+        c.execute("DELETE FROM form_drafts WHERE updated_at < ?", (cutoff,))
+        return c.rowcount
 
 
 def document_versions(entity_type: str, entity_id: str) -> list[dict[str, Any]]:

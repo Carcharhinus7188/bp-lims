@@ -1176,6 +1176,33 @@ elif page=="实验记录":
         if t.get("experiment_ended_at"):
             business["parameters"]["end_time"]=str(t["experiment_ended_at"]).replace("T"," ")
         key_prefix=f"simple_{tn}_{version}"
+        session_token=st.query_params.get("session","")
+        draft_state_key=f"draft_{key_prefix}"
+
+        # ── 表单草稿恢复：优先 session_state → 数据库 → 默认值 ──
+        if draft_state_key not in st.session_state:
+            db_draft=load_form_draft(session_token,"实验记录",key_prefix) if session_token else None
+            if db_draft:
+                st.session_state[draft_state_key]=db_draft
+                st.toast("📋 已恢复上次填写的草稿数据",icon="📋")
+
+        def _persist_draft():
+            """将当前 business 写入 session_state 并异步持久化到数据库。"""
+            st.session_state[draft_state_key]=dict(business)
+            if session_token:
+                try:
+                    save_form_draft(session_token,"实验记录",key_prefix,dict(business))
+                except Exception:
+                    pass  # 静默失败，不影响主流程
+
+        # 恢复草稿数据
+        restored_draft=st.session_state.get(draft_state_key)
+        if restored_draft and not prior.get("business_record"):
+            business.update(restored_draft)
+            # 仅在首次加载（无已保存记录）时使用草稿
+            if not st.session_state.get(f"{draft_state_key}_applied"):
+                st.session_state[f"{draft_state_key}_applied"]=True
+
         st.info(f"{t['experiment']}｜{t['method_code']}｜{len(sample_ids)}件样品。已知信息自动带入，正常选项已设置为默认值；实验员只需确认现场状态并填写实际测量数据。")
         emergency_slot=st.container()
         if kind=="cte":
@@ -1229,19 +1256,23 @@ elif page=="实验记录":
             business["task_confirmations"]=render_task_confirmations(business,key_prefix,not secondary_edit or bool(step1_labels))
             if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[0],username,user["display_name"],key_prefix,"任务确认阶段照片")
             elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
+            _persist_draft()
         with tabs[1]:
             business["equipment_checks"]=render_equipment_confirmation(bound_devices,business.get("equipment_checks") or [],key_prefix,not secondary_edit or bool(step2_labels))
             business["prechecks"],business["precheck_note"]=render_prechecks(kind,business,key_prefix,not secondary_edit or bool(step2_labels))
             if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[1],username,user["display_name"],key_prefix,"设备与实验前检查照片")
             elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
+            _persist_draft()
         with tabs[2]:
             business["parameters"],business["fixed_parameter_mode"]=render_parameters(kind,business,key_prefix,step3_labels)
             if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[2],username,user["display_name"],key_prefix,"环境与参数照片")
             elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
+            _persist_draft()
         with tabs[3]:
             business["rows"]=render_sample_data(kind,business,key_prefix,step4_labels)
             if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[3],username,user["display_name"],key_prefix,"检测数据与结果照片")
             elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
+            _persist_draft()
         with tabs[4]:
             business=calculate_business_record(kind,business)
             context["test_date"]=(business.get("parameters") or {}).get("test_date") or context["test_date"]
@@ -1469,6 +1500,10 @@ elif page=="实验记录":
                     if kind=="cte" and not (task(tn) or {}).get("experiment_ended_at"):
                         mark_task_experiment_time(tn,username,"结束")
                     save_record(tn,version,payload,username,"更正待复核" if version>1 else "待复核",tm_version,sm_version,reason,compare)
+                    if session_token:
+                        try:delete_form_draft(session_token,"实验记录",key_prefix)
+                        except Exception:pass
+                    st.session_state.pop(draft_state_key,None)
                     navigate_to("首页看板","已提交复核，当前实验窗口已关闭")
 
 elif page=="原始记录复核":
