@@ -998,7 +998,7 @@ elif page=="我的任务包":
     packages=list_packages(None if role=="管理员" else role,None if role=="管理员" else username);show_df(packages,["package_no","commission_no","group_no","material_name","experiments","status","assigned_at","accepted_at","detection_location"])
     if packages:
         pn=st.selectbox("选择任务包",[x["package_no"] for x in packages]);p=package(pn);package_task_rows=package_tasks(pn);show_df(package_task_rows,["task_no","experiment","method_code","standard","material_name","detection_location","status"])
-        if p["status"]=="待接收" and username==p["assignee"]:
+        if p["status"]=="待接收" and package_assigned_to(p,username):
             result=st.radio("样品实物接收确认",["样品已收到，确认完好","样品已收到，但存在异常","尚未收到样品"])
             st.subheader("逐实验选择检测位置")
             st.caption("每个实验独立选择，允许同一任务包内的实验使用不同检测位置。确认领用后，系统会按检测室自动锁定唯一温湿度计。")

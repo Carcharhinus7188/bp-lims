@@ -12,6 +12,16 @@ ATTACHMENT_DIR = ROOT / "data" / "attachments"
 SIGNATURE_DIR = ROOT / "data" / "signatures"
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
+# V9.4.2: assignments created by older releases used these account/name values.
+# Keep the mapping explicit so an experimental account never accidentally
+# receives work that belongs to the same person's reviewer account.
+LEGACY_EXPERIMENT_ASSIGNEES = {
+    "tester": "liuhong_test",
+    "刘红": "liuhong_test",
+    "tester2": "lihongli_test",
+    "李红丽": "lihongli_test",
+}
+
 
 def china_now() -> datetime:
     return datetime.now(CHINA_TZ).replace(tzinfo=None)
@@ -461,6 +471,30 @@ CREATE TABLE IF NOT EXISTS equipment_incident_actions(
                     "UPDATE users SET display_name=?,role=?,enabled=1 WHERE username=?",
                     (name, role, username),
                 )
+        # Repair active packages created before the separate tester/reviewer
+        # accounts were introduced.  Without this migration they remain visible
+        # in global dashboard counts but are filtered out of the tester inbox.
+        active_package_statuses = (
+            "待接收", "接收异常", "检测中", "退回修改", "待复核",
+            "更正待复核", "待归还", "待回库确认",
+        )
+        active_task_statuses = (
+            "待接收", "检测中", "退回修改", "待复核",
+            "更正待复核", "已完成",
+        )
+        for legacy_assignee, current_assignee in LEGACY_EXPERIMENT_ASSIGNEES.items():
+            package_placeholders = ",".join("?" for _ in active_package_statuses)
+            task_placeholders = ",".join("?" for _ in active_task_statuses)
+            c.execute(
+                f"""UPDATE task_packages SET assignee=?,updated_at=?
+                    WHERE assignee=? AND status IN ({package_placeholders})""",
+                (current_assignee, now(), legacy_assignee, *active_package_statuses),
+            )
+            c.execute(
+                f"""UPDATE tasks SET assignee=?,updated_at=?
+                    WHERE assignee=? AND status IN ({task_placeholders})""",
+                (current_assignee, now(), legacy_assignee, *active_task_statuses),
+            )
         # 旧演示版账号保留行以维持历史外键可读性，但停止登录。
         # 新版保留行以维持历史外键可读性，但停止登录，避免人员选择时出现重复成员。
         c.execute(
@@ -1622,12 +1656,33 @@ def _same_person(first_username: str, second_username: str) -> bool:
     return len(people) == 2 and len(names) == 1
 
 
+def canonical_experiment_assignee(username: str, *, require_enabled: bool = False) -> str:
+    """Resolve a tester assignment to the enabled experimental-login account."""
+    candidate = LEGACY_EXPERIMENT_ASSIGNEES.get(str(username or "").strip(), str(username or "").strip())
+    user = one(
+        "SELECT username,role,enabled FROM users WHERE username=?",
+        (candidate,),
+    )
+    if user and user["role"] == "实验员" and (user["enabled"] or not require_enabled):
+        return user["username"]
+    if require_enabled:
+        raise ValueError("所选实验员账号不存在、未启用或不是实验员账号")
+    return candidate
+
+
+def package_assigned_to(package_row: dict[str, Any] | None, username: str) -> bool:
+    if not package_row:
+        return False
+    return canonical_experiment_assignee(package_row.get("assignee", "")) == canonical_experiment_assignee(username)
+
+
 def create_task_package(
     group_id: int, experiment_codes: list[str], assignee: str,
     actor: str, reviewer: str | None = None,
 ) -> str:
     if not experiment_codes:
         raise ValueError("至少选择一个实验")
+    assignee = canonical_experiment_assignee(assignee, require_enabled=True)
     g = group(group_id)
     if not g or g["is_void"]:
         raise ValueError("样品组不可用")
@@ -1747,7 +1802,14 @@ def list_packages(role: str | None = None, username: str | None = None, statuses
     q = "SELECT * FROM task_packages WHERE 1=1"
     args: list[Any] = []
     if role == "实验员" and username:
-        q += " AND assignee=?"; args.append(username)
+        canonical_username = canonical_experiment_assignee(username)
+        compatible_assignees = [
+            item for item in (canonical_username, *LEGACY_EXPERIMENT_ASSIGNEES)
+            if canonical_experiment_assignee(item) == canonical_username
+        ]
+        compatible_assignees = list(dict.fromkeys(compatible_assignees))
+        q += " AND assignee IN (" + ",".join("?" * len(compatible_assignees)) + ")"
+        args.extend(compatible_assignees)
     elif role == "复核员" and username:
         q += " AND reviewer=?"; args.append(username)
     elif role == "质量负责人" and username:
@@ -1854,8 +1916,9 @@ def accept_package(
     note: str,
 ) -> None:
     p = package(package_no)
-    if not p or p["assignee"] != actor:
+    if not package_assigned_to(p, actor):
         raise ValueError("只能由被指定的实验员接收任务包")
+    actor = canonical_experiment_assignee(actor, require_enabled=True)
     if p["status"] != "待接收":
         raise ValueError("任务包当前状态不能接收")
     if result != "样品已收到，确认完好":
