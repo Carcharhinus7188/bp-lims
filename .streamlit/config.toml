@@ -3,12 +3,12 @@
 developmentMode = false
 
 [theme]
-# Fixed light theme — do not follow system dark/light mode
+# Corporate Clean — 企业简洁风，专业可信的实验室管理系统视觉
 base = "light"
-primaryColor = "#7183a6"
-backgroundColor = "#eef2f5"
-secondaryBackgroundColor = "#ffffff"
-textColor = "#293443"
+primaryColor = "#2563EB"
+backgroundColor = "#F8FAFC"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#0F172A"
 font = "sans serif"
 
 [client]

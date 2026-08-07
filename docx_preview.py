@@ -144,15 +144,15 @@ def docx_review_html(content: bytes, title: str) -> str:
         body.append(_paragraph_html(block) if isinstance(block, Paragraph) else _table_html(block))
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><style>
-html,body{{margin:0;background:#e7ebef;color:#111;font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif}}
-.toolbar{{position:sticky;top:0;z-index:2;background:#173f55;color:white;padding:10px 18px;font-weight:700}}
+html,body{{margin:0;background:#F1F5F9;color:#0F172A;font-family:"Noto Sans CJK SC","Microsoft YaHei",Arial,sans-serif}}
+.toolbar{{position:sticky;top:0;z-index:2;background:#1E3A5F;color:white;padding:10px 18px;font-weight:600}}
 .page{{box-sizing:border-box;width:210mm;min-height:297mm;margin:18px auto;padding:16mm;
-background:white;box-shadow:0 2px 14px rgba(0,0,0,.18)}}
+background:white;box-shadow:0 2px 14px rgba(15,23,42,.12)}}
 p{{margin:5px 0;white-space:pre-wrap;line-height:1.45;font-size:14px}}
-h2{{text-align:center;margin:8px 0 14px;font-size:21px}}
+h2{{text-align:center;margin:8px 0 14px;font-size:21px;font-weight:700}}
 .blank{{height:7px}}
 table.controlled-form{{width:100%;border-collapse:collapse;table-layout:fixed;margin:8px 0 12px;font-size:12px}}
-table.controlled-form td{{border:1px solid #222;padding:5px 6px;vertical-align:top;white-space:pre-wrap;word-break:break-word}}
+table.controlled-form td{{border:1px solid #CBD5E1;padding:5px 6px;vertical-align:top;white-space:pre-wrap;word-break:break-word}}
 .signature{{display:inline-block;max-width:130px;max-height:42px;object-fit:contain;vertical-align:middle;margin:0 5px}}
 @media(max-width:900px){{.page{{width:calc(100% - 20px);margin:10px;padding:18px}}}}
 </style></head><body>

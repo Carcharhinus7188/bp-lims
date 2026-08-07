@@ -4,24 +4,28 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
   <style>
-    :root{font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif;color:#293443}
+    :root{font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif;color:#0F172A}
     *{box-sizing:border-box}
     body{margin:0;background:transparent}
-    .camera-card{border:1px solid #dfe6ec;border-radius:14px;background:#f9fbfc;padding:12px}
+    .camera-card{border:1px solid #E2E8F0;border-radius:14px;background:#FFFFFF;padding:12px;box-shadow:0 1px 3px rgba(15,23,42,.04)}
     .top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
-    .label{font-size:15px;font-weight:700;line-height:1.35}
-    .lens{font-size:12px;color:#526272;background:#e8eef3;border-radius:999px;padding:5px 9px;white-space:nowrap}
-    .stage{position:relative;width:100%;aspect-ratio:4/3;overflow:hidden;border-radius:11px;background:#1b232b}
-    video,img{display:block;width:100%;height:100%;object-fit:contain;background:#111}
-    .message{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;color:#e8edf1;padding:24px;line-height:1.55}
+    .label{font-size:15px;font-weight:600;line-height:1.35;color:#0F172A}
+    .lens{font-size:12px;color:#475569;background:#F1F5F9;border-radius:999px;padding:5px 9px;white-space:nowrap}
+    .stage{position:relative;width:100%;aspect-ratio:4/3;overflow:hidden;border-radius:11px;background:#1E293B}
+    video,img{display:block;width:100%;height:100%;object-fit:contain;background:#0F172A}
+    .message{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;color:#E2E8F0;padding:24px;line-height:1.55}
     .actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:10px}
-    button,.native-label{appearance:none;border:1px solid #cad5de;border-radius:10px;background:#fff;color:#334454;
-      min-height:42px;padding:8px 10px;font-size:14px;font-weight:650;text-align:center;display:flex;align-items:center;justify-content:center}
-    button.primary{background:#607d8b;border-color:#607d8b;color:#fff}
+    button,.native-label{appearance:none;border:1px solid #CBD5E1;border-radius:10px;background:#FFFFFF;color:#334155;
+      min-height:42px;padding:8px 10px;font-size:14px;font-weight:600;text-align:center;display:flex;align-items:center;justify-content:center;
+      transition:all .2s ease}
+    button:hover{background:#F8FAFC;border-color:#94A3B8}
+    button:active{transform:scale(.98)}
+    button.primary{background:#2563EB;border-color:#2563EB;color:#fff}
+    button.primary:hover{background:#1D4ED8;border-color:#1D4ED8}
     button:disabled{opacity:.45}
-    .native-label{grid-column:1/-1;background:#eef3f6}
+    .native-label{grid-column:1/-1;background:#F1F5F9}
     input[type=file]{display:none}
-    .hint{font-size:12px;color:#71808d;line-height:1.45;margin:9px 2px 0}
+    .hint{font-size:12px;color:#64748B;line-height:1.45;margin:9px 2px 0}
     @media(max-width:560px){.actions{grid-template-columns:1fr}.native-label{grid-column:auto}.top{align-items:flex-start;flex-direction:column}}
   </style>
 </head>

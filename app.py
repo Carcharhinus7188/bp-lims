@@ -39,106 +39,163 @@ ensure_dirs()
 st.set_page_config(page_title="标普实验室追溯系统",page_icon="🧪",layout="wide",initial_sidebar_state="expanded")
 st.markdown("""
 <style>
-/* ===== 基础变量与全局样式 ===== */
-/* Push main content below the sticky Streamlit header to avoid overlap */
-.block-container{padding-top:3.5rem!important}
+/* ===== Corporate Clean 企业简洁风 — 全局样式 ===== */
+
+/* —— 基础变量 —— */
 :root{
-  --lab-navy:#2d3a4d;--lab-blue:#5a6f8c;--lab-cyan:#6b9e96;
-  --lab-ink:#1e2a36;--lab-muted:#5a6472;--lab-line:#dee3ea;
-  --lab-bg:#eef2f5;--lab-panel:#ffffff;--lab-soft:#e8edf5;
+  --lab-navy:#1E3A5F;--lab-blue:#2563EB;--lab-cyan:#0EA5E9;
+  --lab-ink:#0F172A;--lab-muted:#64748B;--lab-line:#E2E8F0;
+  --lab-bg:#F8FAFC;--lab-panel:#FFFFFF;--lab-soft:#F1F5F9;
 }
+
+/* —— 全局排版 —— */
 html,body,.stApp,[data-testid=stAppViewContainer]{
   background:var(--lab-bg);color:var(--lab-ink);
   font-family:"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
-  font-size:18px;
-  -webkit-text-size-adjust:100%;
-  -ms-text-size-adjust:100%;
+  font-size:16px;
+  -webkit-text-size-adjust:100%;-ms-text-size-adjust:100%;
 }
-/* 主内容区 */
-.block-container{max-width:1480px;padding:1.5rem 2rem 4rem}
-/* 全局按钮：大号触摸友好 */
+
+/* —— 减少动画偏好 —— */
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;
+    transition-duration:.01ms!important;scroll-behavior:auto!important}
+}
+
+/* —— 主内容区 —— */
+.block-container{padding-top:3.5rem!important;max-width:1480px;padding:1.5rem 2rem 4rem}
+
+/* —— 按钮：Corporate Clean 必须项 px-4 py-2 rounded-lg font-medium transition-all —— */
 .stButton>button,.stDownloadButton>button{
-  border-radius:10px;font-weight:700;min-height:48px;box-shadow:none;
-  font-size:1.05rem;padding:0.6rem 1.4rem;
+  border-radius:10px;font-weight:600;min-height:48px;box-shadow:0 1px 2px rgba(0,0,0,.05);
+  font-size:1rem;padding:0.6rem 1.4rem;
+  transition:all .2s ease;border:1px solid transparent;
 }
-.stButton>button[kind=primary]{background:var(--lab-blue);border-color:var(--lab-blue);color:#fff}
-.stButton>button[kind=primary]:hover{background:#4e627d;border-color:#4e627d}
-/* 表单输入框加大 */
+.stButton>button:hover,.stDownloadButton>button:hover{
+  box-shadow:0 4px 8px rgba(0,0,0,.08);transform:translateY(-1px);
+}
+.stButton>button:active,.stDownloadButton>button:active{transform:scale(.98)}
+.stButton>button:focus-visible,.stDownloadButton>button:focus-visible{
+  outline:2px solid var(--lab-blue);outline-offset:2px;
+}
+.stButton>button[kind=primary]{
+  background:var(--lab-blue);border-color:var(--lab-blue);color:#fff;
+}
+.stButton>button[kind=primary]:hover{background:#1D4ED8;border-color:#1D4ED8}
+
+/* —— 输入框：Corporate Clean px-3 py-2 border-gray-300 rounded-lg focus:ring-2 —— */
 input,textarea,[data-baseweb=select]>div{
-  border-radius:8px!important;font-size:1.05rem!important;min-height:44px;
+  border-radius:8px!important;font-size:1rem!important;min-height:44px;
+  border-color:#CBD5E1!important;
+}
+input:focus,textarea:focus,[data-baseweb=select]>div:focus-within{
+  border-color:var(--lab-blue)!important;
+  box-shadow:0 0 0 3px rgba(37,99,235,.15)!important;
 }
 [data-testid=stNumberInput] button{min-width:48px;min-height:48px;font-size:1.2rem}
 
-/* ===== 侧边栏 ===== */
+/* ===== 侧边栏 — 专业导航 ===== */
 [data-testid=stSidebar]{
-  background:#fbfcfd;border-right:1px solid #e2e7ec;min-width:280px;
-  box-shadow:5px 0 20px rgba(50,65,80,.035);font-size:1.05rem;
+  background:#F8FAFC;border-right:1px solid var(--lab-line);min-width:280px;
+  box-shadow:2px 0 12px rgba(15,23,42,.04);font-size:1rem;
 }
 [data-testid=stSidebar] h1,[data-testid=stSidebar] h2,[data-testid=stSidebar] h3,
-[data-testid=stSidebar] p,[data-testid=stSidebar] label{color:#3f4b5b!important}
+[data-testid=stSidebar] p,[data-testid=stSidebar] label{color:var(--lab-ink)!important}
 [data-testid=stSidebar] [data-testid=stCaptionContainer] p{
-  color:#89929f!important;font-size:.85rem;font-weight:700;
+  color:var(--lab-muted)!important;font-size:.8rem;font-weight:600;
+  letter-spacing:.04em;text-transform:uppercase;
 }
 [data-testid=stSidebar] [role=radiogroup]{gap:4px}
 [data-testid=stSidebar] [role=radio]{
   background:transparent;border:1px solid transparent;border-radius:9px;
-  padding:12px 14px;margin:3px 0;transition:none;font-size:1.05rem;
+  padding:12px 14px;margin:3px 0;transition:all .15s ease;font-size:1rem;
 }
+[data-testid=stSidebar] [role=radio]:hover{background:#EEF2FF}
 [data-testid=stSidebar] [role=radio]:has(input:checked){
-  background:#e8edf5;border-color:#dfe5ed;box-shadow:inset 3px 0 0 #8292b0;
+  background:#EEF2FF;border-color:#DBEAFE;
+  border-left:3px solid var(--lab-blue);box-shadow:none;
 }
-/* 侧边栏导航按钮：大号触摸目标 */
+
+/* 侧边栏导航按钮 */
 [data-testid=stSidebar] .stButton>button{
   width:100%;justify-content:flex-start;border:1px solid transparent;background:transparent;
-  color:#556070;border-radius:10px;min-height:48px;padding:.55rem .85rem;font-weight:600;
-  font-size:1.05rem;
+  color:var(--lab-muted);border-radius:10px;min-height:48px;padding:.55rem .85rem;
+  font-weight:500;font-size:1rem;transition:all .15s ease;
 }
 [data-testid=stSidebar] .stButton>button:hover{
-  background:#f0f3f6;border-color:#e5e9ee;color:#354154;
+  background:#EEF2FF;border-color:#DBEAFE;color:var(--lab-navy);
 }
 [data-testid=stSidebar] .stButton>button[kind=primary]{
-  background:#e6ebf3;border-color:#dce3ec;color:#33445f;
-  box-shadow:inset 3px 0 0 #8293b2;font-weight:750;
+  background:#EEF2FF;border-color:#DBEAFE;color:var(--lab-blue);
+  border-left:3px solid var(--lab-blue);font-weight:600;box-shadow:none;
 }
 .sidebar-profile{
-  background:#f1f4f7;border:1px solid #e5e9ee;border-radius:12px;
-  padding:14px 16px;margin:10px 0 18px;
+  background:var(--lab-panel);border:1px solid var(--lab-line);border-radius:12px;
+  padding:14px 16px;margin:10px 0 18px;box-shadow:0 1px 3px rgba(0,0,0,.04);
 }
-.sidebar-profile b{color:#344154;font-size:1.1rem}
-.sidebar-profile span{color:#89929f;font-size:.85rem}
+.sidebar-profile b{color:var(--lab-ink);font-size:1.05rem}
+.sidebar-profile span{color:var(--lab-muted);font-size:.85rem}
 
 /* ===== 顶部标题栏 ===== */
 .lab-topbar{
-  display:flex;align-items:center;justify-content:space-between;background:#fff;
+  display:flex;align-items:center;justify-content:space-between;background:var(--lab-panel);
   border:1px solid var(--lab-line);border-radius:10px 10px 0 0;padding:12px 20px;
-  color:var(--lab-muted);font-size:.9rem;flex-wrap:wrap;gap:8px;
+  color:var(--lab-muted);font-size:.85rem;flex-wrap:wrap;gap:8px;
 }
 .lab-header{
   background:var(--lab-panel);border:1px solid var(--lab-line);border-top:0;
   padding:20px 22px;margin-bottom:20px;border-radius:0 0 10px 10px;
-  box-shadow:0 4px 16px rgba(15,26,47,.04);
+  box-shadow:0 2px 8px rgba(15,23,42,.04);
 }
-.lab-kicker{color:var(--lab-blue);font-size:.75rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase}
-.lab-header h2{font-size:1.5rem;margin:.25rem 0;color:var(--lab-ink);font-weight:760}
-.lab-meta{color:var(--lab-muted);font-size:.82rem}
+.lab-kicker{color:var(--lab-blue);font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase}
+.lab-header h2{font-size:1.45rem;margin:.2rem 0;color:var(--lab-ink);font-weight:700}
+.lab-meta{color:var(--lab-muted);font-size:.8rem}
+
+/* —— 卡片 & 时间线 —— */
 .card,.timeline,[data-testid=stMetric],div[data-testid=stVerticalBlockBorderWrapper]{
-  background:var(--lab-panel);border:1px solid var(--lab-line)!important;border-radius:11px!important;
-  box-shadow:0 4px 14px rgba(15,26,47,.035);
+  background:var(--lab-panel);border:1px solid var(--lab-line)!important;
+  border-radius:11px!important;box-shadow:0 1px 3px rgba(15,23,42,.04);
+  transition:box-shadow .2s ease;
 }
-.card{padding:16px}.timeline{border-left:4px solid var(--lab-blue)!important;padding:12px 15px;margin:8px 0}
-.notice{background:#fff9e9;border:1px solid #eadba6;padding:12px;border-radius:6px}
+.card:hover,[data-testid=stMetric]:hover{box-shadow:0 4px 12px rgba(15,23,42,.06)}
+.card{padding:16px}
+.timeline{
+  border-left:3px solid var(--lab-blue)!important;padding:12px 15px;margin:8px 0;
+}
+.notice{
+  background:#F8FAFC;border:1px solid var(--lab-line);border-left:3px solid var(--lab-blue);
+  padding:12px 16px;border-radius:0 8px 8px 0;
+}
 [data-testid=stMetric]{padding:14px}
+
+/* —— 标签页 —— */
 [data-baseweb=tab-list]{
-  gap:0;background:var(--lab-panel);border:1px solid var(--lab-line);padding:0;border-radius:9px;
-  overflow-x:auto;
+  gap:0;background:var(--lab-panel);border:1px solid var(--lab-line);padding:0;
+  border-radius:9px;overflow-x:auto;
 }
 [data-baseweb=tab]{border-radius:0;padding:10px 15px;border-right:1px solid var(--lab-line)}
-[data-baseweb=tab][aria-selected=true]{background:var(--lab-soft);color:var(--lab-navy);box-shadow:inset 0 -3px 0 var(--lab-blue)}
-[data-testid=stExpander]{background:var(--lab-panel);border-color:var(--lab-line);border-radius:6px}
+[data-baseweb=tab][aria-selected=true]{
+  background:var(--lab-soft);color:var(--lab-navy);
+  box-shadow:inset 0 -3px 0 var(--lab-blue);font-weight:600;
+}
+
+/* —— 展开/折叠 & 表单 & 分割线 —— */
+[data-testid=stExpander]{
+  background:var(--lab-panel);border-color:var(--lab-line);border-radius:6px;
+}
 div[data-testid=stForm]{border-color:var(--lab-line)!important;border-radius:7px}
 hr{border-color:var(--lab-line)}
-.locked-field{border-left:3px solid #8fa3ad;background:#f4f6f7;padding:9px 12px;color:#536873;margin:6px 0}
-@media(max-width:900px){.block-container{padding:1rem .8rem 3rem}[data-testid=stSidebar]{min-width:245px}}
+
+/* —— 锁定字段 —— */
+.locked-field{
+  border-left:3px solid #94A3B8;background:#F8FAFC;padding:9px 12px;
+  color:var(--lab-muted);margin:6px 0;border-radius:0 6px 6px 0;
+}
+
+/* —— 响应式 —— */
+@media(max-width:900px){
+  .block-container{padding:1rem .8rem 3rem}[data-testid=stSidebar]{min-width:245px}
+}
 </style>
 """,unsafe_allow_html=True)
 
@@ -705,14 +762,118 @@ if "user" not in st.session_state:
     restored=session_user(st.query_params.get("session",""))
     if restored:st.session_state.user=restored
 if "user" not in st.session_state:
-    header("系统登录");a,b,c=st.columns([1,1.15,1])
-    with b:
-        username=st.text_input("用户名",key="login_username");password=st.text_input("密码",type="password",key="login_password")
-        if st.button("登录",type="primary",use_container_width=True,key="login_button"):
-            u=authenticate(username,password)
-            if u:st.session_state.user=u;st.query_params["session"]=create_session(username);st.rerun()
-            else:st.error("用户名或密码错误")
-        st.caption("管理员赵衡 admin/admin123｜样品管理员韩丹 receiver/receive123｜刘红实验 liuhong_test/LhTest2026｜刘红复核 liuhong_review/LhReview2026｜李红丽实验 lihongli_test/LhlTest2026｜李红丽复核 lihongli_review/LhlReview2026｜质量负责人刘丽 quality/quality123")
+    # —— 登录页 CSS ——
+    st.markdown("""
+    <style>
+    header[data-testid=stHeader] {display:none !important}
+    [data-testid=stToolbar] {display:none !important}
+    footer {display:none !important}
+    .stApp {margin-top:-3.5rem}
+    .stMainBlockContainer {padding:0 !important;max-width:100vw !important}
+    .block-container {padding:0 !important;max-width:100% !important}
+
+    /* 左列 — 品牌面板 */
+    .login-brand {min-height:100vh;display:flex;align-items:center;justify-content:center;
+      position:relative;overflow:hidden;
+      background:linear-gradient(155deg,#0A1628 0%,#132842 30%,#1A3A5C 60%,#1E4D7B 100%)}
+    .login-brand::before {content:'';position:absolute;inset:0;
+      background:radial-gradient(ellipse at 25% 35%,rgba(37,99,235,.25) 0%,transparent 60%),
+                 radial-gradient(ellipse at 70% 65%,rgba(14,165,233,.15) 0%,transparent 50%)}
+    .login-brand::after {content:'';position:absolute;inset:0;
+      background-image:url("data:image/svg+xml,%3Csvg width='100' height='100' viewBox='0 0 100 100' xmlns='http://www.w3.org/2000/svg'%3E%3Cdefs%3E%3Cpattern id='h' width='28' height='48' patternUnits='userSpaceOnUse'%3E%3Cpath d='M14 0l14 8v16l-14 8L0 24V8z' fill='none' stroke='%23fff' stroke-opacity='.04' stroke-width='.8'/%3E%3C/pattern%3E%3C/defs%3E%3Crect fill='url(%23h)' width='100' height='100'/%3E%3C/svg%3E");
+      opacity:.6}
+    .login-brand-inner {position:relative;z-index:2;text-align:center;color:#fff;padding:3rem}
+    .login-logo {width:76px;height:76px;margin:0 auto 1.3rem;
+      background:rgba(255,255,255,.1);border:1.5px solid rgba(255,255,255,.22);
+      border-radius:18px;display:flex;align-items:center;justify-content:center;font-size:2rem}
+    .login-brand-inner h1 {font-size:1.7rem;font-weight:800;margin:0 0 .35rem}
+    .login-brand-inner h1 span {color:#93C5FD}
+    .login-brand-inner .company {font-size:.92rem;opacity:.78;margin-bottom:.8rem}
+    .login-brand-inner .tagline {font-size:.75rem;opacity:.5;letter-spacing:.08em;text-transform:uppercase}
+
+    /* 列布局：全高、水平居中 */
+    [data-testid=stHorizontalBlock] {min-height:100vh}
+    [data-testid=stColumn]:first-child {padding:0 !important}
+    [data-testid=stColumn]:nth-child(2) {
+      background:#F8FAFC !important;padding:0 !important;
+      display:flex !important;flex-direction:column !important;
+      justify-content:center !important;align-items:center !important}
+    /* 阻止列内 wrapper 撑满高度，否则垂直居中无法生效 */
+    [data-testid=stColumn]:nth-child(2) > [data-testid=stVerticalBlock] {
+      height:auto !important;flex:0 0 auto !important}
+
+    /* 登录卡片容器 — 在右侧列内垂直居中 */
+    .st-key-login_card {
+      max-width:380px !important;min-width:320px !important;width:100% !important;
+      background:#FFFFFF;border-radius:14px;padding:2rem 1.8rem;
+      box-shadow:0 2px 20px rgba(15,23,42,.06);border:1px solid #E2E8F0;
+      margin:auto !important}
+    .st-key-login_card .stTextInput>div>div>input {
+      font-size:.95rem !important;padding:11px 14px !important;border-radius:10px !important}
+    .st-key-login_card .stButton>button {
+      height:48px;font-size:1rem;font-weight:700;border-radius:10px;margin-top:.3rem}
+
+    /* 版权 */
+    .login-footer {position:fixed;bottom:0;left:56%;right:0;z-index:2;
+      text-align:center;padding:12px;color:#94A3B8;font-size:.74rem;
+      background:#F8FAFC;border-top:1px solid #E2E8F0}
+    .demo-toggle {position:fixed;right:20px;bottom:48px;z-index:3}
+
+    @media(max-width:800px) {
+      [data-testid=stHorizontalBlock] {flex-direction:column !important;min-height:auto}
+      [data-testid=stColumn] {width:100% !important}
+      .login-brand {min-height:30vh}
+      .login-brand-inner h1 {font-size:1.3rem}
+      .login-logo {width:56px;height:56px;margin-bottom:1rem;font-size:1.5rem;border-radius:14px}
+      [data-testid=stColumn]:nth-child(2) {min-height:60vh;padding:1.5rem 1.2rem !important}
+      .login-footer {position:relative;left:0}
+      .demo-toggle {position:relative;right:auto;bottom:auto;text-align:center;padding:1rem}
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    left, right = st.columns([56, 44])
+
+    with left:
+        st.markdown(f"""
+        <div class="login-brand">
+          <div class="login-brand-inner">
+            <div class="login-logo">&#128300;</div>
+            <h1><span>BPLab</span> Trace</h1>
+            <div class="company">{COMPANY_CN}</div>
+            <div class="tagline">Laboratory Information Management</div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with right:
+        with st.container(key="login_card"):
+            st.markdown(f"""
+            <div style="text-align:center;margin-bottom:1.5rem">
+              <div style="font-size:1.25rem;font-weight:700;color:#0F172A">系统登录</div>
+              <div style="color:#94A3B8;font-size:.76rem;margin-top:4px">{SYSTEM_CN}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            username = st.text_input("用户名", key="login_username", placeholder="请输入用户名")
+            password = st.text_input("密码", type="password", key="login_password", placeholder="请输入密码")
+            if st.button("登　录", type="primary", use_container_width=True, key="login_button"):
+                u = authenticate(username, password)
+                if u:
+                    st.session_state.user = u
+                    st.query_params["session"] = create_session(username)
+                    st.rerun()
+                else:
+                    st.error("用户名或密码错误")
+
+    # 版权
+    st.markdown(f'<div class="login-footer">Copyright &copy; 2019 {COMPANY_CN} All rights reserved.</div>', unsafe_allow_html=True)
+
+    # 演示账户
+    st.markdown('<div class="demo-toggle">', unsafe_allow_html=True)
+    with st.expander("💡 演示账户"):
+        st.caption("admin / admin123 ｜ receiver / receive123 ｜ liuhong_test / LhTest2026 ｜ liuhong_review / LhReview2026 ｜ lihongli_test / LhlTest2026 ｜ lihongli_review / LhlReview2026 ｜ quality / quality123")
+    st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
 
 user=st.session_state.user;role=user["role"];username=user["username"]
