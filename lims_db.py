@@ -143,7 +143,8 @@ CREATE TABLE IF NOT EXISTS users(
   role TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions(
-  token TEXT PRIMARY KEY, username TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL
+  token TEXT PRIMARY KEY, username TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL,
+  last_activity_at TEXT
 );
 CREATE TABLE IF NOT EXISTS organizations(
   id INTEGER PRIMARY KEY AUTOINCREMENT, org_code TEXT UNIQUE, org_name TEXT NOT NULL UNIQUE,
@@ -894,8 +895,8 @@ def create_session(username: str, days: int = 7) -> str:
     token = secrets.token_urlsafe(28)
     with connect() as c:
         c.execute(
-            "INSERT INTO sessions VALUES(?,?,?,?)",
-            (token, username, (china_now() + timedelta(days=days)).isoformat(timespec="seconds"), now()),
+            "INSERT INTO sessions VALUES(?,?,?,?,?)",
+            (token, username, (china_now() + timedelta(days=days)).isoformat(timespec="seconds"), now(), now()),
         )
     return token
 
