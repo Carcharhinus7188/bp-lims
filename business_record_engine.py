@@ -38,7 +38,7 @@ AUTO_ROW_KEYS = {
 OPTIONAL_PARAMETER_KEYS = {
     "repeat_check_1", "repeat_check_2", "repeat_check_3",
     "cutoff_filter", "measurement_direction", "zero_force", "atmosphere",
-    "pv_range", "objective", "magnification", "calibration_scale",
+    "pv_range", "objective", "magnification",
     "observer_1", "observer_2", "observer_3", "lamp_no", "lamp_hours",
     "filter_no", "filter_hours", "background", "sample_preparation",
     "procedure_summary", "acceptance_criteria", "test_conditions",
@@ -206,7 +206,6 @@ PARAM_ALIASES = {
     "surface_condition": ["测试面状态"],
     "perpendicularity": ["垂直性确认", "压头轴线垂直"],
     "objective": ["物镜", "放大倍数"],
-    "calibration_scale": ["标尺", "校准片编号", "量块编号"],
     "calibration_result": ["校准核查结果", "量块核查结果"],
     "measurement_points": ["测量点位"],
     "repeat_count": ["重复测量次数"],

@@ -418,11 +418,9 @@ def _vickers(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any],
 
 
 def _thickness(writer: Writer, rows: list[dict[str, Any]], params: dict[str, Any], context: dict[str, Any], attachment_ref: str) -> None:
-    writer.put(2, 1, 2, f"清洁时间：{params.get('cleaning_time','')}")
+    writer.put(2, 1, 2, f"放大倍率：{params.get('magnification','')}")
     writer.put(2, 2, 2, f"开始：{params.get('preheat_start','')} 结束：{params.get('preheat_end','')}")
-    nominal, measured = params.get("calibration_nominal"), params.get("calibration_measured")
-    error = None if nominal in (None, "") or measured in (None, "") else round(float(measured) - float(nominal), 4)
-    writer.put(2, 3, 2, f"量块编号：{params.get('calibration_scale','')} 标称值：{_text(nominal)} mm 实测值：{_text(measured)} mm 误差：{_text(error)} mm")
+    writer.put(2, 3, 2, f"测量点位：{params.get('measurement_points','')} 重复次数：{_text(params.get('repeat_count',''))}")
     data_rows = list(range(3, 18, 3))
     for sample_index, start_row in enumerate(data_rows):
         if sample_index >= len(rows):
