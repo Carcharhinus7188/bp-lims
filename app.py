@@ -655,7 +655,7 @@ if "user" not in st.session_state:
             u=authenticate(username,password)
             if u:st.session_state.user=u;st.query_params["session"]=create_session(username);st.rerun()
             else:st.error("用户名或密码错误")
-        st.caption("管理员 admin/admin123｜样品管理员 receiver/receive123｜实验员 tester/test123｜复核员 reviewer/review123｜质量负责人 quality/quality123")
+        st.caption("管理员赵衡 admin/admin123｜样品管理员韩丹 receiver/receive123｜刘红实验 liuhong_test/LhTest2026｜刘红复核 liuhong_review/LhReview2026｜李红丽实验 lihongli_test/LhlTest2026｜李红丽复核 lihongli_review/LhlReview2026｜质量负责人刘丽 quality/quality123")
     st.stop()
 
 user=st.session_state.user;role=user["role"];username=user["username"]
@@ -736,7 +736,7 @@ if page=="首页看板":
         if demo_a.button("生成待复核实验Demo",type="primary",key="create_pending_review_demo_home",use_container_width=True):
             try:
                 demo=create_pending_review_demo()
-                st.success(f"已生成：{demo['commission_no']}｜{demo['task_no']}。请使用 reviewer / review123 登录查看复核预览。")
+                st.success(f"已生成：{demo['commission_no']}｜{demo['task_no']}。请使用 lihongli_review / LhlReview2026 登录查看复核预览。")
                 st.rerun()
             except Exception as error:
                 st.error("生成演示数据失败："+str(error))
@@ -1001,7 +1001,8 @@ elif page=="我的任务包":
         if p["status"]=="待接收" and username==p["assignee"]:
             result=st.radio("样品实物接收确认",["样品已收到，确认完好","样品已收到，但存在异常","尚未收到样品"])
             st.subheader("逐实验选择检测位置")
-            st.caption("每个实验独立选择，允许同一任务包内的实验使用不同检测位置。推荐地点仅作默认值，可按实际情况修改。")
+            st.caption("每个实验独立选择，允许同一任务包内的实验使用不同检测位置。确认领用后，系统会按检测室自动锁定唯一温湿度计。")
+            from constants import LAB_TEMPERATURE_HUMIDITY_EQUIPMENT
             task_locations={}
             location_cols=st.columns(2)
             for index,item in enumerate(package_task_rows):
@@ -1014,6 +1015,11 @@ elif page=="我的任务包":
                         index=DETECTION_LOCATIONS.index(recommended),
                         key=f"task_location_{item['task_no']}",
                     )
+                    matched_meter=LAB_TEMPERATURE_HUMIDITY_EQUIPMENT.get(task_locations[item["task_no"]])
+                    if matched_meter:
+                        st.caption(f"自动匹配温湿度计：{matched_meter}（不可手动更换）")
+                    else:
+                        st.warning("该检测地点尚未配置温湿度计编号，暂不能确认领用。")
             note=st.text_area("领用/异常备注")
             if st.button("确认整组样品领用",type="primary"):
                 try:
@@ -1092,11 +1098,15 @@ elif page=="实验记录":
         kind=config_snapshot.get("kind") or EXPERIMENTS.get(t["experiment"],{}).get("kind","generic")
         bound_devices=config_snapshot.get("equipment",[])
         if kind=="cte":
-            # 最新线胀系数流程仅保留卡尺、温湿度表和热膨胀仪。
-            allowed_cte_equipment={"BPGL-A001","BPGL-A009","BPGL-A020"}
+            # 线胀系数流程仅保留卡尺、按检测室自动匹配的温湿度计和热膨胀仪。
+            allowed_cte_equipment={"BPGL-A001","BPGL-A020"}
             bound_devices=[
                 item for item in bound_devices
-                if (item.get("management_no") or item.get("管理编号")) in allowed_cte_equipment
+                if (
+                    (item.get("management_no") or item.get("管理编号")) in allowed_cte_equipment
+                    or item.get("binding_role")=="环境监测"
+                    or "温湿度" in str(item.get("equipment_name") or item.get("设备名称") or "")
+                )
             ]
         production_unit=commission0.get("production_org_name","")
         if commission0.get("production_relation")=="受委托生产企业" and production_unit:
@@ -1140,6 +1150,7 @@ elif page=="实验记录":
             business["parameters"]["end_time"]=str(t["experiment_ended_at"]).replace("T"," ")
         key_prefix=f"simple_{tn}_{version}"
         st.info(f"{t['experiment']}｜{t['method_code']}｜{len(sample_ids)}件样品。已知信息自动带入，正常选项已设置为默认值；实验员只需确认现场状态并填写实际测量数据。")
+        emergency_slot=st.container()
         if kind=="cte":
             start_at=t.get("experiment_started_at") or ""
             end_at=t.get("experiment_ended_at") or ""
@@ -1312,6 +1323,75 @@ elif page=="实验记录":
                 payload=enforce_secondary_edit_scope(
                     payload,prior,correction_fields,kind,supplement_requirements,
                 )
+            with emergency_slot:
+                st.error("设备发生故障、数据异常漂移或出现高温/高压/气源等安全风险时，立即中断；不得继续检测或删除已采集数据。")
+                with st.expander("🚨 设备故障 / 安全风险——立即中断实验", expanded=False):
+                    device_options=[
+                        item.get("management_no") or item.get("管理编号")
+                        for item in bound_devices
+                        if item.get("management_no") or item.get("管理编号")
+                    ]
+                    if not device_options:
+                        device_options=[item["management_no"] for item in list_equipment(True)]
+                    with st.form(f"{key_prefix}_equipment_incident"):
+                        fault_equipment=st.selectbox(
+                            "故障设备", device_options,
+                            format_func=lambda value:f"{value}｜{(equipment_item(value) or {}).get('equipment_name','')}",
+                        )
+                        x,y=st.columns(2)
+                        fault_type=x.selectbox(
+                            "故障类型",
+                            ["设备停机/无响应","软件报错","数据漂移/异常","异响/机械异常","温度/压力/气源异常","其他"],
+                        )
+                        error_code=y.text_input("报错代码（无则填“无”）",value="无")
+                        fault_description=st.text_area("故障现象（必填）")
+                        current_stage=st.text_input("故障发生时的试验阶段",value="原始数据采集")
+                        completed_steps=st.text_area("已完成的试验步骤")
+                        collected_data=st.text_area("已采集数据说明（原始值不得删除）")
+                        sample_condition=st.text_area("中断时样品状态和摆放位置")
+                        risk_types=st.multiselect(
+                            "现场风险",
+                            ["无持续危险","高温","高压","辐射","气源","水路","化学品","机械运动","电气风险"],
+                        )
+                        immediate_actions=st.multiselect(
+                            "已完成的第一时间处置",
+                            [
+                                "终止试验动作","按下设备急停","切断危险介质",
+                                "保护故障现场","样品保持原位并等待隔离",
+                                "已口头上报质量负责人和管理员",
+                            ],
+                        )
+                        confirm_fault=st.checkbox(
+                            "我确认以上记录为现场即时记录；故障设备不得重启，当前数据按中断作废版本保留"
+                        )
+                        submit_fault=st.form_submit_button(
+                            "确认中断、冻结当前记录并启动故障处置",
+                            type="primary", use_container_width=True,
+                            disabled=not confirm_fault,
+                        )
+                    if submit_fault:
+                        try:
+                            incident_no=create_equipment_incident(
+                                tn,username,{
+                                    "equipment_no":fault_equipment,
+                                    "fault_type":fault_type,
+                                    "error_code":error_code,
+                                    "fault_description":fault_description,
+                                    "current_stage":current_stage,
+                                    "completed_steps":completed_steps,
+                                    "collected_data":collected_data,
+                                    "sample_condition":sample_condition,
+                                    "risk_types":risk_types,
+                                    "immediate_actions":immediate_actions,
+                                },
+                                payload,version,tm_version,sm_version,
+                            )
+                            navigate_to(
+                                "设备故障处置",
+                                f"{incident_no} 已建立：记录已冻结、设备已停用、样品已进入隔离流程",
+                            )
+                        except Exception as error:
+                            st.error(str(error))
             a,b=st.columns(2)
             if a.button("同步当前记录并检查",use_container_width=True,key=f"{key_prefix}_draft"):
                 if kind=="cte" and not end_at:
@@ -2165,6 +2245,207 @@ elif page=="客户异议":
         if role=="样品管理员" and obj["status"]=="已归档":
             st.success("异议已回复并归档。")
             st.download_button("下载已归档客户异议回复单",objection_response_document(obj,report_row,commission_row),f"{objection_no}-R_客户异议回复单.docx",use_container_width=True)
+
+elif page=="设备故障处置":
+    header("设备故障致实验中断处置")
+    st.caption("依据 LAB-SOP-应急-008：先保安全、冻结原始记录、停用设备和隔离样品；恢复时必须从头完整重做，不允许接续中断步骤。")
+    incidents=list_equipment_incidents(role,username)
+    active_count=sum(
+        1 for item in incidents
+        if item.get("status") not in ("已关闭","样品失效待重新送样","已批准整套重做")
+    )
+    a,b,c=st.columns(3)
+    a.metric("故障单总数",len(incidents))
+    b.metric("处理中",active_count)
+    c.metric("已进入受控结论",len(incidents)-active_count)
+    show_df(
+        incidents,
+        [
+            "incident_no","task_no","experiment","equipment_no","equipment_name",
+            "reporter_name","occurred_at","fault_type","status","sample_validity",
+            "recovery_route","resumed_record_version",
+        ],
+    )
+    if not incidents:
+        st.info("当前角色没有可查看的设备故障中断记录。")
+    else:
+        incident_no=st.selectbox(
+            "选择故障单",
+            [item["incident_no"] for item in incidents],
+            format_func=lambda value:next(
+                f"{item['incident_no']}｜{item.get('task_no','')}｜{item.get('status','')}"
+                for item in incidents if item["incident_no"]==value
+            ),
+        )
+        incident=equipment_incident(incident_no) or {}
+        st.subheader("一、故障现场与冻结记录")
+        show_df([{
+            "故障单":incident.get("incident_no",""),
+            "实验任务":incident.get("task_no",""),
+            "设备":f"{incident.get('equipment_no','')}｜{incident.get('equipment_name','')}",
+            "发生时间":incident.get("occurred_at",""),
+            "故障类型":incident.get("fault_type",""),
+            "故障现象":incident.get("fault_description",""),
+            "报错代码":incident.get("error_code",""),
+            "中断阶段":incident.get("current_stage",""),
+            "冻结记录版本":f"V{incident.get('frozen_record_version') or 1}.0",
+        }])
+        x,y=st.columns(2)
+        with x:
+            st.markdown("**已完成步骤**")
+            st.write(incident.get("completed_steps") or "—")
+            st.markdown("**已采集数据**")
+            st.write(incident.get("collected_data") or "—")
+        with y:
+            st.markdown("**中断时样品状态**")
+            st.write(incident.get("sample_condition") or "—")
+            st.markdown("**现场风险 / 即时处置**")
+            st.write("、".join(incident.get("risk_types_list") or []) or "—")
+            st.write("、".join(incident.get("immediate_actions_list") or []) or "—")
+        st.info(
+            "关联样品："+("、".join(incident.get("involved_samples_list") or []) or "—")
+            +"。故障发生前照片和设备原始文件已改为“设备故障中断留档”，不会作为重做实验的有效证据继续使用。"
+        )
+
+        if role=="样品管理员" and incident.get("status")=="待样品隔离":
+            st.subheader("二、样品管理员确认隔离与保存")
+            with st.form(f"receiver_incident_{incident_no}"):
+                isolation_location=st.text_input("隔离位置",value="故障中断样品隔离区")
+                storage_requirements=st.text_area(
+                    "保存要求",
+                    value="按样品规定温湿度、避光和密封要求单独分区保存；粘贴红色隔离标识。",
+                )
+                receiver_note=st.text_area("样品状态和交接备注")
+                submit_receiver=st.form_submit_button(
+                    "确认隔离并提交质量评估",type="primary",use_container_width=True,
+                )
+            if submit_receiver:
+                try:
+                    receiver_isolate_equipment_incident(
+                        incident_no,username,isolation_location,storage_requirements,receiver_note,
+                    )
+                    st.session_state.flash_message=f"{incident_no} 已完成样品隔离"
+                    st.rerun()
+                except Exception as error:
+                    st.error(str(error))
+
+        if role=="质量负责人" and incident.get("status")=="待质量评估":
+            st.subheader("三、质量负责人调查与影响评估")
+            with st.form(f"quality_incident_{incident_no}"):
+                sample_validity=st.radio(
+                    "样品与恢复判定",
+                    ["可稳定保存并整套重做","样品不可逆失效","需更换备用设备整套重做"],
+                )
+                quality_conclusion=st.text_area(
+                    "质量调查结论（包括故障原因、数据有效性和是否影响既往结果）"
+                )
+                impact_scope=st.text_area(
+                    "影响范围",
+                    value="本故障单关联实验任务及本次中断数据；既往同类报告待按设备故障时间窗口检索确认。",
+                )
+                quality_note=st.text_area("处理建议 / 纠正预防措施")
+                submit_quality=st.form_submit_button(
+                    "提交质量评估并送管理员技术批准",type="primary",use_container_width=True,
+                )
+            if submit_quality:
+                try:
+                    quality_assess_equipment_incident(
+                        incident_no,username,sample_validity,
+                        quality_conclusion,impact_scope,quality_note,
+                    )
+                    st.session_state.flash_message=f"{incident_no} 已提交管理员技术批准"
+                    st.rerun()
+                except Exception as error:
+                    st.error(str(error))
+
+        if role=="管理员" and incident.get("status")=="待管理员批准":
+            st.subheader("四、管理员（技术批准）决定恢复路径")
+            st.warning("批准重做后，系统新建下一版本空白草稿；旧版继续保留为故障中断作废记录。不得从中断步骤接着填写。")
+            route_options=[
+                "样品失效，等待客户重新送样",
+                "原设备维修核查合格后整套重做",
+                "改用备用合格设备整套重做",
+            ]
+            with st.form(f"admin_incident_{incident_no}"):
+                recovery_route=st.radio("恢复路径",route_options)
+                performance_check_result=st.selectbox(
+                    "设备维修 / 性能核查结论",
+                    [
+                        "维修完成且性能核查合格",
+                        "备用设备性能核查合格",
+                        "样品失效，无需批准恢复本次实验",
+                        "性能核查未通过",
+                    ],
+                )
+                backup_options=[
+                    item["management_no"] for item in list_equipment()
+                    if item["management_no"]!=incident.get("equipment_no")
+                ]
+                backup_equipment_no=st.selectbox(
+                    "备用设备（仅选择备用设备路径时必填）",
+                    [""]+backup_options,
+                    format_func=lambda value:(
+                        "不适用" if not value
+                        else f"{value}｜{(equipment_item(value) or {}).get('equipment_name','')}"
+                    ),
+                )
+                admin_note=st.text_area(
+                    "技术批准意见",
+                    value="确认设备状态、样品状态和质量评估结论；恢复后从头完整重做整套试验。",
+                )
+                confirm_admin=st.checkbox(
+                    "我确认不接续中断步骤；原故障记录、作废数据、照片及处置时间轴永久保留"
+                )
+                submit_admin=st.form_submit_button(
+                    "批准受控处置",
+                    type="primary",use_container_width=True,disabled=not confirm_admin,
+                )
+            if submit_admin:
+                try:
+                    resumed_version=approve_equipment_incident_recovery(
+                        incident_no,username,recovery_route,
+                        performance_check_result,admin_note,backup_equipment_no,
+                    )
+                    message=(
+                        f"{incident_no} 已批准，实验员将从 V{resumed_version}.0 整套重做"
+                        if resumed_version else f"{incident_no} 已转为等待客户重新送样"
+                    )
+                    st.session_state.flash_message=message
+                    st.rerun()
+                except Exception as error:
+                    st.error(str(error))
+
+        if incident.get("status") in ("待质量评估","待管理员批准","已批准整套重做","样品失效待重新送样"):
+            st.subheader("五、隔离、质量与批准结论")
+            show_df([{
+                "隔离位置":incident.get("isolation_location",""),
+                "保存要求":incident.get("storage_requirements",""),
+                "样品有效性":incident.get("sample_validity",""),
+                "质量结论":incident.get("quality_conclusion",""),
+                "影响范围":incident.get("impact_scope",""),
+                "恢复路径":incident.get("recovery_route",""),
+                "性能核查":incident.get("performance_check_result",""),
+                "恢复记录版本":(
+                    f"V{incident.get('resumed_record_version')}.0"
+                    if incident.get("resumed_record_version") else ""
+                ),
+            }])
+        st.subheader("处置时间轴")
+        show_df(
+            equipment_incident_actions(incident_no),
+            ["created_at","actor_name","actor_role","action","comment"],
+        )
+        export_payload={
+            "故障单":incident,
+            "处置时间轴":equipment_incident_actions(incident_no),
+        }
+        st.download_button(
+            "下载故障处置追溯数据 JSON",
+            json.dumps(export_payload,ensure_ascii=False,indent=2,default=str).encode("utf-8"),
+            f"{incident_no}_设备故障中断处置追溯.json",
+            "application/json",
+            use_container_width=True,
+        )
 
 elif page=="修改中心":
     header("⚠️ 原始记录修改中心")

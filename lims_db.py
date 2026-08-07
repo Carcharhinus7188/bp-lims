@@ -305,6 +305,27 @@ CREATE TABLE IF NOT EXISTS hazardous_waste_records(
   handler TEXT NOT NULL, occurred_at TEXT NOT NULL, status TEXT DEFAULT '已登记',
   note TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS equipment_incidents(
+  incident_no TEXT PRIMARY KEY, task_no TEXT NOT NULL, package_no TEXT NOT NULL,
+  commission_no TEXT NOT NULL, group_id INTEGER NOT NULL,
+  equipment_no TEXT NOT NULL, equipment_name TEXT,
+  reporter TEXT NOT NULL, occurred_at TEXT NOT NULL,
+  fault_type TEXT NOT NULL, fault_description TEXT NOT NULL, error_code TEXT,
+  current_stage TEXT, completed_steps TEXT, collected_data TEXT,
+  sample_condition TEXT, risk_types TEXT DEFAULT '[]', immediate_actions TEXT DEFAULT '[]',
+  involved_samples TEXT DEFAULT '[]', frozen_record_version INTEGER,
+  status TEXT DEFAULT '待样品隔离', isolation_location TEXT, storage_requirements TEXT,
+  sample_validity TEXT, receiver_note TEXT, receiver_by TEXT, receiver_at TEXT,
+  quality_conclusion TEXT, impact_scope TEXT, quality_note TEXT,
+  quality_by TEXT, quality_at TEXT, recovery_route TEXT,
+  backup_equipment_no TEXT, performance_check_result TEXT,
+  admin_note TEXT, approved_by TEXT, approved_at TEXT,
+  resumed_record_version INTEGER, closed_at TEXT, created_at TEXT, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS equipment_incident_actions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, incident_no TEXT NOT NULL, actor TEXT NOT NULL,
+  action TEXT NOT NULL, comment TEXT, created_at TEXT NOT NULL
+);
 """
         )
         # Non-destructive migration for databases created by V5.7 and earlier.
@@ -416,13 +437,13 @@ CREATE TABLE IF NOT EXISTS hazardous_waste_records(
         )
         c.execute("UPDATE reports SET status='待质量审核' WHERE status='待复核员审核'")
         demo_users = [
-            ("admin", "系统管理员", "admin123", "管理员"),
-            ("receiver", "样品管理员王工", "receive123", "样品管理员"),
-            ("store", "样品管理员赵工", "store123", "样品管理员"),
-            ("tester", "实验员张工", "test123", "实验员"),
-            ("reviewer", "复核员李工", "review123", "复核员"),
-            ("quality", "质量负责人周工", "quality123", "质量负责人"),
-            ("approver", "管理员刘工", "approve123", "管理员"),
+            ("admin", "赵衡", "admin123", "管理员"),
+            ("receiver", "韩丹", "receive123", "样品管理员"),
+            ("liuhong_test", "刘红", "LhTest2026", "实验员"),
+            ("liuhong_review", "刘红", "LhReview2026", "复核员"),
+            ("lihongli_test", "李红丽", "LhlTest2026", "实验员"),
+            ("lihongli_review", "李红丽", "LhlReview2026", "复核员"),
+            ("quality", "刘丽", "quality123", "质量负责人"),
         ]
         c.execute(
             """UPDATE users SET role='质量负责人',
@@ -435,6 +456,24 @@ CREATE TABLE IF NOT EXISTS hazardous_waste_records(
                     "INSERT INTO users VALUES(?,?,?,?,1,?)",
                     (username, name, _password_hash(password), role, now()),
                 )
+            else:
+                c.execute(
+                    "UPDATE users SET display_name=?,role=?,enabled=1 WHERE username=?",
+                    (name, role, username),
+                )
+        # 旧演示版账号保留行以维持历史外键可读性，但停止登录。
+        # 新版保留行以维持历史外键可读性，但停止登录，避免人员选择时出现重复成员。
+        c.execute(
+            """UPDATE users SET enabled=0,
+               display_name=CASE username
+                 WHEN 'store' THEN '韩丹（历史兼容账号）'
+                 WHEN 'approver' THEN '赵衡（历史兼容账号）'
+                 WHEN 'tester' THEN '刘红（历史兼容账号）'
+                 WHEN 'tester2' THEN '李红丽（历史兼容账号）'
+                 WHEN 'reviewer' THEN '复核员李工（历史兼容账号）'
+                 ELSE display_name END
+               WHERE username IN ('store','approver','tester','tester2','reviewer')"""
+        )
         # Restore the quality-review inbox for older databases that were
         # created before a quality owner was stored on every task/report.
         quality_user = c.execute(
@@ -1545,8 +1584,15 @@ def _next_package_no(group_no: str) -> str:
 
 def _auto_match_user(role: str, exclude: set[str] | None = None) -> str:
     exclude = exclude or set()
+    excluded_people = {
+        item["display_name"]
+        for item in rows(
+            f"SELECT DISTINCT display_name FROM users WHERE username IN ({','.join('?' for _ in exclude)})",
+            tuple(exclude),
+        )
+    } if exclude else set()
     candidates = rows(
-        """SELECT u.username,
+        """SELECT u.username,u.display_name,
            (SELECT COUNT(*) FROM tasks t
             WHERE (t.reviewer=u.username OR t.quality_inspector=u.username)
               AND t.status NOT IN ('已完成','历史作废')) AS workload
@@ -1554,10 +1600,26 @@ def _auto_match_user(role: str, exclude: set[str] | None = None) -> str:
            ORDER BY workload,u.username""",
         (role,),
     )
-    available = [x for x in candidates if x["username"] not in exclude]
+    available = [
+        x for x in candidates
+        if x["username"] not in exclude and x["display_name"] not in excluded_people
+    ]
     if not available:
         raise ValueError(f"没有可用的{role}，请管理员先维护人员授权")
     return available[0]["username"]
+
+
+def _same_person(first_username: str, second_username: str) -> bool:
+    if not first_username or not second_username:
+        return False
+    if first_username == second_username:
+        return True
+    people = rows(
+        "SELECT username,display_name FROM users WHERE username IN (?,?)",
+        (first_username, second_username),
+    )
+    names = {item["display_name"] for item in people}
+    return len(people) == 2 and len(names) == 1
 
 
 def create_task_package(
@@ -1579,6 +1641,8 @@ def create_task_package(
         raise ValueError("部分实验已分配或不属于该样品组")
     package_no = _next_package_no(g["group_no"])
     reviewer = reviewer or _auto_match_user("复核员", {assignee})
+    if _same_person(assignee, reviewer):
+        raise ValueError("实验人员不得复核本人完成的实验")
     quality_inspector = _auto_match_user("质量负责人", {assignee, reviewer})
     sample_nos = [x["sample_no"] for x in group_samples(group_id)]
     selected = [available[key] for key in experiment_codes]
@@ -1721,6 +1785,67 @@ def task(task_no: str) -> dict[str, Any] | None:
     return r
 
 
+def _lock_location_temperature_humidity_equipment(
+    snapshot: dict[str, Any],
+    detection_location: str,
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    """Replace every configured temperature/humidity meter with the room's one meter."""
+    from constants import (
+        LAB_TEMPERATURE_HUMIDITY_EQUIPMENT,
+        TEMPERATURE_HUMIDITY_EQUIPMENT_NOS,
+    )
+
+    management_no = LAB_TEMPERATURE_HUMIDITY_EQUIPMENT.get(detection_location)
+    if not management_no:
+        raise ValueError(
+            f"{detection_location}尚未配置受控温湿度计编号，不能接收实验任务；"
+            "请先由管理员完成实验室—设备映射"
+        )
+    device_row = connection.execute(
+        "SELECT * FROM equipment_registry WHERE management_no=?",
+        (management_no,),
+    ).fetchone()
+    if not device_row:
+        raise ValueError(f"{detection_location}对应温湿度计 {management_no} 不在设备台账中")
+    device = dict(device_row)
+    if not device.get("enabled") or device.get("lifecycle_status") != "启用":
+        raise ValueError(
+            f"{detection_location}对应温湿度计 {management_no} 当前不可用，不能接收实验任务"
+        )
+
+    retained = []
+    for item in snapshot.get("equipment") or []:
+        item_no = str(item.get("management_no") or "")
+        item_name = str(item.get("equipment_name") or "")
+        if item_no in TEMPERATURE_HUMIDITY_EQUIPMENT_NOS or "温湿度" in item_name:
+            continue
+        retained.append(item)
+    retained.append(
+        {
+            "management_no": management_no,
+            "equipment_name": device.get("equipment_name", "温湿度计"),
+            "model": device.get("model", ""),
+            "measuring_range": device.get("measuring_range", ""),
+            "manufacturer": device.get("manufacturer", ""),
+            "serial_no": device.get("serial_no", ""),
+            "calibration_time": device.get("calibration_time", ""),
+            "responsible": device.get("responsible", ""),
+            "equipment_class": device.get("equipment_class", ""),
+            "lifecycle_status": device.get("lifecycle_status", ""),
+            "binding_role": "环境监测",
+            "required": 1,
+            "sort_order": 900,
+            "note": f"系统按检测地点自动匹配：{detection_location}唯一温湿度计",
+        }
+    )
+    snapshot["equipment"] = retained
+    snapshot["selected_detection_location"] = detection_location
+    snapshot["temperature_humidity_equipment_no"] = management_no
+    snapshot["temperature_humidity_equipment_locked"] = True
+    return snapshot
+
+
 def accept_package(
     package_no: str,
     actor: str,
@@ -1782,7 +1907,10 @@ def accept_package(
             ).fetchone()
             if snapshot_row:
                 snapshot = json.loads(snapshot_row[0] or "{}")
-                snapshot["selected_detection_location"] = location
+                snapshot = _lock_location_temperature_humidity_equipment(
+                    snapshot, location, c
+                )
+                snapshot.pop("snapshot_hash", None)
                 raw = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str)
                 snapshot_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
                 snapshot["snapshot_hash"] = snapshot_hash
@@ -1853,6 +1981,492 @@ def mark_task_experiment_time(task_no: str, actor: str, action: str, system_auto
     else:
         raise ValueError("未知的时间轴操作")
     return task(task_no) or {}
+
+
+# ---------------------- Equipment-fault interruption control ----------------------
+def _next_equipment_incident_no() -> str:
+    prefix = "EQI" + china_now().strftime("%Y%m%d")
+    row = one(
+        """SELECT incident_no FROM equipment_incidents
+           WHERE incident_no LIKE ? ORDER BY incident_no DESC LIMIT 1""",
+        (prefix + "-%",),
+    )
+    sequence = int(row["incident_no"].rsplit("-", 1)[1]) + 1 if row else 1
+    return f"{prefix}-{sequence:03d}"
+
+
+def _incident_role_users(role: str) -> list[str]:
+    return [
+        item["username"] for item in rows(
+            "SELECT username FROM users WHERE role=? AND enabled=1 ORDER BY username",
+            (role,),
+        )
+    ]
+
+
+def equipment_incident(incident_no: str) -> dict[str, Any] | None:
+    item = one("SELECT * FROM equipment_incidents WHERE incident_no=?", (incident_no,))
+    if not item:
+        return None
+    for key in ("risk_types", "immediate_actions", "involved_samples"):
+        try:
+            item[key + "_list"] = json.loads(item.get(key) or "[]")
+        except Exception:
+            item[key + "_list"] = []
+    return item
+
+
+def equipment_incident_actions(incident_no: str) -> list[dict[str, Any]]:
+    return rows(
+        """SELECT a.*,u.display_name actor_name,u.role actor_role
+           FROM equipment_incident_actions a
+           LEFT JOIN users u ON u.username=a.actor
+           WHERE a.incident_no=? ORDER BY a.id""",
+        (incident_no,),
+    )
+
+
+def list_equipment_incidents(role: str, username: str) -> list[dict[str, Any]]:
+    query = """SELECT i.*,t.experiment,t.assignee,t.reviewer,
+               u.display_name reporter_name
+               FROM equipment_incidents i
+               JOIN tasks t ON t.task_no=i.task_no
+               LEFT JOIN users u ON u.username=i.reporter"""
+    args: list[Any] = []
+    if role == "实验员":
+        query += " WHERE (i.reporter=? OR t.assignee=?)"
+        args.extend((username, username))
+    elif role == "复核员":
+        query += " WHERE t.reviewer=?"
+        args.append(username)
+    query += " ORDER BY i.created_at DESC,i.incident_no DESC"
+    return rows(query, args)
+
+
+def create_equipment_incident(
+    task_no: str, actor: str, details: dict[str, Any],
+    payload: dict[str, Any], version: int,
+    template_version: str = "A/0", sop_version: str = "A/0",
+) -> str:
+    task_row = task(task_no)
+    if not task_row:
+        raise ValueError("实验任务不存在")
+    if task_row.get("assignee") != actor:
+        raise ValueError("只有当前实验员可以启动设备故障中断")
+    if task_row.get("status") not in ("检测中", "退回修改"):
+        raise ValueError("当前任务状态不能启动设备故障中断")
+    if one(
+        """SELECT incident_no FROM equipment_incidents
+           WHERE task_no=? AND status NOT IN ('已关闭','样品失效待重新送样')""",
+        (task_no,),
+    ):
+        raise ValueError("该实验已有未关闭的设备故障处置")
+    equipment_no = str(details.get("equipment_no") or "").strip()
+    equipment_row = equipment_item(equipment_no)
+    if not equipment_row:
+        raise ValueError("请选择故障设备")
+    fault_description = str(details.get("fault_description") or "").strip()
+    if not fault_description:
+        raise ValueError("请填写设备故障现象")
+    immediate_actions = list(details.get("immediate_actions") or [])
+    required_actions = {"终止试验动作", "保护故障现场", "样品保持原位并等待隔离"}
+    if not required_actions.issubset(set(immediate_actions)):
+        raise ValueError("请确认已完成终止试验、保护现场和样品隔离准备")
+
+    ts = now()
+    incident_no = _next_equipment_incident_no()
+    sample_nos = list(task_row.get("sample_nos_list") or [])
+    incident_snapshot = dict(payload or {})
+    incident_snapshot["equipment_incident"] = {
+        "incident_no": incident_no,
+        "occurred_at": ts,
+        "equipment_no": equipment_no,
+        "equipment_name": equipment_row.get("equipment_name", ""),
+        "fault_type": details.get("fault_type", ""),
+        "fault_description": fault_description,
+        "error_code": details.get("error_code", ""),
+        "current_stage": details.get("current_stage", ""),
+        "completed_steps": details.get("completed_steps", ""),
+        "collected_data": details.get("collected_data", ""),
+        "sample_condition": details.get("sample_condition", ""),
+        "risk_types": list(details.get("risk_types") or []),
+        "immediate_actions": immediate_actions,
+    }
+    save_record(
+        task_no, int(version or 1), incident_snapshot, actor, "故障中断作废",
+        template_version, sop_version, f"设备故障试验中断：{incident_no}",
+    )
+    freeze_document_version(
+        "record", task_no, int(version or 1), "设备故障中断作废",
+        incident_snapshot, actor,
+    )
+    with connect() as c:
+        c.execute(
+            """INSERT INTO equipment_incidents(
+               incident_no,task_no,package_no,commission_no,group_id,
+               equipment_no,equipment_name,reporter,occurred_at,
+               fault_type,fault_description,error_code,current_stage,
+               completed_steps,collected_data,sample_condition,risk_types,
+               immediate_actions,involved_samples,frozen_record_version,
+               status,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                incident_no, task_no, task_row["package_no"], task_row["commission_no"],
+                task_row["group_id"], equipment_no, equipment_row.get("equipment_name", ""),
+                actor, ts, details.get("fault_type", ""), fault_description,
+                details.get("error_code", ""), details.get("current_stage", ""),
+                details.get("completed_steps", ""), details.get("collected_data", ""),
+                details.get("sample_condition", ""),
+                json.dumps(details.get("risk_types") or [], ensure_ascii=False),
+                json.dumps(immediate_actions, ensure_ascii=False),
+                json.dumps(sample_nos, ensure_ascii=False), int(version or 1),
+                "待样品隔离", ts, ts,
+            ),
+        )
+        c.execute(
+            """INSERT INTO equipment_incident_actions(
+               incident_no,actor,action,comment,created_at
+               ) VALUES(?,?,?,'系统冻结当前记录、停用设备并隔离样品',?)""",
+            (incident_no, actor, "实验员报告设备故障并中断试验", ts),
+        )
+        c.execute(
+            """UPDATE tasks SET status='设备故障中断',
+               experiment_ended_at=COALESCE(experiment_ended_at,?),updated_at=?
+               WHERE task_no=?""",
+            (ts, ts, task_no),
+        )
+        c.execute(
+            "UPDATE task_packages SET status='设备故障中断',updated_at=? WHERE package_no=?",
+            (ts, task_row["package_no"]),
+        )
+        c.execute(
+            "UPDATE sample_groups SET status='故障隔离',updated_at=? WHERE id=?",
+            (ts, task_row["group_id"]),
+        )
+        c.execute(
+            """UPDATE equipment_registry SET enabled=0,lifecycle_status='停用',
+               status_note=?,updated_at=? WHERE management_no=?""",
+            (f"{incident_no} 设备故障试验中断，禁止使用", ts, equipment_no),
+        )
+        c.execute(
+            """UPDATE attachments SET evidence_status='设备故障中断留档'
+               WHERE task_no=? AND evidence_status='有效'""",
+            (task_no,),
+        )
+        for sample_no in sample_nos:
+            old = c.execute(
+                "SELECT status,current_location FROM samples WHERE sample_no=?",
+                (sample_no,),
+            ).fetchone()
+            c.execute(
+                """UPDATE samples SET status='故障隔离',current_location='待确认隔离位置',
+                   current_holder='',updated_at=? WHERE sample_no=?""",
+                (ts, sample_no),
+            )
+            c.execute(
+                """INSERT INTO sample_events(
+                   sample_no,actor,action,from_status,to_status,from_location,
+                   to_location,details,created_at
+                   ) VALUES(?,?,?,?,'故障隔离',?,'待确认隔离位置',?,?)""",
+                (
+                    sample_no, actor, "设备故障中断隔离",
+                    old["status"] if old else "",
+                    old["current_location"] if old else "",
+                    f"故障单:{incident_no};设备:{equipment_no}", ts,
+                ),
+            )
+    for role in ("样品管理员", "质量负责人", "管理员"):
+        for recipient in _incident_role_users(role):
+            create_notification(
+                recipient, "设备故障导致实验中断",
+                f"{task_no} 因 {equipment_no} 发生故障，已冻结原始记录并隔离样品。故障单：{incident_no}",
+                "equipment_incident", incident_no,
+            )
+    audit(
+        "equipment_incident", incident_no, actor, "启动设备故障中断处置",
+        new_value=json.dumps(incident_snapshot["equipment_incident"], ensure_ascii=False),
+        snapshot=incident_snapshot,
+    )
+    return incident_no
+
+
+def receiver_isolate_equipment_incident(
+    incident_no: str, actor: str, isolation_location: str,
+    storage_requirements: str, receiver_note: str,
+) -> None:
+    actor_row = one("SELECT role FROM users WHERE username=? AND enabled=1", (actor,)) or {}
+    if actor_row.get("role") != "样品管理员":
+        raise ValueError("只有样品管理员可以确认样品隔离")
+    item = equipment_incident(incident_no)
+    if not item or item.get("status") != "待样品隔离":
+        raise ValueError("当前故障单不在待样品隔离状态")
+    if not isolation_location.strip() or not storage_requirements.strip():
+        raise ValueError("隔离位置和保存要求均不能为空")
+    ts = now()
+    with connect() as c:
+        c.execute(
+            """UPDATE equipment_incidents SET status='待质量评估',
+               isolation_location=?,storage_requirements=?,receiver_note=?,
+               receiver_by=?,receiver_at=?,updated_at=? WHERE incident_no=?""",
+            (
+                isolation_location.strip(), storage_requirements.strip(),
+                receiver_note.strip(), actor, ts, ts, incident_no,
+            ),
+        )
+        for sample_no in item.get("involved_samples_list") or []:
+            previous = c.execute(
+                "SELECT status,current_location FROM samples WHERE sample_no=?",
+                (sample_no,),
+            ).fetchone()
+            c.execute(
+                """UPDATE samples SET status='故障隔离',current_location=?,
+                   current_holder=?,updated_at=? WHERE sample_no=?""",
+                (isolation_location.strip(), actor, ts, sample_no),
+            )
+            c.execute(
+                """INSERT INTO sample_events(
+                   sample_no,actor,action,from_status,to_status,from_location,
+                   to_location,details,created_at
+                   ) VALUES(?,?,?,?,'故障隔离',?,?,?,?)""",
+                (
+                    sample_no, actor, "确认故障隔离位置",
+                    previous["status"] if previous else "",
+                    previous["current_location"] if previous else "",
+                    isolation_location.strip(),
+                    f"故障单:{incident_no};保存要求:{storage_requirements}", ts,
+                ),
+            )
+        c.execute(
+            """INSERT INTO equipment_incident_actions(
+               incident_no,actor,action,comment,created_at
+               ) VALUES(?,?,?,?,?)""",
+            (
+                incident_no, actor, "确认样品隔离",
+                f"位置:{isolation_location};保存要求:{storage_requirements};{receiver_note}", ts,
+            ),
+        )
+    for recipient in _incident_role_users("质量负责人"):
+        create_notification(
+            recipient, "设备故障待质量评估",
+            f"{incident_no} 已完成样品隔离，请评估数据、样品有效性和影响范围。",
+            "equipment_incident", incident_no,
+        )
+    audit("equipment_incident", incident_no, actor, "确认样品隔离", new_value=isolation_location)
+
+
+def quality_assess_equipment_incident(
+    incident_no: str, actor: str, sample_validity: str,
+    quality_conclusion: str, impact_scope: str, quality_note: str,
+) -> None:
+    actor_row = one("SELECT role FROM users WHERE username=? AND enabled=1", (actor,)) or {}
+    if actor_row.get("role") != "质量负责人":
+        raise ValueError("只有质量负责人可以提交质量评估")
+    item = equipment_incident(incident_no)
+    if not item or item.get("status") != "待质量评估":
+        raise ValueError("当前故障单不在待质量评估状态")
+    if sample_validity not in ("可稳定保存并整套重做", "样品不可逆失效", "需更换备用设备整套重做"):
+        raise ValueError("请选择受控的样品/重做判定")
+    if not quality_conclusion.strip() or not impact_scope.strip():
+        raise ValueError("质量调查结论和影响范围不能为空")
+    ts = now()
+    with connect() as c:
+        c.execute(
+            """UPDATE equipment_incidents SET status='待管理员批准',
+               sample_validity=?,quality_conclusion=?,impact_scope=?,quality_note=?,
+               quality_by=?,quality_at=?,updated_at=? WHERE incident_no=?""",
+            (
+                sample_validity, quality_conclusion.strip(), impact_scope.strip(),
+                quality_note.strip(), actor, ts, ts, incident_no,
+            ),
+        )
+        c.execute(
+            """INSERT INTO equipment_incident_actions(
+               incident_no,actor,action,comment,created_at
+               ) VALUES(?,?,?,?,?)""",
+            (
+                incident_no, actor, "提交质量评估",
+                f"{sample_validity};影响范围:{impact_scope};{quality_conclusion}", ts,
+            ),
+        )
+    for recipient in _incident_role_users("管理员"):
+        create_notification(
+            recipient, "设备故障待技术批准",
+            f"{incident_no} 已完成质量评估，请决定重新送样、原设备整套重做或备用设备整套重做。",
+            "equipment_incident", incident_no,
+        )
+    audit("equipment_incident", incident_no, actor, "提交质量评估", new_value=sample_validity)
+
+
+def approve_equipment_incident_recovery(
+    incident_no: str, actor: str, recovery_route: str,
+    performance_check_result: str, admin_note: str,
+    backup_equipment_no: str = "",
+) -> int | None:
+    actor_row = one("SELECT role FROM users WHERE username=? AND enabled=1", (actor,)) or {}
+    if actor_row.get("role") != "管理员":
+        raise ValueError("只有管理员可以执行技术批准")
+    item = equipment_incident(incident_no)
+    if not item or item.get("status") != "待管理员批准":
+        raise ValueError("当前故障单不在待管理员批准状态")
+    allowed_routes = (
+        "样品失效，等待客户重新送样",
+        "原设备维修核查合格后整套重做",
+        "改用备用合格设备整套重做",
+    )
+    if recovery_route not in allowed_routes:
+        raise ValueError("请选择受控恢复路径")
+    if not admin_note.strip():
+        raise ValueError("技术批准意见不能为空")
+    if recovery_route != allowed_routes[0] and "核查合格" not in performance_check_result:
+        raise ValueError("设备性能核查未合格，不能批准恢复实验")
+    if recovery_route == allowed_routes[2]:
+        backup = equipment_item(backup_equipment_no)
+        if not backup or not backup.get("enabled") or backup.get("lifecycle_status") != "启用":
+            raise ValueError("请选择状态为启用的备用合格设备")
+        if backup_equipment_no == item.get("equipment_no"):
+            raise ValueError("备用设备不能与故障设备相同")
+
+    task_row = task(item["task_no"])
+    if not task_row:
+        raise ValueError("关联实验任务不存在")
+    ts = now()
+    resumed_version: int | None = None
+    if recovery_route == allowed_routes[0]:
+        new_status = "样品失效待重新送样"
+        with connect() as c:
+            for sample_no in item.get("involved_samples_list") or []:
+                previous_sample = c.execute(
+                    "SELECT status,current_location FROM samples WHERE sample_no=?",
+                    (sample_no,),
+                ).fetchone()
+                c.execute(
+                    """UPDATE samples SET status='故障隔离-失效',
+                       current_location=?,current_holder='',updated_at=? WHERE sample_no=?""",
+                    (item.get("isolation_location") or "失效样品隔离区", ts, sample_no),
+                )
+                c.execute(
+                    """INSERT INTO sample_events(
+                       sample_no,actor,action,from_status,to_status,from_location,
+                       to_location,details,created_at
+                       ) VALUES(?,?,?,?,'故障隔离-失效',?,?,?,?)""",
+                    (
+                        sample_no, actor, "技术批准样品失效",
+                        previous_sample["status"] if previous_sample else "",
+                        previous_sample["current_location"] if previous_sample else "",
+                        item.get("isolation_location") or "失效样品隔离区",
+                        f"故障单:{incident_no};等待客户重新送样", ts,
+                    ),
+                )
+    else:
+        previous = latest_record(item["task_no"]) or {}
+        resumed_version = int(previous.get("version") or item.get("frozen_record_version") or 1) + 1
+        previous_payload = previous.get("payload") or {}
+        resumed_payload = {
+            "common": previous_payload.get("common") or {},
+            "template_name": previous_payload.get("template_name", ""),
+            "configuration_snapshot": previous_payload.get("configuration_snapshot") or {},
+            "equipment_snapshot": previous_payload.get("equipment_snapshot") or [],
+            "interruption_origin": incident_no,
+            "business_record": {},
+            "template_supplement": {},
+            "photo_attachment_ids": [],
+        }
+        with connect() as c:
+            c.execute(
+                """INSERT INTO records(
+                   record_no,task_no,version,experiment,owner,status,payload,
+                   template_version,sop_version,change_reason,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,'草稿',?,?,?,?,?,?)""",
+                (
+                    item["task_no"], item["task_no"], resumed_version,
+                    task_row.get("experiment", ""), task_row.get("assignee", ""),
+                    json.dumps(resumed_payload, ensure_ascii=False),
+                    previous.get("template_version", "A/0"),
+                    previous.get("sop_version", "A/0"),
+                    f"{incident_no} 批准后整套重做", ts, ts,
+                ),
+            )
+            c.execute(
+                """UPDATE tasks SET status='检测中',experiment_started_at=NULL,
+                   experiment_ended_at=NULL,updated_at=? WHERE task_no=?""",
+                (ts, item["task_no"]),
+            )
+            c.execute(
+                "UPDATE task_packages SET status='检测中',updated_at=? WHERE package_no=?",
+                (ts, item["package_no"]),
+            )
+            c.execute(
+                "UPDATE sample_groups SET status='检测中',updated_at=? WHERE id=?",
+                (ts, item["group_id"]),
+            )
+            for sample_no in item.get("involved_samples_list") or []:
+                previous_sample = c.execute(
+                    "SELECT status,current_location FROM samples WHERE sample_no=?",
+                    (sample_no,),
+                ).fetchone()
+                c.execute(
+                    """UPDATE samples SET status='检测中',current_location=?,
+                       current_holder=?,updated_at=? WHERE sample_no=?""",
+                    (
+                        task_row.get("detection_location") or "实验室",
+                        task_row.get("assignee", ""), ts, sample_no,
+                    ),
+                )
+                c.execute(
+                    """INSERT INTO sample_events(
+                       sample_no,actor,action,from_status,to_status,from_location,
+                       to_location,details,created_at
+                       ) VALUES(?,?,?,?,'检测中',?,?,?,?)""",
+                    (
+                        sample_no, actor, "批准设备故障后整套重做",
+                        previous_sample["status"] if previous_sample else "",
+                        previous_sample["current_location"] if previous_sample else "",
+                        task_row.get("detection_location") or "实验室",
+                        f"故障单:{incident_no};恢复记录:V{resumed_version}", ts,
+                    ),
+                )
+            if recovery_route == allowed_routes[1]:
+                c.execute(
+                    """UPDATE equipment_registry SET enabled=1,lifecycle_status='启用',
+                       status_note=?,updated_at=? WHERE management_no=?""",
+                    (
+                        f"{incident_no} 维修后性能核查合格，批准重新启用",
+                        ts, item["equipment_no"],
+                    ),
+                )
+        new_status = "已批准整套重做"
+        create_notification(
+            task_row.get("assignee", ""), "设备故障后整套重做任务",
+            f"{item['task_no']} 已批准从头重做，原 V{item.get('frozen_record_version')} 保留作废，当前为 V{resumed_version} 草稿。",
+            "equipment_incident", incident_no,
+        )
+    with connect() as c:
+        c.execute(
+            """UPDATE equipment_incidents SET status=?,recovery_route=?,
+               backup_equipment_no=?,performance_check_result=?,admin_note=?,
+               approved_by=?,approved_at=?,resumed_record_version=?,closed_at=?,
+               updated_at=? WHERE incident_no=?""",
+            (
+                new_status, recovery_route, backup_equipment_no,
+                performance_check_result, admin_note.strip(), actor, ts,
+                resumed_version, ts if new_status == "样品失效待重新送样" else None,
+                ts, incident_no,
+            ),
+        )
+        c.execute(
+            """INSERT INTO equipment_incident_actions(
+               incident_no,actor,action,comment,created_at
+               ) VALUES(?,?,?,?,?)""",
+            (
+                incident_no, actor, "技术批准",
+                f"{recovery_route};{performance_check_result};{admin_note}", ts,
+            ),
+        )
+    audit(
+        "equipment_incident", incident_no, actor, "技术批准",
+        new_value=f"{recovery_route}|V{resumed_version or '-'}",
+    )
+    return resumed_version
 
 
 # ---------------------- Records and review ----------------------
@@ -1980,6 +2594,8 @@ def review_record(
     t = task(record_no)
     if t and t["reviewer"] != reviewer:
         raise ValueError("当前人员不是该任务的复核人")
+    if t and _same_person(t.get("assignee", ""), reviewer):
+        raise ValueError("实验人员不得复核本人完成的实验")
     if decision == "退回" and not comment.strip():
         raise ValueError("退回实验员修改时必须填写复核意见")
     correction_fields = [str(item).strip() for item in (correction_fields or []) if str(item).strip()]
@@ -2625,6 +3241,8 @@ def reviewer_review_report(report_no: str, actor: str, decision: str, comment: s
     item = report(report_no)
     if not item or item.get("verifier") != actor or item.get("status") != "待复核员审核":
         raise ValueError("当前报告不能由该复核员审核")
+    if _same_person(item.get("tester", ""), actor):
+        raise ValueError("实验人员不得复核本人完成的实验报告")
     passed = decision == "通过"
     ts = now()
     with connect() as c:
@@ -3272,6 +3890,7 @@ def reset_business_history(actor: str) -> dict[str, int]:
     if actor_row.get("role") != "管理员":
         raise ValueError("只有管理员可以执行系统初始化")
     transactional_tables = [
+        "equipment_incident_actions", "equipment_incidents",
         "objection_actions", "objections", "report_deliveries", "report_actions",
         "reports", "reviews", "records", "package_loans", "hazardous_waste_records",
         "attachments", "sample_events", "document_versions", "task_config_snapshots",

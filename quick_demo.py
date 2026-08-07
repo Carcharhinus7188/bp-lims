@@ -116,7 +116,7 @@ def _add_demo_result_photos(
                     "checkpoint_label": checkpoint_labels.get(code, code),
                     "device_id": "DEMO-TABLET",
                 },
-                content.getvalue(), "tester", "实验员张工",
+                content.getvalue(), "liuhong_test", "刘红",
             )
 
 
@@ -252,12 +252,12 @@ def create_pending_review_demo() -> dict[str, str]:
     group_row = commission_groups(commission_no)[0]
     package_no = create_task_package(
         group_row["id"], [method["experiment_code"]],
-        "tester", "receiver", "reviewer",
+        "liuhong_test", "receiver", "lihongli_review",
     )
     task_row = package_tasks(package_no)[0]
     snapshot = task_config_snapshot(task_row["task_no"])
     accept_package(
-        package_no, "tester", "样品已收到，确认完好",
+        package_no, "liuhong_test", "样品已收到，确认完好",
         {
             task_row["task_no"]:
                 snapshot.get("default_location") or "性能检测室",
@@ -265,6 +265,7 @@ def create_pending_review_demo() -> dict[str, str]:
         "待复核Demo自动接收",
     )
     task_row = package_tasks(package_no)[0]
+    snapshot = task_config_snapshot(task_row["task_no"])
     sample_ids = [item["sample_no"] for item in group_samples(group_row["id"])]
     equipment = snapshot.get("equipment") or []
     kind = snapshot.get("kind") or "rough"
@@ -288,8 +289,8 @@ def create_pending_review_demo() -> dict[str, str]:
         "detection_location": task_row.get("detection_location") or "性能检测室",
         "standard": snapshot.get("standard", ""),
         "method_code": snapshot.get("method_code", ""),
-        "operator": "实验员张工",
-        "reviewer": "复核员李工",
+        "operator": "刘红",
+        "reviewer": "李红丽",
     }
     template_name = snapshot.get("record_template_file", "")
     template_fields = business_to_template_fields(
@@ -354,7 +355,7 @@ def create_pending_review_demo() -> dict[str, str]:
                ) VALUES(?,?,?,?,?,'待复核',?,?,?,?,?,?,?)""",
             (
                 task_row["task_no"], task_row["task_no"], 1,
-                task_row["experiment"], "tester",
+                task_row["experiment"], "liuhong_test",
                 json.dumps(payload, ensure_ascii=False, default=str),
                 snapshot.get("record_template_version") or "A/0",
                 snapshot.get("sop_version") or "A/0",
@@ -362,7 +363,7 @@ def create_pending_review_demo() -> dict[str, str]:
             ),
         )
     create_notification(
-        "reviewer", "Demo原始记录待复核",
+        "lihongli_review", "Demo原始记录待复核",
         f"{task_row['task_no']} 已完成实验并提交，请直接查看DOCX预览。",
         "record", task_row["task_no"],
     )
@@ -423,12 +424,12 @@ def create_full_document_demo() -> str:
     )
     group_row = commission_groups(DEMO_COMMISSION_NO)[0]
     package_no = create_task_package(
-        group_row["id"], experiment_codes, "tester", "receiver", "reviewer",
+        group_row["id"], experiment_codes, "liuhong_test", "receiver", "lihongli_review",
     )
     task_rows = package_tasks(package_no)
     accept_package(
         package_no,
-        "tester",
+        "liuhong_test",
         "样品已收到，确认完好",
         {
             item["task_no"]: (
@@ -466,8 +467,8 @@ def create_full_document_demo() -> str:
             "detection_location": task_row.get("detection_location") or "性能检测室",
             "standard": snapshot.get("standard", ""),
             "method_code": snapshot.get("method_code", ""),
-            "operator": "实验员张工",
-            "reviewer": "复核员李工",
+            "operator": "刘红",
+            "reviewer": "李红丽",
         }
         template_name = snapshot.get("record_template_file", "")
         template_fields = business_to_template_fields(
@@ -513,7 +514,7 @@ def create_full_document_demo() -> str:
                    reviewer_signed_at,created_at,updated_at
                    ) VALUES(?,?,?,?,?, '已锁定',?,?,?,?,?,?,?,?)""",
                 (
-                    task_no, task_no, 1, task_row["experiment"], "tester",
+                    task_no, task_no, 1, task_row["experiment"], "liuhong_test",
                     json.dumps(payload, ensure_ascii=False, default=str),
                     snapshot.get("record_template_version") or "A/0",
                     snapshot.get("sop_version") or "A/0",
@@ -521,7 +522,7 @@ def create_full_document_demo() -> str:
                 ),
             )
         freeze_document_version(
-            "record", task_no, 1, "完整演示锁定", payload, "reviewer",
+            "record", task_no, 1, "完整演示锁定", payload, "lihongli_review",
         )
         report_no = ensure_report_for_task(task_no)
         report_row = report(report_no)
