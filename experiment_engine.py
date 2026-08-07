@@ -10,27 +10,11 @@ def schema(kind: str) -> dict[str, Any]:
     return SCHEMAS.get(kind) or SCHEMAS["generic"]
 
 
-def _compute_calc_params(kind: str, values: dict[str, Any]) -> dict[str, Any]:
-    """计算 section 字段中 type=calc 的值"""
-    if kind == "rough":
-        try:
-            r1 = float(values.get("repeat_check_1", 0) or 0)
-            r2 = float(values.get("repeat_check_2", 0) or 0)
-            r3 = float(values.get("repeat_check_3", 0) or 0)
-            if r1 and r2 and r3:
-                values["standard_block_measured"] = round((r1 + r2 + r3) / 3, 4)
-        except (ValueError, TypeError):
-            pass
-    return values
-
-
 def initial_parameters(kind: str, preset: dict[str, Any] | None = None, detection_location: str = "") -> dict[str, Any]:
     values: dict[str, Any] = {}
     for section in schema(kind)["sections"]:
         for field in section["fields"]:
             key = field["key"]
-            if field.get("type") == "calc":
-                continue  # calc 字段后处理计算
             default = field.get("default", "")
             if key == "detection_location":
                 default = detection_location
@@ -39,7 +23,6 @@ def initial_parameters(kind: str, preset: dict[str, Any] | None = None, detectio
         for key, value in preset.items():
             if value not in (None, ""):
                 values[key] = value
-    values = _compute_calc_params(kind, values)
     return values
 
 
@@ -49,7 +32,8 @@ def initial_rows(kind: str, sample_ids: list[str]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if schema(kind).get("row_expansion") == "faces":
         for sid in ids:
-            for face in ["面1", "面2"]:
+            directions = ["Z轴方向", "X轴方向"] if kind == "hv" else ["面1", "面2"]
+            for face in directions:
                 row = {key: _default_for_column(kind, key, ctype) for key, _, ctype in columns}
                 row["sample_no"] = sid
                 row["face"] = face
@@ -60,6 +44,26 @@ def initial_rows(kind: str, sample_ids: list[str]) -> list[dict[str, Any]]:
             row["sample_no"] = sid
             rows.append(row)
     return calculate_rows(kind, rows)
+
+
+def normalize_rows(kind: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Upgrade saved rows to the current controlled schema without losing readings."""
+    normalized = [dict(row) for row in rows]
+    if kind != "hv":
+        return normalized
+    per_sample: dict[str, int] = {}
+    for row in normalized:
+        sample_no = str(row.get("sample_no") or "")
+        position = per_sample.get(sample_no, 0)
+        current = str(row.get("face") or "")
+        if position == 0 or current in {"面1", "Z", "Z方向"}:
+            row["face"] = "Z轴方向"
+        elif current not in {"X轴方向", "Y轴方向"}:
+            row["face"] = "X轴方向"
+        row.pop("surface_confirm", None)
+        row.pop("conclusion", None)
+        per_sample[sample_no] = position + 1
+    return normalized
 
 
 def _default_for_column(kind: str, key: str, ctype: str) -> Any:
@@ -93,7 +97,7 @@ def dataframe(kind: str, rows: list[dict[str, Any]]) -> pd.DataFrame:
 
 def calculate_rows(kind: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    for raw in rows:
+    for raw in normalize_rows(kind, rows):
         row = dict(raw)
         try:
             if kind == "mc_crack":
@@ -125,6 +129,7 @@ def calculate_rows(kind: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]
                 row["delta_t"] = round(t2 - t1, 3) if t1 is not None and t2 is not None else None
                 l0, dt, delta_l = _number_or_none(row.get("l0")), _number_or_none(row.get("delta_t")), _number_or_none(row.get("delta_l"))
                 row["alpha"] = round((delta_l / 1000.0) / (l0 * dt) * 1_000_000, 3) if l0 and dt and delta_l is not None else None
+                row["conclusion"] = row.get("judgement_result") or ""
             elif kind == "shock":
                 row["conclusion"] = "符合" if all(str(row.get(k, "无")) == "无" for k in ("crack", "chipping", "fracture")) else "不符合"
             elif kind == "bend":

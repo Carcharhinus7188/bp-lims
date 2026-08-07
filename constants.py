@@ -1,18 +1,12 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-# Company / branding values are loaded from config (env vars / secrets),
-# with these hard-coded strings serving as the final fallback.
-try:
-    from config import COMPANY_CN, COMPANY_EN, APP_VERSION, TIMEZONE_NAME
-except ImportError:
-    COMPANY_CN = "大连标普检测有限公司"
-    COMPANY_EN = "DALIAN BIAOPU TESTING CO., LTD."
-    APP_VERSION = "BPLab Trace V9.3 移动摄像头与高保真预览版"
-    TIMEZONE_NAME = "Asia/Shanghai"
-
+COMPANY_CN = "大连标普检测有限公司"
+COMPANY_EN = "DALIAN BIAOPU TESTING CO., LTD."
 SYSTEM_CN = "大连标普实验室样品全过程追溯系统"
 SYSTEM_EN = "BPLab Sample Lifecycle Tracking System"
+APP_VERSION = "BPLab Trace V9.4.2 任务包接收修复版"
+TIMEZONE_NAME = "Asia/Shanghai"
 
 STORAGE_AREAS = ["A区域", "B区域"]
 SAMPLE_CONDITIONS = ["完好", "不完好"]
@@ -27,6 +21,20 @@ DETECTION_LOCATIONS = [
     "外观检测室",
     "样品室",
 ]
+
+# 实验员接收任务时，系统按实际检测地点自动锁定唯一温湿度计。
+# 制样室尚未提供受控设备编号，因此不做推测性匹配。
+LAB_TEMPERATURE_HUMIDITY_EQUIPMENT = {
+    "显微检测室": "BPGL-A013",
+    "性能检测室": "BPGL-A009",
+    "无损检测室": "BPGL-A011",
+    "化学室": "BPGL-A014",
+    "样品室": "BPGL-A015",
+    "外观检测室": "BPGL-A010",
+}
+TEMPERATURE_HUMIDITY_EQUIPMENT_NOS = {
+    f"BPGL-A{index:03d}" for index in range(9, 17)
+}
 
 
 EQUIPMENT_LIFECYCLE_STATUSES = ["启用", "停用", "维修", "报废"]
@@ -54,7 +62,8 @@ COMMON_PHOTO_CHECKPOINTS = [
 # 温湿度表、设备铭牌、软件参数、夹具和结果界面均按整个实验任务留档一次。
 SAMPLE_LEVEL_PHOTO_CODES = {
     "SAMPLE_BEFORE", "SAMPLE_AFTER", "DAMAGE", "CRACK", "FRACTURE",
-    "INDENT", "MEASURE_RESULT", "OBSERVER_RESULT", "PROFILE", "H1", "H2", "ROI",
+    "INDENT", "MEASURE_RESULT", "FINAL_CURVE", "OBSERVER_RESULT", "PROFILE", "H1", "H2", "ROI",
+    "ROUGH_PARAMETERS", "CTE_PARAMETERS",
 }
 
 # 确定报告结论时真正使用的结果证据。报告生成器按此顺序选图，
@@ -64,23 +73,25 @@ REPORT_DECISIVE_PHOTO_CODES = {
     "金属-陶瓷结合裂纹萌生试验": ["FASTTEST_RESULT", "CRACK"],
     "金属内部质量X射线灰度分析": ["RADIOGRAPH", "ROI"],
     "翘曲变形试验": ["H1", "H2"],
-    "热膨胀系数试验": ["CTE_CURVE"],
+    "热膨胀系数试验": ["CTE_PARAMETERS"],
     "陶瓷牙耐急冷急热试验": ["DAMAGE"],
     "弯曲性能试验": ["FORCE_CURVE", "FRACTURE"],
     "维氏硬度试验": ["INDENT"],
-    "增材制造金属试样厚度测量": ["MEASURE_RESULT"],
+    "增材制造金属试样厚度测量": ["FINAL_CURVE", "MEASURE_RESULT"],
     "牙科材料色稳定性试验": ["D65_COMPARE", "OBSERVER_RESULT"],
 }
 
 EXPERIMENT_PHOTO_CHECKPOINTS = {
     "表面粗糙度试验": [
         ("REFERENCE_CHECK", "标准样块核查读数", True),
-        ("STYLUS_POSITION", "触针与试样测量位置", True),
-        ("PROFILE", "轮廓曲线及Ra结果", True),
+        ("SAMPLE_BEFORE", "实验前样品标签", True),
+        ("PROFILE", "最终读数、轮廓曲线与结果界面", True),
+        ("ROUGH_PARAMETERS", "设备参数与软件数据界面", True),
     ],
     "金属-陶瓷结合裂纹萌生试验": [
-        ("SPAN_FIXTURE", "三点弯曲夹具和跨距", True),
-        ("K_FACTOR", "K系数取值依据", True),
+        ("SAMPLE_BEFORE", "实验前试样及标签", True),
+        ("SPAN_FIXTURE", "金瓷结合试验夹具和跨距", True),
+        ("K_FACTOR", "K值确定依据", True),
         ("FASTTEST_RESULT", "FastTest的Ffail、k和τb结果界面", True),
         ("CRACK", "裂纹萌生或陶瓷剥离状态", True),
     ],
@@ -96,10 +107,7 @@ EXPERIMENT_PHOTO_CHECKPOINTS = {
         ("H2", "切割后H2测量界面", True),
     ],
     "热膨胀系数试验": [
-        ("SPECIMEN_LENGTH", "试样实际长度及软件输入值", True),
-        ("PV_STABLE", "启动前PV值稳定在50～60", True),
-        ("CTE_PROGRAM", "终止温度550℃等升温参数", True),
-        ("CTE_CURVE", "温度-位移曲线及计算结果", True),
+        ("CTE_PARAMETERS", "设备参数或软件数据界面", True),
     ],
     "陶瓷牙耐急冷急热试验": [
         ("OVEN_TEMP", "烘箱100±2℃实测温度", True),
@@ -121,13 +129,14 @@ EXPERIMENT_PHOTO_CHECKPOINTS = {
         ("FRACTURE", "断裂状态", True),
     ],
     "维氏硬度试验": [
-        ("SURFACE", "试样表面状态/粗糙度确认", True),
-        ("HARDNESS_BLOCK", "标准硬度块核查结果", True),
-        ("LOAD_DWELL", "试验力与保持时间参数", True),
-        ("INDENT", "各测试面有效压痕及软件测量结果", True),
+        ("SAMPLE_BEFORE", "实验前样品标签", True),
+        ("HARDNESS_BLOCK", "标准硬度块核查", True),
+        ("INDENT", "最终读数、曲线与结果界面", True),
     ],
     "增材制造金属试样厚度测量": [
-        ("MEASURE_RESULT", "各截面测量图像和实测值", True),
+        ("SAMPLE_BEFORE", "实验前样品及标签", True),
+        ("MEASURE_RESULT", "各截面测量图像与实测值", True),
+        ("FINAL_CURVE", "最终读数、曲线与结果界面", True),
     ],
     "牙科材料色稳定性试验": [
         ("COVER", "试样遮盖方式", True),
@@ -140,27 +149,15 @@ EXPERIMENT_PHOTO_CHECKPOINTS = {
 }
 
 
-# 所有实验统一排除的通用拍照节点
-DEFAULT_PHOTO_EXCLUSIONS = {"ENV", "DEVICE", "SETUP", "RESULT", "SAMPLE_AFTER", "REPORT_PHOTO"}
-
-# 各实验额外排除的专用拍照节点
-PHOTO_EXCLUSIONS: dict[str, set[str]] = {
-    "表面粗糙度试验": {"STYLUS_POSITION"},
-}
-
-# 各实验恢复的通用拍照节点（覆盖 DEFAULT_PHOTO_EXCLUSIONS）
-PHOTO_INCLUSIONS: dict[str, set[str]] = {
-    "增材制造金属试样厚度测量": {"RESULT"},
-}
-
-
 def photo_checkpoints(experiment_name: str):
-    excluded = DEFAULT_PHOTO_EXCLUSIONS | PHOTO_EXCLUSIONS.get(experiment_name, set())
-    included = PHOTO_INCLUSIONS.get(experiment_name, set())
-    common = [cp for cp in COMMON_PHOTO_CHECKPOINTS if cp[0] not in excluded or cp[0] in included]
-    specific = [(code, label, req) for code, label, req in EXPERIMENT_PHOTO_CHECKPOINTS.get(experiment_name, [])
-                if code not in excluded]
-    return common + specific
+    # 粗糙度与热膨胀按最新受控流程使用精简后的专属节点，
+    # 不再叠加温湿度、设备铭牌、装夹、实验后状态等通用照片。
+    if experiment_name in {
+        "表面粗糙度试验", "金属-陶瓷结合裂纹萌生试验",
+        "热膨胀系数试验", "维氏硬度试验", "增材制造金属试样厚度测量",
+    }:
+        return EXPERIMENT_PHOTO_CHECKPOINTS.get(experiment_name, [])
+    return COMMON_PHOTO_CHECKPOINTS + EXPERIMENT_PHOTO_CHECKPOINTS.get(experiment_name, [])
 
 # 与当前受控《检验委托单》保持一致，仅使用已批准的方法选项。
 METHOD_OPTIONS = [
@@ -249,51 +246,51 @@ ROLE_MENUS = {
     "管理员": [
         "首页看板", "单位信息库", "检测项目与方法库", "样品资料库",
         "委托与样品管理", "附件与内部追溯", "一键下载", "单据中心", "报告中心",
-        "客户异议", "报告发放登记", "修改中心", "修改日志", "SOP与模板版本",
+        "客户异议", "报告发放登记", "设备故障处置", "修改中心", "修改日志", "SOP与模板版本",
         "实验配置版本", "设备库", "电子签名", "用户与权限", "审计追踪", "系统初始化",
     ],
     "样品管理员": [
         "首页看板", "单位信息库", "样品资料库", "新建委托与入库",
         "委托与样品管理", "任务包分配", "回库确认",
-        "附件与内部追溯", "一键下载", "单据中心", "报告发放登记", "客户异议",
+        "附件与内部追溯", "一键下载", "单据中心", "报告发放登记", "客户异议", "设备故障处置",
     ],
     "实验员": [
         "首页看板", "我的任务包", "实验记录", "样品归还",
-        "危废处理", "附件与内部追溯", "一键下载", "单据中心", "修改中心", "修改日志",
+        "危废处理", "设备故障处置", "附件与内部追溯", "一键下载", "单据中心", "修改中心", "修改日志",
     ],
     "复核员": [
-        "首页看板", "原始记录复核", "附件与内部追溯",
+        "首页看板", "原始记录复核", "设备故障处置", "附件与内部追溯",
         "一键下载", "单据中心", "修改中心", "修改日志",
     ],
     "质量负责人": [
-        "首页看板", "报告中心", "客户异议", "附件与内部追溯",
+        "首页看板", "报告中心", "客户异议", "设备故障处置", "附件与内部追溯",
         "一键下载", "单据中心", "修改中心", "修改日志",
     ],
 }
 
 ROLE_NAV_GROUPS = {
     "管理员": [
-        ("工作台", ["首页看板", "报告中心", "客户异议", "报告发放登记"]),
+        ("工作台", ["首页看板", "报告中心", "客户异议", "报告发放登记", "设备故障处置"]),
         ("业务与追溯", ["委托与样品管理", "单据中心", "一键下载", "附件与内部追溯", "修改中心", "修改日志"]),
         ("基础配置", ["单位信息库", "检测项目与方法库", "样品资料库", "SOP与模板版本", "实验配置版本", "设备库"]),
         ("系统管理", ["电子签名", "用户与权限", "审计追踪", "系统初始化"]),
     ],
     "样品管理员": [
         ("工作台", ["首页看板", "新建委托与入库", "任务包分配", "回库确认"]),
-        ("业务处理", ["委托与样品管理", "报告发放登记", "客户异议"]),
+        ("业务处理", ["委托与样品管理", "报告发放登记", "客户异议", "设备故障处置"]),
         ("资料与追溯", ["单位信息库", "样品资料库", "附件与内部追溯", "一键下载", "单据中心"]),
     ],
     "实验员": [
         ("工作台", ["首页看板", "我的任务包", "实验记录", "样品归还"]),
-        ("业务处理", ["危废处理", "修改中心"]),
+        ("业务处理", ["危废处理", "设备故障处置", "修改中心"]),
         ("资料与追溯", ["附件与内部追溯", "一键下载", "单据中心", "修改日志"]),
     ],
     "复核员": [
-        ("工作台", ["首页看板", "原始记录复核", "修改中心"]),
+        ("工作台", ["首页看板", "原始记录复核", "设备故障处置", "修改中心"]),
         ("资料与追溯", ["附件与内部追溯", "一键下载", "单据中心", "修改日志"]),
     ],
     "质量负责人": [
-        ("工作台", ["首页看板", "报告中心", "客户异议"]),
+        ("工作台", ["首页看板", "报告中心", "客户异议", "设备故障处置"]),
         ("资料与追溯", ["附件与内部追溯", "一键下载", "单据中心", "修改中心", "修改日志"]),
     ],
 }
@@ -306,5 +303,5 @@ NAV_ICONS = {
     "电子签名": "✒", "用户与权限": "♙", "审计追踪": "◎", "系统初始化": "↻",
     "新建委托与入库": "＋", "任务包分配": "⇢", "回库确认": "✓",
     "我的任务包": "▥", "实验记录": "⌗", "样品归还": "↩", "危废处理": "△",
-    "原始记录复核": "◉",
+    "原始记录复核": "◉", "设备故障处置": "⚠",
 }

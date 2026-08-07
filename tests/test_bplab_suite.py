@@ -91,10 +91,10 @@ class BlackBoxAuthTest(unittest.TestCase):
 
     def test_login_disabled_user(self):
         """禁用用户不能登录"""
-        add_user("temp_disabled", "临时禁用", "pass123", "实验员")
+        add_user("temp_disabled", "临时禁用", "pass1234", "实验员")
         with connect() as c:
             c.execute("UPDATE users SET enabled=0 WHERE username=?", ("temp_disabled",))
-        u = authenticate("temp_disabled", "pass123")
+        u = authenticate("temp_disabled", "pass1234")
         self.assertIsNone(u)
 
     def test_session_create_and_restore(self):
@@ -112,8 +112,8 @@ class BlackBoxAuthTest(unittest.TestCase):
         # 直接插入过期 session
         with connect() as c:
             c.execute(
-                "INSERT INTO sessions VALUES(?,?,?,?)",
-                ("expired_token_test", "admin", "2020-01-01T00:00:00", "2020-01-01T00:00:00"),
+                "INSERT INTO sessions(token,username,expires_at,created_at,last_activity_at) VALUES(?,?,?,?,?)",
+                ("expired_token_test", "admin", "2020-01-01T00:00:00", "2020-01-01T00:00:00", "2020-01-01T00:00:00"),
             )
         self.assertIsNone(session_user("expired_token_test"))
 

@@ -16,6 +16,6 @@ font = "sans serif"
 toolbarMode = "viewer"
 
 [server]
-# Production-oriented defaults
-runOnSave = false
+# Auto-rerun when source files change (no "Source file changed" prompt)
+runOnSave = true
 enableXsrfProtection = true

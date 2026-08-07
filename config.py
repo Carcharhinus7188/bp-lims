@@ -70,10 +70,15 @@ SIGNATURE_DIR = Path(
 # ---------- security ----------
 SECRET_KEY = _env_or_default("BPLAB_SECRET_KEY", "")
 SESSION_MAX_AGE_DAYS = int(_env_or_default("BPLAB_SESSION_MAX_AGE_DAYS", "7"))
+SESSION_INACTIVITY_TIMEOUT_MINUTES = int(_env_or_default("BPLAB_SESSION_INACTIVITY_TIMEOUT", "1440"))
 MAX_LOGIN_ATTEMPTS = int(_env_or_default("BPLAB_MAX_LOGIN_ATTEMPTS", "5"))
+LOGIN_LOCKOUT_MINUTES = int(_env_or_default("BPLAB_LOGIN_LOCKOUT_MINUTES", "15"))
+PASSWORD_MIN_LENGTH = int(_env_or_default("BPLAB_PASSWORD_MIN_LENGTH", "8"))
+PASSWORD_REQUIRE_DIGIT = _env_or_default("BPLAB_PASSWORD_REQUIRE_DIGIT", "true").lower() in ("true", "1", "yes")
+BPLAB_PRODUCTION = _env_or_default("BPLAB_PRODUCTION", "false").lower() in ("true", "1", "yes")
 
 # ---------- demo / seed mode ----------
-DEMO_MODE = _env_or_default("BPLAB_DEMO_MODE", "true").lower() in ("true", "1", "yes")
+DEMO_MODE = _env_or_default("BPLAB_DEMO_MODE", "false").lower() in ("true", "1", "yes")
 
 # Demo users: JSON string like [["admin","管理员","admin123","管理员"], ...]
 # If empty or not set, demo users are skipped.
