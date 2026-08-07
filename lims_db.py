@@ -6,6 +6,12 @@ from zoneinfo import ZoneInfo
 from typing import Any, Iterable
 import base64, calendar, hashlib, json, os, re, secrets, sqlite3
 
+try:
+    import streamlit as st
+    _has_streamlit = True
+except ImportError:
+    _has_streamlit = False
+
 ROOT = Path(__file__).parent
 
 # Load paths from config module (with env-var / secrets override).
@@ -21,6 +27,13 @@ except ImportError:
     SIGNATURE_DIR = ROOT / "data" / "signatures"
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _maybe_cache(func):
+    """Apply st.cache_data when running inside Streamlit, no-op otherwise."""
+    if _has_streamlit:
+        return st.cache_data(ttl=30, show_spinner=False)(func)
+    return func
 
 # Lazily import security logger to avoid circular import at module level
 _security_log: Any | None = None
@@ -739,6 +752,34 @@ CREATE TABLE IF NOT EXISTS equipment_incident_actions(
                notes=excluded.notes,enabled=1,updated_at=excluded.updated_at""",
             (json.dumps(test_experiments, ensure_ascii=False), now(), now()),
         )
+        # ── Performance indexes (non-blocking IF NOT EXISTS) ──
+        _indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_commissions_status ON commissions(status)",
+            "CREATE INDEX IF NOT EXISTS idx_sample_groups_commission ON sample_groups(commission_no)",
+            "CREATE INDEX IF NOT EXISTS idx_samples_group ON samples(group_id)",
+            "CREATE INDEX IF NOT EXISTS idx_requested_tests_group ON requested_tests(group_id)",
+            "CREATE INDEX IF NOT EXISTS idx_task_packages_group ON task_packages(group_id)",
+            "CREATE INDEX IF NOT EXISTS idx_task_packages_assignee ON task_packages(assignee)",
+            "CREATE INDEX IF NOT EXISTS idx_task_packages_status ON task_packages(status)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_package ON tasks(package_no)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_commission ON tasks(commission_no)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",
+            "CREATE INDEX IF NOT EXISTS idx_records_task ON records(task_no)",
+            "CREATE INDEX IF NOT EXISTS idx_records_status ON records(status)",
+            "CREATE INDEX IF NOT EXISTS idx_reviews_record ON reviews(record_no)",
+            "CREATE INDEX IF NOT EXISTS idx_attachments_task ON attachments(task_no)",
+            "CREATE INDEX IF NOT EXISTS idx_attachments_commission ON attachments(commission_no)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type,entity_id)",
+            "CREATE INDEX IF NOT EXISTS idx_reports_commission ON reports(commission_no)",
+            "CREATE INDEX IF NOT EXISTS idx_sample_events_sample ON sample_events(sample_no)",
+            "CREATE INDEX IF NOT EXISTS idx_notifications_recipient ON notifications(recipient)",
+            "CREATE INDEX IF NOT EXISTS idx_objections_report ON objections(report_no)",
+            "CREATE INDEX IF NOT EXISTS idx_equipment_incidents_task ON equipment_incidents(task_no)",
+        ]
+        for _sql in _indexes:
+            c.execute(_sql)
+
         seed_file = ROOT / "sample_catalog_seed.json"
         if seed_file.exists():
             for item in json.loads(seed_file.read_text(encoding="utf-8")):
@@ -916,6 +957,7 @@ def delete_session(token: str) -> None:
         c.execute("DELETE FROM sessions WHERE token=?", (token,))
 
 
+@_maybe_cache
 def list_users() -> list[dict[str, Any]]:
     return rows("SELECT username,display_name,role,enabled,created_at FROM users ORDER BY username")
 
@@ -947,6 +989,7 @@ def reset_user_password(target_username: str, new_password: str, actor: str) -> 
 
 
 # ---------------------- Master data ----------------------
+@_maybe_cache
 def list_organizations(include_disabled: bool = False) -> list[dict[str, Any]]:
     q = "SELECT * FROM organizations"
     if not include_disabled:
@@ -973,6 +1016,7 @@ def add_organization(data: dict[str, Any], actor: str) -> None:
     audit("organization", data["org_name"], actor, "新增单位")
 
 
+@_maybe_cache
 def list_experiment_methods(include_disabled: bool = False) -> list[dict[str, Any]]:
     q = "SELECT * FROM experiment_methods"
     if not include_disabled:
@@ -1031,6 +1075,7 @@ def save_experiment_method(data: dict[str, Any], actor: str) -> None:
     )
 
 
+@_maybe_cache
 def list_catalog(include_disabled: bool = False) -> list[dict[str, Any]]:
     q = "SELECT * FROM sample_catalog"
     if not include_disabled:
@@ -1068,6 +1113,7 @@ def add_catalog(data: dict[str, Any], actor: str) -> None:
         )
     audit("sample_catalog", data["sample_name"], actor, "新增样品资料", new_value="、".join(codes))
 
+@_maybe_cache
 def list_equipment(include_disabled: bool = False) -> list[dict[str, Any]]:
     q = "SELECT * FROM equipment_registry"
     if not include_disabled:
@@ -1119,6 +1165,7 @@ def save_equipment(data: dict[str, Any], actor: str) -> None:
     )
 
 
+@_maybe_cache
 def list_experiment_equipment(experiment: str) -> list[dict[str, Any]]:
     return rows(
         """SELECT b.experiment,b.management_no,b.binding_role,b.required,
@@ -1133,6 +1180,7 @@ def list_experiment_equipment(experiment: str) -> list[dict[str, Any]]:
     )
 
 
+@_maybe_cache
 def list_all_equipment_bindings() -> list[dict[str, Any]]:
     return rows(
         """SELECT b.experiment,b.management_no,b.binding_role,b.required,b.sort_order,
@@ -1349,6 +1397,7 @@ def create_commission(data: dict[str, Any], groups: list[dict[str, Any]], actor:
     audit("commission", commission_no, actor, "新建委托并入库", new_value=len(groups))
     return commission_no
 
+@_maybe_cache
 def list_commissions() -> list[dict[str, Any]]:
     return rows("SELECT * FROM commissions ORDER BY created_at DESC")
 
@@ -1398,6 +1447,7 @@ def void_group(group_id: int, actor: str, reason: str) -> None:
 
 
 # ---------------------- Configurable experiment versions ----------------------
+@_maybe_cache
 def list_experiment_configs(experiment_code: str | None = None) -> list[dict[str, Any]]:
     q = "SELECT * FROM experiment_config_versions"
     args: list[Any] = []
@@ -1874,6 +1924,24 @@ def package(package_no: str) -> dict[str, Any] | None:
 
 def package_tasks(package_no: str) -> list[dict[str, Any]]:
     result = rows("SELECT * FROM tasks WHERE package_no=? ORDER BY task_no", (package_no,))
+    for x in result:
+        x["sample_nos_list"] = json.loads(x.get("sample_nos") or "[]")
+    return result
+
+
+def package_tasks_batch(package_nos: list[str], statuses: list[str] | None = None) -> list[dict[str, Any]]:
+    """Single-query variant: fetch tasks for multiple packages at once, with optional status filter."""
+    if not package_nos:
+        return []
+    placeholders = ",".join("?" for _ in package_nos)
+    if statuses:
+        status_placeholders = ",".join("?" for _ in statuses)
+        sql = f"SELECT * FROM tasks WHERE package_no IN ({placeholders}) AND status IN ({status_placeholders}) ORDER BY task_no"
+        args = (*package_nos, *statuses)
+    else:
+        sql = f"SELECT * FROM tasks WHERE package_no IN ({placeholders}) ORDER BY task_no"
+        args = tuple(package_nos)
+    result = rows(sql, args)
     for x in result:
         x["sample_nos_list"] = json.loads(x.get("sample_nos") or "[]")
     return result
@@ -3089,6 +3157,7 @@ def sample_events(sample_no: str) -> list[dict[str, Any]]:
     return rows("SELECT * FROM sample_events WHERE sample_no=? ORDER BY id", (sample_no,))
 
 
+@_maybe_cache
 def list_samples() -> list[dict[str, Any]]:
     return rows("SELECT * FROM samples ORDER BY updated_at DESC")
 

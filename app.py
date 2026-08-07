@@ -391,7 +391,7 @@ def field_widget(field,value,key_prefix):
     if typ=="checkbox":return st.checkbox(label,value=bool(value),key=key)
     if typ=="date":
         try:v=pd.to_datetime(value).date() if value else china_today()
-        except:v=china_today()
+        except (ValueError,TypeError):v=china_today()
         return str(st.date_input(label,v,key=key))
     if typ=="datetime":
         return st.text_input(label,value=str(value or now()),key=key)
@@ -1058,9 +1058,8 @@ elif page=="我的任务包":
 elif page=="实验记录":
     header("简洁实验流程记录")
     all_packages=list_packages(role,username,["检测中","待复核","退回修改","待归还","待回库确认","已回库"])
-    task_list=[]
-    for p in all_packages:
-        task_list.extend([t for t in package_tasks(p["package_no"]) if t["status"] in ["检测中","退回修改","待复核","更正待复核","已完成"]])
+    package_nos=[p["package_no"] for p in all_packages]
+    task_list=package_tasks_batch(package_nos,["检测中","退回修改","待复核","更正待复核","已完成"]) if package_nos else []
     if not task_list:
         st.info("暂无可填写实验任务")
     else:
