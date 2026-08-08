@@ -772,69 +772,202 @@ if "user" not in st.session_state:
     .stMainBlockContainer {padding:0 !important;max-width:100vw !important}
     .block-container {padding:0 !important;max-width:100% !important}
 
-    /* 左列 — 品牌面板 */
-    .login-brand {min-height:100vh;display:flex;align-items:center;justify-content:center;
-      position:relative;overflow:hidden;
-      background:linear-gradient(155deg,#0A1628 0%,#132842 30%,#1A3A5C 60%,#1E4D7B 100%)}
-    .login-brand::before {content:'';position:absolute;inset:0;
-      background:radial-gradient(ellipse at 25% 35%,rgba(37,99,235,.25) 0%,transparent 60%),
-                 radial-gradient(ellipse at 70% 65%,rgba(14,165,233,.15) 0%,transparent 50%)}
-    .login-brand::after {content:'';position:absolute;inset:0;
-      background-image:url("data:image/svg+xml,%3Csvg width='100' height='100' viewBox='0 0 100 100' xmlns='http://www.w3.org/2000/svg'%3E%3Cdefs%3E%3Cpattern id='h' width='28' height='48' patternUnits='userSpaceOnUse'%3E%3Cpath d='M14 0l14 8v16l-14 8L0 24V8z' fill='none' stroke='%23fff' stroke-opacity='.04' stroke-width='.8'/%3E%3C/pattern%3E%3C/defs%3E%3Crect fill='url(%23h)' width='100' height='100'/%3E%3C/svg%3E");
-      opacity:.6}
-    .login-brand-inner {position:relative;z-index:2;text-align:center;color:#fff;padding:3rem}
-    .login-logo {width:76px;height:76px;margin:0 auto 1.3rem;
-      background:rgba(255,255,255,.1);border:1.5px solid rgba(255,255,255,.22);
-      border-radius:18px;display:flex;align-items:center;justify-content:center;font-size:2rem}
-    .login-brand-inner h1 {font-size:1.7rem;font-weight:800;margin:0 0 .35rem}
-    .login-brand-inner h1 span {color:#93C5FD}
-    .login-brand-inner .company {font-size:.92rem;opacity:.78;margin-bottom:.8rem}
-    .login-brand-inner .tagline {font-size:.75rem;opacity:.5;letter-spacing:.08em;text-transform:uppercase}
+    /* 底色渐变 */
+    .stApp {background:linear-gradient(135deg,#EFF6FF 0%,#DBEAFE 30%,#BFDBFE 60%,#FFFFFF 100%)}
 
-    /* 列布局：全高、水平居中 */
+    /* 列布局全高 */
     [data-testid=stHorizontalBlock] {min-height:100vh}
     [data-testid=stColumn]:first-child {padding:0 !important}
     [data-testid=stColumn]:nth-child(2) {
-      background:#F8FAFC !important;padding:0 !important;
+      padding:0 !important;
       display:flex !important;flex-direction:column !important;
       justify-content:center !important;align-items:center !important}
-    /* 阻止列内 wrapper 撑满高度，否则垂直居中无法生效 */
     [data-testid=stColumn]:nth-child(2) > [data-testid=stVerticalBlock] {
       height:auto !important;flex:0 0 auto !important}
 
-    /* 登录卡片容器 — 在右侧列内垂直居中 */
+    /* ===== 左侧：品牌面板 + 实验室科技插图 ===== */
+    .login-brand {min-height:100vh;display:flex;align-items:center;justify-content:center;
+      position:relative;overflow:hidden;
+      background:radial-gradient(ellipse at 35% 45%,rgba(37,99,235,.06) 0%,transparent 70%),
+                 linear-gradient(160deg,#EFF6FF 0%,#DBEAFE 40%,#BFDBFE 100%)}
+    /* 装饰光斑 */
+    .login-brand::before {content:'';position:absolute;inset:0;
+      background:radial-gradient(circle at 20% 30%,rgba(59,130,246,.12) 0%,transparent 45%),
+                 radial-gradient(circle at 75% 65%,rgba(37,99,235,.08) 0%,transparent 40%),
+                 radial-gradient(circle at 60% 20%,rgba(96,165,250,.06) 0%,transparent 35%);
+      z-index:0}
+    /* 网格纹理 */
+    .login-brand::after {content:'';position:absolute;inset:0;
+      background-image:url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M0 0h60v60H0z' fill='none' stroke='%2393C5FD' stroke-opacity='.08' stroke-width='.5'/%3E%3Ccircle cx='30' cy='30' r='1.5' fill='%233B82F6' fill-opacity='.12'/%3E%3C/svg%3E");
+      z-index:1;opacity:.7}
+    .login-brand-inner {position:relative;z-index:2;text-align:center;padding:3rem 2rem}
+    .login-logo {width:80px;height:80px;margin:0 auto 1.3rem;
+      background:rgba(255,255,255,.85);border:1.5px solid rgba(37,99,235,.15);
+      border-radius:20px;display:flex;align-items:center;justify-content:center;font-size:2.2rem;
+      box-shadow:0 4px 20px rgba(37,99,235,.08)}
+    .login-brand-inner h1 {font-size:1.8rem;font-weight:800;margin:0 0 .35rem;color:#1E3A8A}
+    .login-brand-inner h1 span {color:#2563EB}
+    .login-brand-inner .company {font-size:.92rem;color:#475569;margin-bottom:.6rem;font-weight:500}
+    .login-brand-inner .tagline {font-size:.75rem;color:#94A3B8;letter-spacing:.08em;text-transform:uppercase}
+    /* 插图容器 */
+    .login-illustration {margin-top:1rem;width:88%;max-width:520px}
+
+    /* ===== 右侧：登录卡片（毛玻璃） ===== */
     .st-key-login_card {
-      max-width:380px !important;min-width:320px !important;width:100% !important;
-      background:#FFFFFF;border-radius:14px;padding:2rem 1.8rem;
-      box-shadow:0 2px 20px rgba(15,23,42,.06);border:1px solid #E2E8F0;
+      max-width:400px !important;min-width:320px !important;width:100% !important;
+      background:rgba(255,255,255,.72) !important;
+      backdrop-filter:blur(16px) !important;-webkit-backdrop-filter:blur(16px) !important;
+      border-radius:18px !important;padding:2.4rem 2rem !important;
+      box-shadow:0 4px 32px rgba(30,64,175,.08),0 1px 4px rgba(0,0,0,.04) !important;
+      border:1px solid rgba(255,255,255,.8) !important;
       margin:auto !important}
     .st-key-login_card .stTextInput>div>div>input {
-      font-size:.95rem !important;padding:11px 14px !important;border-radius:10px !important}
+      font-size:.95rem !important;padding:12px 14px 12px 44px !important;
+      border-radius:12px !important;
+      border:1.5px solid #DBEAFE !important;
+      background:rgba(239,246,255,.5) !important;
+      transition:all .2s ease !important}
+    .st-key-login_card .stTextInput>div>div>input:focus {
+      border-color:#2563EB !important;
+      box-shadow:0 0 0 3px rgba(37,99,235,.15) !important}
+    /* 登录按钮 — 蓝色渐变 */
     .st-key-login_card .stButton>button {
-      height:48px;font-size:1rem;font-weight:700;border-radius:10px;margin-top:.3rem}
+      width:100% !important;height:50px !important;
+      font-size:1.05rem !important;font-weight:700 !important;letter-spacing:.06em !important;
+      border:none !important;border-radius:13px !important;
+      background:linear-gradient(135deg,#2563EB 0%,#3B82F6 50%,#60A5FA 100%) !important;
+      color:#fff !important;
+      box-shadow:0 4px 16px rgba(37,99,235,.3) !important;
+      transition:all .25s ease !important;margin-top:.3rem !important}
+    .st-key-login_card .stButton>button:hover {
+      transform:translateY(-2px) !important;
+      box-shadow:0 8px 28px rgba(37,99,235,.4) !important}
+    .st-key-login_card .stButton>button:active {
+      transform:scale(.97) !important}
 
     /* 版权 */
     .login-footer {position:fixed;bottom:0;left:56%;right:0;z-index:2;
       text-align:center;padding:12px;color:#94A3B8;font-size:.74rem;
-      background:#F8FAFC;border-top:1px solid #E2E8F0}
+      background:rgba(248,250,252,.7);backdrop-filter:blur(8px);
+      border-top:1px solid rgba(226,232,240,.5)}
     .demo-toggle {position:fixed;right:20px;bottom:48px;z-index:3}
 
+    /* 响应式 */
     @media(max-width:800px) {
       [data-testid=stHorizontalBlock] {flex-direction:column !important;min-height:auto}
       [data-testid=stColumn] {width:100% !important}
-      .login-brand {min-height:30vh}
+      .login-brand {min-height:32vh}
       .login-brand-inner h1 {font-size:1.3rem}
-      .login-logo {width:56px;height:56px;margin-bottom:1rem;font-size:1.5rem;border-radius:14px}
-      [data-testid=stColumn]:nth-child(2) {min-height:60vh;padding:1.5rem 1.2rem !important}
+      .login-logo {width:56px;height:56px;margin-bottom:.8rem;font-size:1.6rem;border-radius:14px}
+      .login-illustration {display:none}
+      [data-testid=stColumn]:nth-child(2) {min-height:68vh;padding:1.5rem 1.2rem !important}
       .login-footer {position:relative;left:0}
       .demo-toggle {position:relative;right:auto;bottom:auto;text-align:center;padding:1rem}
+    }
+
+    /* 无障碍 */
+    @media(prefers-reduced-motion:reduce) {
+      .st-key-login_card .stButton>button,
+      .st-key-login_card .stTextInput>div>div>input {transition:none !important}
+      .st-key-login_card .stButton>button:hover {transform:none !important}
     }
     </style>
     """, unsafe_allow_html=True)
 
     left, right = st.columns([56, 44])
 
+    # ~~ 左侧：品牌面板 + 实验室科技插图 ~~
     with left:
+        # 实验室主题 SVG 插图
+        lab_svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 420">
+  <defs>
+    <linearGradient id="bgG" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#DBEAFE"/><stop offset="100%" stop-color="#EFF6FF"/></linearGradient>
+    <linearGradient id="blueG" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#2563EB"/><stop offset="100%" stop-color="#3B82F6"/></linearGradient>
+    <linearGradient id="greenG" x1="0" y1="1" x2="1" y2="0"><stop offset="0%" stop-color="#059669"/><stop offset="100%" stop-color="#10B981"/></linearGradient>
+    <linearGradient id="orangeG" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#EA580C"/><stop offset="100%" stop-color="#F97316"/></linearGradient>
+    <filter id="softGlow"><feGaussianBlur stdDeviation="3"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic" opacity=".6"/></feMerge></filter>
+    <filter id="shadow"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1E3A8A" flood-opacity=".08"/></filter>
+  </defs>
+  <!-- 背景 -->
+  <rect width="560" height="420" fill="url(#bgG)" rx="18"/>
+
+  <!-- 显微镜 -->
+  <g transform="translate(145,185)" filter="url(#shadow)">
+    <rect x="12" y="65" width="5" height="55" fill="#64748B" rx="2"/>
+    <rect x="-12" y="100" width="43" height="8" fill="#475569" rx="3"/>
+    <path d="M-10 108 L-18 130 L18 130 L10 108Z" fill="#334155"/>
+    <rect x="-5" y="20" width="39" height="12" fill="#475569" rx="3" transform="rotate(-10,14,26)"/>
+    <circle cx="4" cy="74" r="10" fill="none" stroke="#2563EB" stroke-width="2.5"/>
+    <circle cx="4" cy="74" r="4" fill="#3B82F6" opacity=".5"/>
+    <rect x="24" y="20" width="6" height="55" fill="#475569" rx="2" transform="rotate(-8,27,48)"/>
+    <circle cx="28" cy="18" r="6" fill="url(#blueG)"/>
+    <rect x="0" y="-8" width="10" height="12" fill="#64748B" rx="2"/>
+    <rect x="25" y="-6" width="7" height="10" fill="#64748B" rx="1.5"/>
+  </g>
+
+  <!-- 分子结构 (DNA/Molecule) -->
+  <g transform="translate(340,170)" filter="url(#shadow)">
+    <line x1="0" y1="0" x2="40" y2="25" stroke="#3B82F6" stroke-width="2.2" opacity=".7"/>
+    <line x1="40" y1="25" x2="20" y2="55" stroke="#2563EB" stroke-width="2.2" opacity=".7"/>
+    <line x1="20" y1="55" x2="-20" y2="35" stroke="#3B82F6" stroke-width="2.2" opacity=".7"/>
+    <line x1="-20" y1="35" x2="0" y2="0" stroke="#2563EB" stroke-width="2.2" opacity=".7"/>
+    <line x1="40" y1="25" x2="65" y2="10" stroke="#93C5FD" stroke-width="2" opacity=".6"/>
+    <circle cx="0" cy="0" r="9" fill="url(#blueG)" opacity=".85"/>
+    <circle cx="40" cy="25" r="8" fill="url(#greenG)" opacity=".8"/>
+    <circle cx="20" cy="55" r="7" fill="url(#orangeG)" opacity=".75"/>
+    <circle cx="-20" cy="35" r="8" fill="#3B82F6" opacity=".7"/>
+    <circle cx="65" cy="10" r="6" fill="#60A5FA" opacity=".55"/>
+    <text x="0" y="3" font-family="monospace" font-size="9" fill="#fff" text-anchor="middle" font-weight="700">C</text>
+    <text x="40" y="28" font-family="monospace" font-size="8" fill="#fff" text-anchor="middle" font-weight="700">O</text>
+    <text x="-20" y="38" font-family="monospace" font-size="8" fill="#fff" text-anchor="middle" font-weight="700">H</text>
+  </g>
+
+  <!-- 试管架 -->
+  <g transform="translate(380,290)" filter="url(#shadow)">
+    <rect x="-8" y="0" width="66" height="8" fill="#CBD5E1" rx="3"/>
+    <rect x="-12" y="5" width="74" height="5" fill="#94A3B8" rx="2"/>
+    <!-- 试管 1 (蓝色) -->
+    <rect x="2" y="-55" width="10" height="50" fill="url(#blueG)" opacity=".7" rx="4"/>
+    <rect x="1" y="-58" width="12" height="8" fill="#BFDBFE" rx="3"/>
+    <!-- 试管 2 (绿色) -->
+    <rect x="20" y="-48" width="10" height="43" fill="url(#greenG)" opacity=".65" rx="4"/>
+    <rect x="19" y="-51" width="12" height="8" fill="#A7F3D0" rx="3"/>
+    <!-- 试管 3 (橙色) -->
+    <rect x="38" y="-50" width="10" height="45" fill="url(#orangeG)" opacity=".6" rx="4"/>
+    <rect x="37" y="-53" width="12" height="8" fill="#FED7AA" rx="3"/>
+  </g>
+
+  <!-- 数据图表 -->
+  <g transform="translate(70,290)" filter="url(#shadow)">
+    <rect x="0" y="0" width="85" height="65" fill="#fff" rx="8" stroke="#DBEAFE" stroke-width="1.2"/>
+    <!-- 柱状图 -->
+    <rect x="12" y="42" width="10" height="16" fill="url(#blueG)" opacity=".8" rx="1.5"/>
+    <rect x="28" y="34" width="10" height="24" fill="#3B82F6" opacity=".6" rx="1.5"/>
+    <rect x="44" y="28" width="10" height="30" fill="#60A5FA" opacity=".55" rx="1.5"/>
+    <rect x="60" y="38" width="10" height="20" fill="#93C5FD" opacity=".5" rx="1.5"/>
+    <!-- 趋势线 -->
+    <polyline points="16,20 32,30 48,14 64,22" fill="none" stroke="#2563EB" stroke-width="1.8" opacity=".7"/>
+    <circle cx="16" cy="20" r="2.5" fill="#2563EB"/>
+    <circle cx="32" cy="30" r="2.5" fill="#2563EB"/>
+    <circle cx="48" cy="14" r="2.5" fill="#2563EB"/>
+    <circle cx="64" cy="22" r="2.5" fill="#2563EB"/>
+  </g>
+
+  <!-- 悬浮数据标签 -->
+  <g opacity=".55">
+    <rect x="50" y="160" width="100" height="36" rx="8" fill="#fff" stroke="#93C5FD" stroke-width=".8"/>
+    <text x="100" y="176" font-family="monospace" font-size="9" fill="#1E40AF" text-anchor="middle" font-weight="700">🔬 检测批次</text>
+    <text x="100" y="190" font-family="monospace" font-size="12" fill="#2563EB" text-anchor="middle" font-weight="800">128 批次</text>
+  </g>
+  <g opacity=".5">
+    <rect x="270" y="100" width="105" height="38" rx="8" fill="#fff" stroke="#93C5FD" stroke-width=".8"/>
+    <text x="322" y="116" font-family="monospace" font-size="9" fill="#1E40AF" text-anchor="middle" font-weight="700">📋 受控记录</text>
+    <text x="322" y="131" font-family="monospace" font-size="12" fill="#059669" text-anchor="middle" font-weight="800">100% 可追溯</text>
+  </g>
+
+  <!-- 左下角——标语 -->
+  <text x="25" y="400" font-family="'Microsoft YaHei',sans-serif" font-size="11" fill="#94A3B8" opacity=".55">精准检测 · 数据溯源 · 质量保证</text>
+</svg>"""
         st.markdown(f"""
         <div class="login-brand">
           <div class="login-brand-inner">
@@ -842,21 +975,23 @@ if "user" not in st.session_state:
             <h1><span>BPLab</span> Trace</h1>
             <div class="company">{COMPANY_CN}</div>
             <div class="tagline">Laboratory Information Management</div>
+            <div class="login-illustration">{lab_svg}</div>
           </div>
         </div>
         """, unsafe_allow_html=True)
 
+    # ~~ 右侧：登录卡片（毛玻璃效果）~~
     with right:
         with st.container(key="login_card"):
             st.markdown(f"""
-            <div style="text-align:center;margin-bottom:1.5rem">
-              <div style="font-size:1.25rem;font-weight:700;color:#0F172A">系统登录</div>
-              <div style="color:#94A3B8;font-size:.76rem;margin-top:4px">{SYSTEM_CN}</div>
+            <div style="text-align:center;margin-bottom:1.8rem">
+              <div style="font-size:1.35rem;font-weight:800;color:#1E3A8A;letter-spacing:.02em">系统登录</div>
+              <div style="color:#64748B;font-size:.76rem;margin-top:5px">{SYSTEM_CN}</div>
             </div>
             """, unsafe_allow_html=True)
 
-            username = st.text_input("用户名", key="login_username", placeholder="请输入用户名")
-            password = st.text_input("密码", type="password", key="login_password", placeholder="请输入密码")
+            username = st.text_input("用户名", key="login_username", placeholder="👤 请输入用户名", label_visibility="collapsed")
+            password = st.text_input("密码", type="password", key="login_password", placeholder="🔒 请输入密码", label_visibility="collapsed")
             if st.button("登　录", type="primary", use_container_width=True, key="login_button"):
                 u = authenticate(username, password)
                 if u:
