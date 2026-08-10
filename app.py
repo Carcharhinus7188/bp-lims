@@ -1246,7 +1246,7 @@ elif page=="实验记录":
         if secondary_edit:
             st.info("二次编辑采用字段级锁定：只有复核员指定退回的字段可修改，其余数据仅供查看。")
         tabs=st.tabs([
-            "①任务确认","②设备与实验前检查","③环境与参数","④原始数据",
+            "①任务确认","②设备与实验前检查","③原始数据","④环境与参数",
             "⑤母版过程确认","⑥异常与设备文件","⑦保存提交",
         ])
         if version>1:
@@ -1264,13 +1264,13 @@ elif page=="实验记录":
             elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
             _persist_draft()
         with tabs[2]:
-            business["parameters"],business["fixed_parameter_mode"]=render_parameters(kind,business,key_prefix,step3_labels)
-            if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[2],username,user["display_name"],key_prefix,"环境与参数照片")
+            business["rows"]=render_sample_data(kind,business,key_prefix,step3_labels)
+            if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[2],username,user["display_name"],key_prefix,"原始数据照片")
             elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
             _persist_draft()
         with tabs[3]:
-            business["rows"]=render_sample_data(kind,business,key_prefix,step4_labels)
-            if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[3],username,user["display_name"],key_prefix,"检测数据与结果照片")
+            business["parameters"],business["fixed_parameter_mode"]=render_parameters(kind,business,key_prefix,step4_labels)
+            if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[3],username,user["display_name"],key_prefix,"环境与参数照片")
             elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
             _persist_draft()
         with tabs[4]:

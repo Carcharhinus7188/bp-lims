@@ -224,7 +224,7 @@ EXPERIMENTS = {
         "key": "I009", "category": "增材制造检测",
         "std": "YY/T 1702-2020",
         "method": "YY/T 1702", "kind": "thickness",
-        "template": "RECORD_R013_THICKNESS.docx", "sop": "SOP_R013_THICKNESS.docx",
+        "template": "R013_增材制造金属试样厚度测量_CMA原始记录表.docx", "sop": "SOP_R013_THICKNESS.docx",
     },
     "牙科材料色稳定性试验": {
         "key": "I010", "category": "物理性能检测",
