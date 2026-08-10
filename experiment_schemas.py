@@ -406,9 +406,9 @@ SCHEMAS = {
         ],
         "columns": [
             ("sample_no", "试样编号", "text"), ("control_no", "对照试样编号", "text"),
-            ("shape", "试样形状", "select:圆片|牙形|其他"), ("size", "试样尺寸", "text"),
+            ("shape", "试样形状", "select:圆片|牙形|其他"),
             ("cover_method", "遮盖方式", "select:试样夹|锡箔|铝箔"), ("cover_direction", "遮盖区域/方向", "text"),
-            ("cover_secure", "遮盖是否牢固", "select:是|否"), ("position", "摆放位置", "text"),
+            ("cover_secure", "遮盖是否牢固", "select:是|否"),
             ("photo_no", "照射前/后照片编号", "text"),
             ("observer1", "观察者1结果", "select:未见明显差异|轻微差异|明显差异|无法判定"),
             ("observer2", "观察者2结果", "select:未见明显差异|轻微差异|明显差异|无法判定"),
