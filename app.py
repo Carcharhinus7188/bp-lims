@@ -436,8 +436,17 @@ def render_inline_camera(
 ):
     required_count = sum(1 for _, _, r in checkpoints if r)
     optional_count = sum(1 for _, _, r in checkpoints if not r)
+
+    # 先收集全部节点状态，用于进度条和排序
+    all_status = camera_checkpoint_status(task_row["task_no"], checkpoints)
+    status_map = {s["checkpoint_code"]: s for s in all_status}
+    required_done = sum(1 for s in all_status if s["required"] and s["complete"])
+    required_total = max(required_count, 1)
+
     st.markdown(f"#### 📷 {title}")
     if required_count:
+        pct = required_done / required_total
+        st.progress(pct, text=f"CMA必拍进度：{required_done}/{required_total} 已完成")
         st.caption(
             f"本实验CMA要求：**{required_count}** 项必拍、**{optional_count}** 项可选。"
             f"必拍节点直接参与数据计算或SOP明确规定；可选节点用于异常追溯时补充证据。"
@@ -449,13 +458,24 @@ def render_inline_camera(
             f"默认启动后置摄像头，照片加盖时间戳并按任务编号归档。"
             f"CMA原则：照片不直接参与数据计算时，不作强制性要求；异常、偏离、仲裁需要时再补充留存。"
         )
-    for checkpoint_code, checkpoint_label, required in checkpoints:
-        status = camera_checkpoint_status(task_row["task_no"], [(checkpoint_code, checkpoint_label, required)])[0]
+
+    # 排序：必拍未完成 → 必拍已完成 → 可选未完成 → 可选已完成
+    def _sort_key(c):
+        code, label, req = c
+        s = status_map.get(code, {})
+        done = s.get("complete", False)
+        # 必拍未完成=0, 必拍已完成=1, 可选未完成=2, 可选已完成=3
+        return (0 if req and not done else 1 if req and done else 2 if not req and not done else 3)
+
+    sorted_checkpoints = sorted(checkpoints, key=_sort_key)
+
+    for checkpoint_code, checkpoint_label, required in sorted_checkpoints:
+        status = status_map.get(checkpoint_code, {})
         if required:
-            marker = "✅ 已留档" if status["complete"] else "🔴 必拍（CMA强制）"
+            marker = "✅ 已留档" if status.get("complete") else "🔴 必拍（CMA强制）"
         else:
-            marker = "✅ 已留档" if status["complete"] else "可选（异常/偏离时补拍）"
-        with st.expander(f"{checkpoint_label}｜{marker}", expanded=required and not status["complete"]):
+            marker = "✅ 已留档" if status.get("complete") else "可选（异常/偏离时补拍）"
+        with st.expander(f"{checkpoint_label}｜{marker}", expanded=required and not status.get("complete")):
             archived=[
                 item for item in list_attachments(task_no=task_row["task_no"])
                 if item.get("capture_source")=="live_camera"
@@ -475,6 +495,12 @@ def render_inline_camera(
                                         f"{item.get('server_captured_at') or item.get('captured_at','')}",
                                 use_container_width=True,
                             )
+            hint = CAMERA_HINTS.get(checkpoint_code, "")
+            if hint:
+                if required and not status.get("complete"):
+                    st.info(f"📸 拍摄提示：{hint}")
+                else:
+                    st.caption(f"📸 拍摄提示：{hint}")
             if checkpoint_code in SAMPLE_LEVEL_PHOTO_CODES:
                 expected_count = len(sample_ids or [])
                 st.caption(f"样品级节点，共需覆盖 **{expected_count}** 个实体样品")
@@ -482,14 +508,10 @@ def render_inline_camera(
                     st.warning(f"仍需拍摄（**{len(status['missing_samples'])}**/{expected_count}）："+"、".join(status["missing_samples"]))
                 else:
                     st.success(f"本节点所有 **{expected_count}** 个实体样品均已有有效照片。")
-                # While a checkpoint is incomplete, only offer samples that
-                # still need evidence. Including the photo count in the widget
-                # key resets the selector after each successful capture, so
-                # the next missing sample becomes the automatic default.
                 sample_options = status.get("missing_samples") or sample_ids
                 sample_no = st.selectbox(
                     "本次拍摄的实体样品", sample_options,
-                    key=f"{key_prefix}_{checkpoint_code}_sample_{status['photo_count']}",
+                    key=f"{key_prefix}_{checkpoint_code}_sample_{status.get('photo_count',0)}",
                 )
             else:
                 sample_no = ""
@@ -1239,21 +1261,6 @@ elif page=="实验记录":
             business["parameters"]["end_time"]=str(end_at).replace("T"," ") if end_at else ""
             if start_at:business["parameters"]["test_date"]=str(start_at)[:10]
         all_checkpoints=photo_checkpoints(t["experiment"])
-        checkpoint_groups=[all_checkpoints[index::4] for index in range(4)]
-        if kind=="mc_crack":
-            checkpoint_groups=[
-                [x for x in all_checkpoints if x[0]=="SAMPLE_BEFORE"],
-                [x for x in all_checkpoints if x[0]=="SPAN_FIXTURE"],
-                [],
-                [x for x in all_checkpoints if x[0] in {"K_FACTOR","FASTTEST_RESULT","CRACK"}],
-            ]
-        elif kind=="thickness":
-            checkpoint_groups=[
-                [x for x in all_checkpoints if x[0]=="SAMPLE_BEFORE"],
-                [],
-                [],
-                [x for x in all_checkpoints if x[0] in {"MEASURE_RESULT","FINAL_CURVE"}],
-            ]
         secondary_edit=bool(version>1 and latest and latest.get("status")!="已锁定")
         step1_labels=returned_step_labels(correction_fields,"①") if secondary_edit else None
         step2_labels=returned_step_labels(correction_fields,"②") if secondary_edit else None
@@ -1285,7 +1292,7 @@ elif page=="实验记录":
             _persist_draft()
         with tabs[3]:
             business["rows"]=render_sample_data(kind,business,key_prefix,step4_labels)
-            if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[2],username,user["display_name"],key_prefix,"原始数据照片")
+            if photo_edit_allowed:render_inline_camera(t,sample_ids,all_checkpoints,username,user["display_name"],key_prefix,"原始数据照片")
             elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
             _persist_draft()
         with tabs[4]:
@@ -1313,7 +1320,17 @@ elif page=="实验记录":
         with tabs[5]:
             business=render_exception_and_summary(kind,business,key_prefix,step6_labels)
             photo_rows=camera_checkpoint_status(tn,all_checkpoints)
-            show_df(photo_rows,["checkpoint_label","required","complete","photo_count","captured_at"])
+            if photo_rows:
+                display_rows=[]
+                for r in photo_rows:
+                    display_rows.append({
+                        "拍照节点": r["checkpoint_label"],
+                        "CMA要求": "🔴 必拍" if r["required"] else "可选",
+                        "状态": "✅ 已留档" if r["complete"] else ("⚠ 未完成" if r["required"] else "—"),
+                        "已拍张数": r["photo_count"],
+                        "最后拍摄时间": (r["captured_at"] or "").replace("T"," ")[:19] if r.get("captured_at") else "",
+                    })
+                st.dataframe(pd.DataFrame(display_rows),hide_index=True,use_container_width=True)
             incomplete=[x for x in photo_rows if x["required"] and not x["complete"]]
             if incomplete:
                 st.warning(f"CMA强制拍照节点未完成：{'、'.join(x['checkpoint_label'] for x in incomplete)}（共 {len(incomplete)} 项），请回到第④步原始数据拍摄。")

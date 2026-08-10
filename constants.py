@@ -63,39 +63,95 @@ COMMON_PHOTO_CHECKPOINTS = [
 # 只有这些节点确实描述单件样品状态，才允许关联实体样品。
 # 温湿度表、设备铭牌、软件参数、夹具和结果界面均按整个实验任务留档一次。
 SAMPLE_LEVEL_PHOTO_CODES = {
-    "SAMPLE_BEFORE", "SAMPLE_AFTER", "DAMAGE", "CRACK", "FRACTURE",
-    "INDENT", "MEASURE_RESULT", "FINAL_CURVE", "OBSERVER_RESULT", "PROFILE", "H1", "H2", "ROI",
-    "ROUGH_PARAMETERS", "CTE_PARAMETERS",
+    "SAMPLE_BEFORE", "SAMPLE_AFTER", "DAMAGE",
+    "BEND_REPORT",
+    "MC_K_VALUE", "MC_REPORT",
+    "MEASURE_RESULT", "FINAL_CURVE", "OBSERVER_RESULT", "H1_BASELINE", "H2_BASELINE", "ROI",
+    "HV_REPORT_1", "HV_REPORT_2",
+    "ROUGH_POINT_1", "ROUGH_POINT_2", "ROUGH_POINT_3", "CTE_PARAMETERS", "COLOR_BEFORE", "COLOR_AFTER", "SHOCK_BEFORE", "SHOCK_AFTER",
+    "FIXED_DIST_1", "FIXED_DIST_2", "FIXED_DIST_3",
+    "MID_DIST_1", "MID_DIST_2", "MID_DIST_3",
+    "FREE_END_1", "FREE_END_2", "FREE_END_3", "THICK_REPORT",
 }
 
 # 确定报告结论时真正使用的结果证据。报告生成器按此顺序选图，
 # REPORT_PHOTO 只作为人工补充，不再是报告照片的唯一来源。
 REPORT_DECISIVE_PHOTO_CODES = {
-    "表面粗糙度试验": ["PROFILE"],
-    "金属-陶瓷结合裂纹萌生试验": ["FASTTEST_RESULT", "CRACK"],
+    "表面粗糙度试验": ["ROUGH_POINT_1", "ROUGH_CURVE_RESULT"],
+    "金属-陶瓷结合裂纹萌生试验": ["MC_K_VALUE", "MC_REPORT"],
     "金属内部质量X射线灰度分析": ["RADIOGRAPH", "ROI"],
-    "翘曲变形试验": ["H1", "H2"],
-    "热膨胀系数试验": ["CTE_PARAMETERS"],
+    "翘曲变形试验": ["H1_BASELINE", "H2_BASELINE", "WARP_REPORT_1"],
+    "热膨胀系数试验": ["CTE_PARAM_SET", "CTE_REPORT"],
     "陶瓷牙耐急冷急热试验": ["DAMAGE"],
-    "弯曲性能试验": ["FORCE_CURVE", "FRACTURE"],
-    "维氏硬度试验": ["INDENT"],
-    "增材制造金属试样厚度测量": ["FINAL_CURVE", "MEASURE_RESULT"],
-    "牙科材料色稳定性试验": ["D65_COMPARE", "OBSERVER_RESULT"],
+    "弯曲性能试验": ["BEND_REPORT"],
+    "维氏硬度试验": ["HV_REPORT_1"],
+    "增材制造金属试样厚度测量": ["FIXED_DIST_1", "MID_DIST_1", "FREE_END_1", "THICK_REPORT"],
+    "牙科材料色稳定性试验": ["COLOR_BEFORE", "COLOR_AFTER"],
+}
+
+# 拍摄提示词：指导实验员如何正确拍摄每个节点。
+# 未列出节点使用 checkpoint_label 作为默认说明。
+CAMERA_HINTS = {
+    # ── 翘曲变形试验 ──
+    "H1_BASELINE": "直尺/卡尺对齐基准线，拍摄切割前基准线到自由端中点的距离读数，确保刻度清晰可读、无眩光。",
+    "H2_BASELINE": "直尺/卡尺对齐基准线，拍摄切割后基准线到自由端中点的距离读数，确保刻度清晰可读、无眩光。",
+    "WARP_REPORT_1": "拍摄翘曲变形试验报告第1页，包含样品信息、H1/H2原始读数记录，确保文字和数据清晰。",
+    "WARP_REPORT_2": "拍摄试验报告第2页（续），包含翘曲变形量计算结果和判定结论。",
+    "WARP_REPORT_3": "拍摄试验报告第3页（续），包含备注、签字栏等剩余内容。",
+
+    # ── 表面粗糙度试验 ──
+    "ROUGH_POINT_1": "将粗糙度仪探头对准试样表面第①测量点，拍摄探头接触位置及周围区域，确保测量点标记在视野内。",
+    "ROUGH_POINT_2": "将粗糙度仪探头对准试样表面第②测量点，拍摄方法同第①点，各测量点间距按SOP均匀分布。",
+    "ROUGH_POINT_3": "将粗糙度仪探头对准试样表面第③测量点，拍摄方法同第①点。",
+    "ROUGH_CURVE_RESULT": "拍摄设备屏幕完整界面，同一画面内同时包含：轮廓曲线、Ra/Rz计算参数设置和最终测量结果读数。",
+
+    # ── 维氏硬度试验 ──
+    "HV_LOAD_TIME": "拍摄硬度计载荷设定界面或显示屏，同时清晰显示试验力值（如HV10）和保荷时间（如15s）。",
+    "HV_REPORT_1": "拍摄硬度报告第1页，包含样品信息、试验参数（载荷/保荷时间）、各测量点压痕对角线读数。",
+    "HV_REPORT_2": "拍摄硬度报告第2页（续），包含硬度值计算结果、平均值及判定结论。",
+
+    # ── 金属-陶瓷结合裂纹萌生试验 ──
+    "MC_K_VALUE": "拍摄FastTest软件界面或计算表格，清晰显示该试样的K值（τb）计算结果及对应的Ffail值。",
+    "MC_REPORT": "拍摄最后一个试样的完整试验报告，包含全部试样K值汇总、判定依据和结论。",
+
+    # ── 弯曲性能试验 ──
+    "BEND_REPORT": "拍摄最后一个试样的完整试验报告，包含力-位移曲线、Fmax值、弯曲强度计算结果及判定结论。",
+
+    # ── 热膨胀系数试验 ──
+    "CTE_PARAM_SET": "拍摄热膨胀仪屏幕完整界面，包含升温速率、温度范围、样品长度、气氛等全部参数设定。",
+    "CTE_REPORT": "拍摄热膨胀仪生成的完整试验报告界面，包含热膨胀系数-温度曲线和计算结果数据表格。",
+
+    # ── 陶瓷牙耐急冷急热试验 ──
+    "SHOCK_BEFORE": "将全部试样编号面朝上摆放整齐，拍摄试样正面清晰全貌，背景为深色以突出陶瓷表面细节。",
+    "SHOCK_AFTER": "将试验后试样按试验前相同排列方式摆放，拍摄全部试样，便于前后对比裂纹、崩瓷等变化。",
+
+    # ── 增材制造金属试样厚度测量 ──
+    "FIXED_DIST_1": "将测厚仪对准固定端第①测量位置，拍摄测厚仪读数界面及测量位置，试样编号和刻度清晰可见。",
+    "FIXED_DIST_2": "将测厚仪对准固定端第②测量位置（沿宽度方向偏移约1/3），拍摄方法同上。",
+    "FIXED_DIST_3": "将测厚仪对准固定端第③测量位置（再偏移约1/3），拍摄方法同上。",
+    "MID_DIST_1": "将测厚仪对准中间段第①测量位置，拍摄测厚仪读数界面及测量位置。",
+    "MID_DIST_2": "将测厚仪对准中间段第②测量位置（沿宽度方向偏移），拍摄方法同上。",
+    "MID_DIST_3": "将测厚仪对准中间段第③测量位置（再偏移），拍摄方法同上。",
+    "FREE_END_1": "将测厚仪对准自由端第①测量位置，拍摄测厚仪读数界面及测量位置。",
+    "FREE_END_2": "将测厚仪对准自由端第②测量位置（沿宽度方向偏移约1/3），拍摄方法同上。",
+    "FREE_END_3": "将测厚仪对准自由端第③测量位置（再偏移约1/3），拍摄方法同上。",
+    "THICK_REPORT": "拍摄厚度测量完整报告，包含9个测量点原始读数、平均值计算及判定结论。",
+
+    # ── 牙科材料色稳定性试验（抗灰暗）──
+    "COLOR_BEFORE": "将试样置于D65标准光源下，拍摄试样正面全貌，试样编号清晰可见，背景为中性灰色。",
+    "COLOR_AFTER": "将试验后试样取出擦干，置于D65标准光源下，与试验前相同角度拍摄，确保前后可比对。",
 }
 
 EXPERIMENT_PHOTO_CHECKPOINTS = {
     "表面粗糙度试验": [
-        ("REFERENCE_CHECK", "标准样块核查读数", False),
-        ("SAMPLE_BEFORE", "实验前样品标签", False),
-        ("PROFILE", "最终读数、轮廓曲线与结果界面", False),
-        ("ROUGH_PARAMETERS", "设备参数与软件数据界面", False),
+        ("ROUGH_POINT_1", "测量点①拍照", True),
+        ("ROUGH_POINT_2", "测量点②拍照", True),
+        ("ROUGH_POINT_3", "测量点③拍照", True),
+        ("ROUGH_CURVE_RESULT", "测量曲线、计算设置与结果界面", True),
     ],
     "金属-陶瓷结合裂纹萌生试验": [
-        ("SAMPLE_BEFORE", "实验前试样及标签", False),
-        ("SPAN_FIXTURE", "金瓷结合试验夹具和跨距", False),
-        ("K_FACTOR", "K值确定依据", False),
-        ("FASTTEST_RESULT", "FastTest的Ffail、k和τb结果界面", False),
-        ("CRACK", "裂纹萌生或陶瓷剥离状态", False),
+        ("MC_K_VALUE", "试样K值拍照", True),
+        ("MC_REPORT", "报告拍照", True),
     ],
     "金属内部质量X射线灰度分析": [
         ("IQI_POSITION", "样品与孔形像质计摆放", False),
@@ -104,14 +160,19 @@ EXPERIMENT_PHOTO_CHECKPOINTS = {
         ("ROI", "ROI位置及灰度值", True),
     ],
     "翘曲变形试验": [
-        ("H1", "切割前H1测量界面", False),
-        ("CUTTING", "切割装夹和切割后状态", False),
-        ("H2", "切割后H2测量界面", False),
+        ("H1_BASELINE", "切割前基准线到自由端中点距离", True),
+        ("H2_BASELINE", "切割后基准线到自由端中点距离", True),
+        ("WARP_REPORT_1", "试验报告拍照①", True),
+        ("WARP_REPORT_2", "试验报告拍照②", True),
+        ("WARP_REPORT_3", "试验报告拍照③", True),
     ],
     "热膨胀系数试验": [
-        ("CTE_PARAMETERS", "设备参数或软件数据界面", False),
+        ("CTE_PARAM_SET", "试验参数设定拍照", True),
+        ("CTE_REPORT", "样品试验报告拍照", True),
     ],
     "陶瓷牙耐急冷急热试验": [
+        ("SHOCK_BEFORE", "试验前试样拍照", True),
+        ("SHOCK_AFTER", "试验后试样拍照", True),
         ("OVEN_TEMP", "烘箱100±2℃实测温度", False),
         ("ICE_TEMP_START", "试验前冰水1±1℃温度", False),
         ("ICE_TEMP_PROCESS", "试验中每15分钟冰水复测读数", False),
@@ -123,30 +184,28 @@ EXPERIMENT_PHOTO_CHECKPOINTS = {
         ("DAMAGE", "逐颗裂纹、崩瓷或破损检查结果", False),
     ],
     "弯曲性能试验": [
-        ("SENSOR_FACTOR", "传感器校准系数和主机参数", False),
-        ("SPAN_FIXTURE", "夹具跨距和试样装夹", False),
-        ("DEFLECTOMETER", "挠度计接触与测量状态", False),
-        ("ZERO_FORCE", "清零后力值", False),
-        ("FORCE_CURVE", "力-位移曲线及Fmax", False),
-        ("FRACTURE", "断裂状态", False),
+        ("BEND_REPORT", "报告拍照", True),
     ],
     "维氏硬度试验": [
-        ("SAMPLE_BEFORE", "实验前样品标签", False),
-        ("HARDNESS_BLOCK", "标准硬度块核查", False),
-        ("INDENT", "最终读数、曲线与结果界面", True),
+        ("HV_LOAD_TIME", "载荷和保荷时间", True),
+        ("HV_REPORT_1", "报告拍照①", True),
+        ("HV_REPORT_2", "报告拍照②", True),
     ],
     "增材制造金属试样厚度测量": [
-        ("SAMPLE_BEFORE", "实验前样品及标签", False),
-        ("MEASURE_RESULT", "各截面测量图像与实测值", False),
-        ("FINAL_CURVE", "最终读数、曲线与结果界面", False),
+        ("FIXED_DIST_1", "固定端距离拍照①", True),
+        ("FIXED_DIST_2", "固定端距离拍照②", True),
+        ("FIXED_DIST_3", "固定端距离拍照③", True),
+        ("MID_DIST_1", "中间距离拍照①", True),
+        ("MID_DIST_2", "中间距离拍照②", True),
+        ("MID_DIST_3", "中间距离拍照③", True),
+        ("FREE_END_1", "自由端拍照①", True),
+        ("FREE_END_2", "自由端拍照②", True),
+        ("FREE_END_3", "自由端拍照③", True),
+        ("THICK_REPORT", "报告拍照", True),
     ],
     "牙科材料色稳定性试验": [
-        ("COVER", "试样遮盖方式", False),
-        ("WATER_LEVEL", "试样安装和水位", False),
-        ("START_DISPLAY", "开始时温度、照度和时间", False),
-        ("END_DISPLAY", "结束时温度、照度和时间", False),
-        ("D65_COMPARE", "D65环境下色泽比较状态", False),
-        ("OBSERVER_RESULT", "三名观察者独立比较结果", False),
+        ("COLOR_BEFORE", "试验前试样拍照", True),
+        ("COLOR_AFTER", "试验后试样拍照", True),
     ],
 }
 
@@ -157,6 +216,7 @@ def photo_checkpoints(experiment_name: str):
     if experiment_name in {
         "表面粗糙度试验", "金属-陶瓷结合裂纹萌生试验",
         "热膨胀系数试验", "维氏硬度试验", "增材制造金属试样厚度测量",
+        "弯曲性能试验",
     }:
         return EXPERIMENT_PHOTO_CHECKPOINTS.get(experiment_name, [])
     return COMMON_PHOTO_CHECKPOINTS + EXPERIMENT_PHOTO_CHECKPOINTS.get(experiment_name, [])
