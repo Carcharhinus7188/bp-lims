@@ -434,11 +434,27 @@ def render_experiment_timeline(task_row, actor, key_prefix):
 def render_inline_camera(
     task_row, sample_ids, checkpoints, actor, actor_name, key_prefix, title,
 ):
+    required_count = sum(1 for _, _, r in checkpoints if r)
+    optional_count = sum(1 for _, _, r in checkpoints if not r)
     st.markdown(f"#### 📷 {title}")
-    st.caption("拍照是本实验步骤的一部分；默认启动后置摄像头，可在取景区切换前/后摄。照片由服务器加盖时间戳并按实验任务编号归档。")
+    if required_count:
+        st.caption(
+            f"本实验CMA要求：**{required_count}** 项必拍、**{optional_count}** 项可选。"
+            f"必拍节点直接参与数据计算或SOP明确规定；可选节点用于异常追溯时补充证据。"
+            f"默认启动后置摄像头，照片加盖时间戳并按任务编号归档。"
+        )
+    else:
+        st.caption(
+            f"本实验CMA要求：无强制拍照项（**{optional_count}** 项均为可选）。"
+            f"默认启动后置摄像头，照片加盖时间戳并按任务编号归档。"
+            f"CMA原则：照片不直接参与数据计算时，不作强制性要求；异常、偏离、仲裁需要时再补充留存。"
+        )
     for checkpoint_code, checkpoint_label, required in checkpoints:
         status = camera_checkpoint_status(task_row["task_no"], [(checkpoint_code, checkpoint_label, required)])[0]
-        marker = "✅ 已留档" if status["complete"] else ("🔴 必拍" if required else "可选")
+        if required:
+            marker = "✅ 已留档" if status["complete"] else "🔴 必拍（CMA强制）"
+        else:
+            marker = "✅ 已留档" if status["complete"] else "可选（异常/偏离时补拍）"
         with st.expander(f"{checkpoint_label}｜{marker}", expanded=required and not status["complete"]):
             archived=[
                 item for item in list_attachments(task_no=task_row["task_no"])
@@ -447,7 +463,7 @@ def render_inline_camera(
                 and item.get("evidence_status")=="有效"
             ]
             if archived:
-                st.caption("已留档照片会跨草稿和二次编辑版本保留；重新拍摄前不会丢失。")
+                st.caption(f"已留档 **{len(archived)}** 张照片，跨草稿和二次编辑版本保留；重新拍摄前不会丢失。")
                 preview_cols=st.columns(min(3,len(archived)))
                 for photo_index,item in enumerate(archived):
                     path=attachment_file(item)
@@ -460,10 +476,12 @@ def render_inline_camera(
                                 use_container_width=True,
                             )
             if checkpoint_code in SAMPLE_LEVEL_PHOTO_CODES:
+                expected_count = len(sample_ids or [])
+                st.caption(f"样品级节点，共需覆盖 **{expected_count}** 个实体样品")
                 if status.get("missing_samples"):
-                    st.warning("仍需拍摄："+"、".join(status["missing_samples"]))
+                    st.warning(f"仍需拍摄（**{len(status['missing_samples'])}**/{expected_count}）："+"、".join(status["missing_samples"]))
                 else:
-                    st.success("本节点所有实体样品均已有有效照片。")
+                    st.success(f"本节点所有 **{expected_count}** 个实体样品均已有有效照片。")
                 # While a checkpoint is incomplete, only offer samples that
                 # still need evidence. Including the photo count in the widget
                 # key resets the selector after each successful capture, so
@@ -475,7 +493,10 @@ def render_inline_camera(
                 )
             else:
                 sample_no = ""
-                st.info("该照片关联整个实验任务，仅需拍摄一次，不需要逐个样品重复拍照。")
+                if required:
+                    st.info("该照片关联整个实验任务，CMA要求至少留存一张。")
+                else:
+                    st.info("该照片关联整个实验任务，异常或偏离时补充即可，不作强制要求。")
             camera_entity = sample_no or "TASK"
             camera_widget_key=f"{key_prefix}_{checkpoint_code}_{camera_entity}_camera"
             camera_result=MOBILE_CAMERA_COMPONENT(
@@ -1246,7 +1267,7 @@ elif page=="实验记录":
         if secondary_edit:
             st.info("二次编辑采用字段级锁定：只有复核员指定退回的字段可修改，其余数据仅供查看。")
         tabs=st.tabs([
-            "①任务确认","②设备与实验前检查","③原始数据","④环境与参数",
+            "①任务确认","②设备与实验前检查","③环境与参数","④原始数据",
             "⑤母版过程确认","⑥异常与设备文件","⑦保存提交",
         ])
         if version>1:
@@ -1254,23 +1275,17 @@ elif page=="实验记录":
         with tabs[0]:
             render_readonly_summary(t,group0,commission0,package0,config_snapshot)
             business["task_confirmations"]=render_task_confirmations(business,key_prefix,not secondary_edit or bool(step1_labels))
-            if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[0],username,user["display_name"],key_prefix,"任务确认阶段照片")
-            elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
             _persist_draft()
         with tabs[1]:
             business["equipment_checks"]=render_equipment_confirmation(bound_devices,business.get("equipment_checks") or [],key_prefix,not secondary_edit or bool(step2_labels))
             business["prechecks"],business["precheck_note"]=render_prechecks(kind,business,key_prefix,not secondary_edit or bool(step2_labels))
-            if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[1],username,user["display_name"],key_prefix,"设备与实验前检查照片")
-            elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
             _persist_draft()
         with tabs[2]:
-            business["rows"]=render_sample_data(kind,business,key_prefix,step3_labels)
-            if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[2],username,user["display_name"],key_prefix,"原始数据照片")
-            elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
+            business["parameters"],business["fixed_parameter_mode"]=render_parameters(kind,business,key_prefix,step3_labels)
             _persist_draft()
         with tabs[3]:
-            business["parameters"],business["fixed_parameter_mode"]=render_parameters(kind,business,key_prefix,step4_labels)
-            if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[3],username,user["display_name"],key_prefix,"环境与参数照片")
+            business["rows"]=render_sample_data(kind,business,key_prefix,step4_labels)
+            if photo_edit_allowed:render_inline_camera(t,sample_ids,checkpoint_groups[2],username,user["display_name"],key_prefix,"原始数据照片")
             elif secondary_edit:st.caption("照片留档未被退回，本步骤照片已锁定。")
             _persist_draft()
         with tabs[4]:
@@ -1301,9 +1316,11 @@ elif page=="实验记录":
             show_df(photo_rows,["checkpoint_label","required","complete","photo_count","captured_at"])
             incomplete=[x for x in photo_rows if x["required"] and not x["complete"]]
             if incomplete:
-                st.warning(f"还有 {len(incomplete)} 个强制拍照节点未完成，请回到对应实验步骤拍摄。")
+                st.warning(f"CMA强制拍照节点未完成：{'、'.join(x['checkpoint_label'] for x in incomplete)}（共 {len(incomplete)} 项），请回到第④步原始数据拍摄。")
+            elif any(x["required"] for x in photo_rows):
+                st.success("全部CMA强制拍照节点已经完成。")
             else:
-                st.success("全部强制拍照节点已经完成。")
+                st.info("本实验CMA无强制拍照要求，现有照片均为辅助记录。")
             st.divider()
             st.subheader("设备原始文件")
             st.caption("这里只允许上传设备导出的原始数据、曲线或校准文件；图片和截图必须通过上面的现场相机取得。")
@@ -1461,7 +1478,7 @@ elif page=="实验记录":
             final_sections=dict(summary0.get("sections") or {})
             final_sections.update({
                 "实验员自查已确认":bool(tester_self_check),
-                "强制拍照节点已完成":bool(photos_complete),
+                "CMA强制拍照节点已完成":bool(photos_complete),
                 "受控模板补充字段已完成":not supplement_missing,
             })
             if kind!="cte":
@@ -1474,7 +1491,7 @@ elif page=="实验记录":
                     x["checkpoint_label"] for x in camera_checkpoint_status(tn,all_checkpoints)
                     if x["required"] and not x["complete"]
                 ]
-                final_issues.append("强制拍照节点未完成："+("、".join(missing_photo_labels) or "请检查照片留档"))
+                final_issues.append("CMA强制拍照节点未完成："+("、".join(missing_photo_labels) or "请检查照片留档"))
             if supplement_missing:
                 final_issues.append(
                     "受控模板补充字段未完成："+

@@ -2744,7 +2744,7 @@ def save_record(task_no: str, version: int, payload: dict[str, Any], owner: str,
         if not t.get("experiment_started_at") or not t.get("experiment_ended_at"):
             raise ValueError("请先在实验记录顶部完成实验开始和结束时间记录")
         if not mandatory_camera_complete(task_no, photo_checkpoints(t["experiment"])):
-            raise ValueError("强制现场照片尚未完成，不能提交复核")
+            raise ValueError("CMA强制拍照节点未完成，不能提交复核。请回到第④步原始数据完成拍摄。")
         missing_template_fields = template_supplement_requirements(
             str(payload.get("template_name") or ""),
             payload.get("template_fields") or {},
