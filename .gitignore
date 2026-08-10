@@ -56,3 +56,11 @@ logs/
 htmlcov/
 .tox/
 bp-lims-main (1).zip
+
+# Old project artifacts (not part of Streamlit app)
+backend/
+frontend/
+pyproject.toml
+
+# Claude Code
+.claude/
