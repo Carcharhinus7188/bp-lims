@@ -534,17 +534,45 @@ async def approve_incident(
                 {"mn": eq_to_restore},
             )
 
-        # 为整套重做创建新版本草稿
+        # 为整套重做创建新版本草稿：复制上一版本 payload（而非空草稿），
+        # 并在改用备用设备时把设备切换信息写入记录 payload，供导出与追溯
         rec_result = await db.execute(
-            text("SELECT version FROM records WHERE task_no=:tn ORDER BY version DESC LIMIT 1"),
+            text("""SELECT version, experiment, owner, payload, template_version, sop_version
+                    FROM records WHERE task_no=:tn ORDER BY version DESC LIMIT 1"""),
             {"tn": item.get("task_no")})
-        latest_ver = rec_result.fetchone()
-        new_version = (latest_ver[0] + 1) if latest_ver else 1
+        prev_rec = rec_result.fetchone()
+        new_version = (prev_rec[0] + 1) if prev_rec else 1
 
+        prev_payload: dict = {}
+        experiment = prev_rec[1] if prev_rec else ""
+        owner = (prev_rec[2] if prev_rec and prev_rec[2]
+                 else (item.get("reporter") or item.get("created_by")))
+        tv = (prev_rec[4] if prev_rec and prev_rec[4] else "A/0")
+        sv = (prev_rec[5] if prev_rec and prev_rec[5] else "A/0")
+        if prev_rec:
+            p = prev_rec[3]
+            prev_payload = p if isinstance(p, dict) else (json.loads(p) if p else {})
+
+        # 改用备用设备：记录设备切换信息（原始设备 → 备用设备）
+        if body.recovery_route == allowed[2]:
+            prev_payload["_equipment_meta"] = {
+                "original_equipment_no": item.get("equipment_no"),
+                "backup_equipment_no": body.backup_equipment_no,
+                "incident_no": incident_no,
+            }
+
+        change_reason = f"设备故障整套重做（{body.recovery_route}）"
         await db.execute(
-            text("""INSERT INTO records (task_no, version, status, owner, payload, created_at, updated_at)
-                    VALUES (:tn, :v, '草稿', :ow, CAST('{}' AS jsonb), localtimestamp, localtimestamp)"""),
-            {"tn": item.get("task_no"), "v": new_version, "ow": item.get("reporter") or item.get("created_by")},
+            text("""INSERT INTO records (record_no, task_no, version, experiment, owner, status,
+                      payload, template_version, sop_version, change_reason, created_at, updated_at)
+                    VALUES (:rn, :tn, :v, :ex, :ow, '草稿', CAST(:pl AS jsonb),
+                      :tv, :sv, :cr, localtimestamp, localtimestamp)"""),
+            {
+                "rn": item.get("task_no"), "tn": item.get("task_no"), "v": new_version,
+                "ex": experiment, "ow": owner,
+                "pl": json.dumps(prev_payload, ensure_ascii=False, default=str),
+                "tv": tv, "sv": sv, "cr": change_reason,
+            },
         )
 
         # 恢复任务和任务包状态

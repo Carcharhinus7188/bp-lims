@@ -143,7 +143,7 @@ def _export_record_docx(template_path: Path, payload: dict, experiment_name: str
             doc.add_page_break()
             doc.add_paragraph(str(payload))
 
-    output_path = Path(settings.UPLOAD_DIR) / f"{task_no}_记录_v{payload.get('version', 1)}.docx"
+    output_path = Path(settings.UPLOAD_DIR) / f"{task_no}_V{payload.get('version', 1)}_原始记录表.docx"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
     return output_path
@@ -246,10 +246,15 @@ async def export_record(
             from app.services.record_template_engine import fill_record_template
 
             docx_bytes = fill_record_template(template_path, payload, task_info)
+            from urllib.parse import quote
+            filename = f"{task_no}_V{version}_原始记录表.docx"
+            headers = {
+                "Content-Disposition": f"attachment; filename=\"{task_no}_V{version}.docx\"; filename*=UTF-8''{quote(filename)}"
+            }
             return Response(
                 content=docx_bytes,
                 media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                headers={"Content-Disposition": f"attachment; filename={task_no}_record_v{version}.docx"},
+                headers=headers,
             )
         except Exception:
             pass  # Fall through to generic fallback
@@ -305,9 +310,14 @@ async def export_record(
             buf = io.BytesIO()
             doc.save(buf)
             buf.seek(0)
+            from urllib.parse import quote
+            filename = f"{task_no}_V{version}_原始记录表.docx"
+            headers = {
+                "Content-Disposition": f"attachment; filename=\"{task_no}_V{version}.docx\"; filename*=UTF-8''{quote(filename)}"
+            }
             return Response(content=buf.getvalue(),
                             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                            headers={"Content-Disposition": f"attachment; filename={task_no}_record_v{version}.docx"})
+                            headers=headers)
     except Exception:
         # Last resort: return JSON
         output_path = Path(settings.UPLOAD_DIR) / f"{task_no}_record_v{version}.json"
@@ -585,6 +595,212 @@ async def batch_export(
         zip_buffer,
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=batch_export.zip"},
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+# ── 附件 + 表单打包下载 ──
+# ═══════════════════════════════════════════════════════════════
+
+async def _record_docx_bytes(db: AsyncSession, task_no: str) -> bytes | None:
+    """生成某任务的原始记录 DOCX 字节流（无记录/模板缺失返回 None）"""
+    from app.services.record_word_engine import export_record_docx
+    from app.api.v1.experiment_config import resolve_record_template_file, load_mapping_registry
+
+    rec_result = await db.execute(
+        text("SELECT * FROM records WHERE task_no=:t ORDER BY version DESC LIMIT 1"),
+        {"t": task_no},
+    )
+    rec_row = rec_result.fetchone()
+    if not rec_row:
+        return None
+    record = dict(zip(rec_result.keys(), rec_row))
+    payload = record.get("payload")
+    if isinstance(payload, str):
+        try:
+            record["payload"] = json.loads(payload)
+        except Exception:
+            pass
+
+    t_result = await db.execute(text("SELECT * FROM tasks WHERE task_no=:t"), {"t": task_no})
+    t_row = t_result.fetchone()
+    task = dict(zip(t_result.keys(), t_row)) if t_row else {}
+
+    if not record.get("record_template_file"):
+        record["record_template_file"] = await resolve_record_template_file(
+            db, (task or {}).get("experiment_code") or ""
+        )
+    registry = await load_mapping_registry(db, (task or {}).get("experiment_code") or "", task_no)
+
+    return export_record_docx(record, task, settings.TEMPLATE_DIR, settings.SIGNATURE_DIR, registry=registry)
+
+
+async def _report_docx_bytes(db: AsyncSession, report_no: str) -> bytes | None:
+    """生成某报告的检验报告 DOCX 字节流（无报告/模板缺失返回 None）"""
+    from app.services.report_docx import generate_report_docx
+
+    rep_result = await db.execute(text("SELECT * FROM reports WHERE report_no=:r"), {"r": report_no})
+    rep_row = rep_result.fetchone()
+    if not rep_row:
+        return None
+    report = dict(zip(rep_result.keys(), rep_row))
+    commission_no = report.get("commission_no", "")
+
+    comm: dict = {}
+    groups: list = []
+    tasks: list = []
+    if commission_no:
+        c_result = await db.execute(text("SELECT * FROM commissions WHERE commission_no=:c"), {"c": commission_no})
+        c_row = c_result.fetchone()
+        if c_row:
+            comm = dict(zip(c_result.keys(), c_row))
+        g_result = await db.execute(
+            text("SELECT * FROM sample_groups WHERE commission_no=:c ORDER BY group_no"), {"c": commission_no})
+        groups = [dict(zip(g_result.keys(), r)) for r in g_result.fetchall()]
+        t_result = await db.execute(
+            text("SELECT * FROM tasks WHERE commission_no=:c ORDER BY task_no"), {"c": commission_no})
+        tasks = [dict(zip(t_result.keys(), r)) for r in t_result.fetchall()]
+
+    records_map: dict = {}
+    for t in tasks:
+        tn = t.get("task_no", "")
+        if not tn:
+            continue
+        r_result = await db.execute(
+            text("SELECT * FROM records WHERE task_no=:t ORDER BY version DESC LIMIT 1"), {"t": tn})
+        r_row = r_result.fetchone()
+        if r_row:
+            rec = dict(zip(r_result.keys(), r_row))
+            p = rec.get("payload")
+            if isinstance(p, str):
+                try:
+                    rec["payload"] = json.loads(p)
+                except Exception:
+                    pass
+            records_map[tn] = rec
+
+    user_names: dict = {}
+    u_result = await db.execute(text("SELECT username, display_name FROM users"))
+    for u_row in u_result.fetchall():
+        user_names[u_row[0]] = u_row[1] or u_row[0]
+
+    try:
+        return generate_report_docx(comm, groups, tasks, records_map, report, user_names, None)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+class AttachmentsBatchRequest(BaseModel):
+    commission_no: str = ""
+    task_no: str = ""
+    attachment_type: str = ""
+    search: str = ""
+
+
+@router.post("/attachments-batch")
+async def attachments_batch_export(
+    body: AttachmentsBatchRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _user: Annotated[dict, Depends(get_current_user)],
+):
+    """附件 + 表单打包下载：附件文件 + 原始记录 DOCX + 检验报告 DOCX"""
+    where = "WHERE a.evidence_status='有效'"
+    params: dict = {}
+    if body.commission_no:
+        where += " AND a.commission_no=:cno"
+        params["cno"] = body.commission_no
+    if body.task_no:
+        where += " AND a.task_no=:tno"
+        params["tno"] = body.task_no
+    if body.attachment_type:
+        where += " AND a.attachment_type=:atype"
+        params["atype"] = body.attachment_type
+    if body.search:
+        where += " AND a.original_name ILIKE :s"
+        params["s"] = f"%{body.search}%"
+
+    att_result = await db.execute(
+        text(f"SELECT task_no, commission_no, original_name, stored_name, relative_path "
+             f"FROM attachments a {where} ORDER BY a.created_at"),
+        params,
+    )
+    attachments = [dict(zip(att_result.keys(), r)) for r in att_result.fetchall()]
+
+    # 表单范围：由筛选条件 + 附件反推
+    task_nos: list[str] = []
+    commission_nos: list[str] = []
+    if body.task_no:
+        task_nos.append(body.task_no)
+    if body.commission_no:
+        commission_nos.append(body.commission_no)
+    for a in attachments:
+        if a.get("task_no") and a["task_no"] not in task_nos:
+            task_nos.append(a["task_no"])
+        if a.get("commission_no") and a["commission_no"] not in commission_nos:
+            commission_nos.append(a["commission_no"])
+
+    if commission_nos:
+        t_result = await db.execute(
+            text("SELECT task_no FROM tasks WHERE commission_no = ANY(:cs) ORDER BY task_no"),
+            {"cs": commission_nos},
+        )
+        for r in t_result.fetchall():
+            if r[0] and r[0] not in task_nos:
+                task_nos.append(r[0])
+
+    report_nos: list[str] = []
+    if commission_nos:
+        rp_result = await db.execute(
+            text("SELECT report_no FROM reports WHERE commission_no = ANY(:cs) ORDER BY report_no"),
+            {"cs": commission_nos},
+        )
+        report_nos = [r[0] for r in rp_result.fetchall() if r[0]]
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        # 附件文件
+        used_names: set[str] = set()
+        for a in attachments:
+            rel = a.get("relative_path") or ""
+            fp = Path(settings.ATTACHMENT_DIR) / rel if rel else None
+            if not fp or not fp.exists():
+                continue
+            name = a.get("original_name") or Path(rel).name
+            arc = f"附件/{name}"
+            n = 1
+            while arc in used_names:
+                stem = Path(name).stem
+                ext = Path(name).suffix
+                arc = f"附件/{stem}_{n}{ext}"
+                n += 1
+            used_names.add(arc)
+            zf.write(fp, arc)
+
+        # 原始记录 DOCX
+        for tno in task_nos:
+            try:
+                docx = await _record_docx_bytes(db, tno)
+                if docx:
+                    zf.writestr(f"原始记录/{tno}_原始记录.docx", docx)
+            except Exception:
+                pass
+
+        # 检验报告 DOCX
+        for rno in report_nos:
+            try:
+                docx = await _report_docx_bytes(db, rno)
+                if docx:
+                    zf.writestr(f"检验报告/{rno}_检验报告.docx", docx)
+            except Exception:
+                pass
+
+    zip_buffer.seek(0)
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=attachments_batch.zip"},
     )
 
 
@@ -1046,12 +1262,167 @@ async def preview_record_export(
     t_row = t_result.fetchone()
     task = dict(zip(t_result.keys(), t_row)) if t_row else None
 
+    # 配置兜底：DB extra_json.record_template_file 优先，无则交给引擎 kind 推断
+    if not record.get("record_template_file"):
+        from app.api.v1.experiment_config import resolve_record_template_file
+        record["record_template_file"] = await resolve_record_template_file(
+            db, (task or {}).get("experiment_code") or ""
+        )
+
+    # 加载受控模板映射的 DB 权威值（坐标 + 常量），供导出注入（空则硬编码兜底）
+    from app.api.v1.experiment_config import load_mapping_registry
+    registry = await load_mapping_registry(
+        db, (task or {}).get("experiment_code") or "", task_no
+    )
+
     try:
         from app.services.record_word_engine import export_record_docx
         from app.services.docx_preview import docx_review_html
-        docx_bytes = export_record_docx(record, task, template_dir=settings.TEMPLATE_DIR, signature_dir=settings.SIGNATURE_DIR)
+        docx_bytes = export_record_docx(
+            record, task,
+            template_dir=settings.TEMPLATE_DIR,
+            signature_dir=settings.SIGNATURE_DIR,
+            registry=registry,
+        )
         title = f"{record.get('experiment','原始记录')} — {task_no}"
         html = docx_review_html(docx_bytes, title)
         return HTMLResponse(content=html)
     except ImportError as e:
         raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=f"预览服务不可用：{e}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# ── SOP 文档预览/导出 ──
+# ═══════════════════════════════════════════════════════════════
+
+@router.get("/sop/{task_no}/preview", response_class=HTMLResponse)
+async def preview_sop(
+    task_no: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """在线预览 SOP 文档"""
+    role = user.get("role", "")
+    if role not in ("质量负责人", "管理员", "复核员", "样品管理员", "实验员"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权预览")
+
+    # 查任务 → 实验方法
+    t_result = await db.execute(
+        text("SELECT experiment, experiment_code FROM tasks WHERE task_no=:t"),
+        {"t": task_no},
+    )
+    t_row = t_result.fetchone()
+    if not t_row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+    experiment_name, experiment_code = t_row[0], t_row[1]
+
+    # 查实验方法信息
+    method_standard = ""
+    sop_version = "A/0"
+    sop_file = ""
+    equipment_list = []
+    if experiment_code:
+        m_result = await db.execute(
+            text("SELECT standard, sop_file FROM experiment_methods WHERE experiment_code=:c"),
+            {"c": experiment_code},
+        )
+        m_row = m_result.fetchone()
+        if m_row:
+            method_standard = m_row[0] or ""
+            sop_file = m_row[1] or ""
+
+        # 查关联设备
+        eq_result = await db.execute(
+            text("""
+                SELECT e.management_no, e.equipment_name, e.model, e.measuring_range, eb.binding_role
+                FROM experiment_equipment_bindings eb
+                JOIN equipment_registry e ON e.management_no = eb.management_no
+                WHERE eb.experiment = :c
+            """),
+            {"c": experiment_code},
+        )
+        equipment_list = [dict(zip(eq_result.keys(), r)) for r in eq_result.fetchall()]
+
+    try:
+        from app.services.report_docx import generate_sop_docx
+        from app.services.docx_preview import docx_review_html
+
+        docx_bytes = generate_sop_docx(
+            experiment_code=experiment_code,
+            experiment_name=experiment_name,
+            method_standard=method_standard,
+            sop_version=sop_version,
+            sop_file=sop_file,
+            equipment_list=equipment_list,
+        )
+        title = f"SOP — {experiment_name or task_no}"
+        html = docx_review_html(docx_bytes, title)
+        return HTMLResponse(content=html)
+    except ImportError as e:
+        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=f"预览服务不可用：{e}")
+
+
+@router.get("/sop/{task_no}/export")
+async def export_sop(
+    task_no: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """下载 SOP 文档 DOCX"""
+    role = user.get("role", "")
+    if role not in ("质量负责人", "管理员", "复核员", "样品管理员", "实验员"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权下载")
+
+    t_result = await db.execute(
+        text("SELECT experiment, experiment_code FROM tasks WHERE task_no=:t"),
+        {"t": task_no},
+    )
+    t_row = t_result.fetchone()
+    if not t_row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+    experiment_name, experiment_code = t_row[0], t_row[1]
+
+    method_standard = ""
+    sop_version = "A/0"
+    sop_file = ""
+    equipment_list = []
+    if experiment_code:
+        m_result = await db.execute(
+            text("SELECT standard, sop_file FROM experiment_methods WHERE experiment_code=:c"),
+            {"c": experiment_code},
+        )
+        m_row = m_result.fetchone()
+        if m_row:
+            method_standard = m_row[0] or ""
+            sop_file = m_row[1] or ""
+
+        eq_result = await db.execute(
+            text("""
+                SELECT e.management_no, e.equipment_name, e.model, e.measuring_range, eb.binding_role
+                FROM experiment_equipment_bindings eb
+                JOIN equipment_registry e ON e.management_no = eb.management_no
+                WHERE eb.experiment = :c
+            """),
+            {"c": experiment_code},
+        )
+        equipment_list = [dict(zip(eq_result.keys(), r)) for r in eq_result.fetchall()]
+
+    try:
+        from app.services.report_docx import generate_sop_docx
+
+        docx_bytes = generate_sop_docx(
+            experiment_code=experiment_code,
+            experiment_name=experiment_name,
+            method_standard=method_standard,
+            sop_version=sop_version,
+            sop_file=sop_file,
+            equipment_list=equipment_list,
+        )
+        filename = f"SOP_{experiment_name or task_no}.docx"
+        return StreamingResponse(
+            io.BytesIO(docx_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+    except ImportError as e:
+        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=f"导出服务不可用：{e}")

@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from datetime import date
 
 # 确保 backend 在 sys.path 中
 _backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -24,6 +23,7 @@ sys.path.insert(0, _backend_dir)
 
 import asyncpg
 from app.config import settings
+from app.core.encoding_rules import china_today
 
 # ═══════════════════════════════════════════════════════════════
 # 12 个实验的元数据（与 reference EXPERIMENTS 一致）
@@ -68,8 +68,8 @@ EXPERIMENT_META: dict[str, dict] = {
              "location": "外观检测室"},
 }
 
-SEED_VERSION = "V2.0"
-SEED_NOTE = f"由 seed_configs.py 批量生成, 对齐 streamlit-legacy V9.4.2 ({date.today().isoformat()})"
+SEED_VERSION = "V2.1"
+SEED_NOTE = f"由 seed_configs.py 批量生成, 对齐 streamlit-legacy V9.4.2 ({china_today().isoformat()})"
 
 # ═══════════════════════════════════════════════════════════════
 # 在这里直接导入 schemas (避免循环依赖)
@@ -85,12 +85,12 @@ from experiment_schemas import SCHEMAS, COMMON_PROCESS_OBSERVATIONS, SUPPLEMENTA
 # CMA 通用拍照节点（required=False）
 _COMMON_PHOTO_CHECKPOINTS = [
     {"code": "ENV", "label": "实验开始温湿度表", "required": False, "is_sample_level": False, "checkpoint_group": "环境与设备"},
-    {"code": "SAMPLE_BEFORE", "label": "实验前样品及标签", "required": False, "is_sample_level": False, "checkpoint_group": "样品状态"},
+    {"code": "SAMPLE_BEFORE", "label": "实验前样品及标签", "required": False, "is_sample_level": True, "checkpoint_group": "样品状态"},
     {"code": "DEVICE", "label": "设备编号/铭牌", "required": False, "is_sample_level": False, "checkpoint_group": "环境与设备"},
     {"code": "PARAMETERS", "label": "设备参数或软件数据界面", "required": False, "is_sample_level": False, "checkpoint_group": "环境与设备"},
-    {"code": "SETUP", "label": "样品安装、装夹或放置状态", "required": False, "is_sample_level": False, "checkpoint_group": "样品状态"},
+    {"code": "SETUP", "label": "样品安装、装夹或放置状态", "required": False, "is_sample_level": True, "checkpoint_group": "样品状态"},
     {"code": "RESULT", "label": "最终读数、曲线或结果界面", "required": False, "is_sample_level": False, "checkpoint_group": "结果界面"},
-    {"code": "SAMPLE_AFTER", "label": "实验结束后样品状态", "required": False, "is_sample_level": False, "checkpoint_group": "样品状态"},
+    {"code": "SAMPLE_AFTER", "label": "实验结束后样品状态", "required": False, "is_sample_level": True, "checkpoint_group": "样品状态"},
     {"code": "REPORT_PHOTO", "label": "检验报告照片区域用代表性照片", "required": False, "is_sample_level": False, "checkpoint_group": "报告归档"},
 ]
 
@@ -396,7 +396,7 @@ async def seed():
                        note=EXCLUDED.note
                    RETURNING id""",
                 code, SEED_VERSION, name, meta["method"], meta["standard"],
-                meta["category"], kind, meta["location"], date.today(), SEED_NOTE,
+                meta["category"], kind, meta["location"], china_today(), SEED_NOTE,
             )
             print(f"  [OK] 配置版本 id={config_id} ({SEED_VERSION})")
 

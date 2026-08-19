@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import request from '../utils/request'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Document, Picture, VideoPlay, VideoPause, Timer } from '@element-plus/icons-vue'
+import { formatChinaDateTime } from '../utils/time'
 
 const route = useRoute()
 const router = useRouter()
@@ -101,7 +102,9 @@ function getStatusType(status) {
                   <el-tag :type="row.status === '已复核' ? 'success' : row.status === '待复核' ? 'warning' : 'info'" size="small">{{ row.status }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column prop="owner" label="操作人" width="120" />
+              <el-table-column prop="owner" label="操作人" width="120">
+                <template #default="{ row }">{{ row.owner_name || row.owner }}</template>
+              </el-table-column>
               <el-table-column prop="created_at" label="创建时间" />
             </el-table>
           </el-card>
@@ -124,7 +127,9 @@ function getStatusType(status) {
                   {{ row.attachment_type }}
                 </template>
               </el-table-column>
-              <el-table-column prop="uploader" label="上传者" width="100" />
+              <el-table-column prop="uploader" label="上传者" width="100">
+                <template #default="{ row }">{{ row.uploader_name || row.uploader }}</template>
+              </el-table-column>
               <el-table-column prop="captured_at" label="拍摄时间" width="160" />
             </el-table>
           </el-card>
@@ -139,20 +144,20 @@ function getStatusType(status) {
               <el-descriptions-item label="委托编号">{{ task.commission_no }}</el-descriptions-item>
               <el-descriptions-item label="检测项目">{{ task.experiment }}</el-descriptions-item>
               <el-descriptions-item label="方法编号">{{ task.method_code }}</el-descriptions-item>
-              <el-descriptions-item label="实验员">{{ task.assignee }}</el-descriptions-item>
-              <el-descriptions-item label="复核员">{{ task.reviewer }}</el-descriptions-item>
+              <el-descriptions-item label="实验员">{{ task.assignee_name || task.assignee }}</el-descriptions-item>
+              <el-descriptions-item label="复核员">{{ task.reviewer_name || task.reviewer }}</el-descriptions-item>
               <el-descriptions-item label="检测地点">{{ task.detection_location }}</el-descriptions-item>
             </el-descriptions>
           </el-card>
 
           <el-card header="时间线">
             <el-timeline>
-              <el-timeline-item :timestamp="task.created_at" placement="top" type="primary">
+              <el-timeline-item :timestamp="formatChinaDateTime(task.created_at)" placement="top" type="primary">
                 任务创建
               </el-timeline-item>
               <el-timeline-item
                 v-if="task.experiment_started_at"
-                :timestamp="task.experiment_started_at"
+                :timestamp="formatChinaDateTime(task.experiment_started_at)"
                 placement="top"
                 type="warning"
               >
@@ -160,7 +165,7 @@ function getStatusType(status) {
               </el-timeline-item>
               <el-timeline-item
                 v-if="task.experiment_ended_at"
-                :timestamp="task.experiment_ended_at"
+                :timestamp="formatChinaDateTime(task.experiment_ended_at)"
                 placement="top"
                 type="success"
               >

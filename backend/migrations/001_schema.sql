@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS users (
     username       TEXT PRIMARY KEY,
     display_name   TEXT NOT NULL,
     password_hash  TEXT NOT NULL,
-    role           TEXT NOT NULL CHECK (role IN ('管理员','样品管理员','实验员','复核员','质量负责人')),
+    role           TEXT NOT NULL CHECK (role IN ('管理员','样品管理员','实验员','复核员','质量负责人','授权签字人')),
     enabled        BOOLEAN NOT NULL DEFAULT TRUE,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -51,10 +51,27 @@ CREATE TABLE IF NOT EXISTS experiment_methods (
     standard        TEXT,
     category        TEXT,
     kind            TEXT,
+    template_code   TEXT,
+    sop_file        TEXT,
     enabled         BOOLEAN DEFAULT TRUE,
     sort_order      INT DEFAULT 0,
     created_at      TIMESTAMPTZ DEFAULT now(),
     updated_at      TIMESTAMPTZ DEFAULT now()
+);
+
+-- ============================================================
+-- 检测项目标准变体（一个检测项目可有多个标准，拆分独立使用；
+-- 沿用父实验编码，共享父实验的配置版本，仅标准全文不同）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS experiment_standards (
+    id              SERIAL PRIMARY KEY,
+    experiment_code TEXT NOT NULL REFERENCES experiment_methods(experiment_code) ON DELETE CASCADE,
+    standard        TEXT NOT NULL,
+    enabled         BOOLEAN DEFAULT TRUE,
+    sort_order      INT DEFAULT 0,
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    updated_at      TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (experiment_code, standard)
 );
 
 -- ============================================================
@@ -71,6 +88,8 @@ CREATE TABLE IF NOT EXISTS sample_catalog (
     source_sequence TEXT,
     category        TEXT,
     unit            TEXT DEFAULT '件',
+    detection_method TEXT,
+    detection_basis  TEXT,
     experiment_codes JSONB DEFAULT '[]',
     notes           TEXT,
     enabled         BOOLEAN DEFAULT TRUE,
@@ -91,6 +110,8 @@ CREATE TABLE IF NOT EXISTS equipment_registry (
     serial_no          TEXT,
     purchase_time      TEXT,
     calibration_time   TEXT,
+    calibration_due    TEXT,
+    calibration_certificate TEXT,
     responsible        TEXT,
     equipment_class    TEXT,
     enabled            BOOLEAN DEFAULT TRUE,
@@ -150,6 +171,7 @@ CREATE TABLE IF NOT EXISTS experiment_config_versions (
     created_at          TIMESTAMPTZ DEFAULT now(),
     approved_by         TEXT,
     approved_at         TIMESTAMPTZ,
+    extra_json          JSONB DEFAULT '{}',
     UNIQUE (experiment_code, version)
 );
 
@@ -275,6 +297,8 @@ CREATE TABLE IF NOT EXISTS commissions (
     notes                TEXT,
     status               TEXT DEFAULT '已入库',
     created_by           TEXT,
+    archived_at          TIMESTAMPTZ,
+    archived_by          TEXT,
     created_at           TIMESTAMPTZ DEFAULT now(),
     updated_at           TIMESTAMPTZ DEFAULT now()
 );
@@ -287,6 +311,8 @@ CREATE TABLE IF NOT EXISTS sample_groups (
     sample_name           TEXT,
     model                 TEXT,
     material_name         TEXT,
+    experiment_codes      TEXT,
+    batch_no              TEXT,
     production_org_id     INT,
     production_org_name   TEXT,
     production_relation   TEXT,
@@ -320,6 +346,12 @@ CREATE TABLE IF NOT EXISTS samples (
     current_location TEXT,
     current_holder   TEXT,
     status           TEXT DEFAULT '待分配',
+    retention_period TEXT,
+    retention_until  DATE,
+    disposal_method  TEXT,
+    disposal_date    DATE,
+    disposal_note    TEXT,
+    disposed_by      TEXT,
     created_at       TIMESTAMPTZ DEFAULT now(),
     updated_at       TIMESTAMPTZ DEFAULT now()
 );
@@ -445,7 +477,7 @@ CREATE TABLE IF NOT EXISTS package_loans (
 CREATE TABLE IF NOT EXISTS reports (
     report_no             TEXT PRIMARY KEY,
     commission_no         TEXT NOT NULL,
-    task_no               TEXT UNIQUE,
+    task_no               TEXT,
     status                TEXT DEFAULT '草稿',
     tester                TEXT,
     verifier              TEXT,
@@ -462,6 +494,8 @@ CREATE TABLE IF NOT EXISTS reports (
     signed_by_verifier    TIMESTAMPTZ,
     signed_by_quality     TIMESTAMPTZ,
     signed_by_approver    TIMESTAMPTZ,
+    approver_signature    TEXT,
+    archived_at           TIMESTAMPTZ,
     publish_date          DATE,
     created_at            TIMESTAMPTZ DEFAULT now(),
     updated_at            TIMESTAMPTZ DEFAULT now()
@@ -533,6 +567,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     old_value      TEXT,
     new_value      TEXT,
     reason         TEXT,
+    commission_no  TEXT,
     client_time    TEXT,
     device_id      TEXT,
     session_token  TEXT,
@@ -579,6 +614,7 @@ CREATE TABLE IF NOT EXISTS modification_logs (
     old_value     TEXT,
     new_value     TEXT,
     reason        TEXT,
+    commission_no TEXT,
     created_at    TIMESTAMPTZ DEFAULT now()
 );
 
@@ -606,6 +642,8 @@ CREATE TABLE IF NOT EXISTS objections (
     final_conclusion           TEXT,
     response_sent_at           TIMESTAMPTZ,
     archived_at                TIMESTAMPTZ,
+    evidence_frozen_at         TIMESTAMPTZ,
+    evidence_snapshot          JSONB DEFAULT '{}'::jsonb,
     created_at                 TIMESTAMPTZ DEFAULT now(),
     updated_at                 TIMESTAMPTZ DEFAULT now()
 );

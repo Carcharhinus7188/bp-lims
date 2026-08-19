@@ -84,6 +84,8 @@ backend/app/*/*/__pycache__/
 backend/*.pyc
 backend/.pytest_cache/
 backend/*.log
+backend/certs/
+backend/data/
 
 # ── Frontend ──
 frontend/dist/

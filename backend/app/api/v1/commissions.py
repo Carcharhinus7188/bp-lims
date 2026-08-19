@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, get_db
+from app.core.model_utils import normalize_model
 from app.services.audit_service import log_operation, log_modification
 
 router = APIRouter(prefix="/commissions", tags=["委托单"])
@@ -102,7 +103,9 @@ async def get_commission(
 
     # 样品
     samples_result = await db.execute(
-        text("SELECT sample_no, group_no, sample_name, condition, current_location, status FROM samples WHERE commission_no=:c ORDER BY sample_no"),
+        text("""SELECT sample_no, group_no, sample_name, condition, current_location, status,
+                     retention_period, retention_until, disposal_method, disposal_date, disposed_by
+                FROM samples WHERE commission_no=:c ORDER BY sample_no"""),
         {"c": commission_no},
     )
     samples = [dict(zip(samples_result.keys(), r)) for r in samples_result.fetchall()]
@@ -125,6 +128,65 @@ async def get_commission(
         sample_groups=groups,
         samples=samples,
     )
+
+
+# ── 归档 ──
+
+class ArchiveRequest(BaseModel):
+    note: str = ""
+
+
+@router.post("/{commission_no}/archive")
+async def archive_commission(
+    commission_no: str,
+    body: ArchiveRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """管理员归档已完结委托（整单报告已发布/作废、样品已处置或留样）"""
+    if user.get("role") != "管理员":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有管理员可以归档")
+
+    comm = await db.execute(
+        text("SELECT status, archived_at FROM commissions WHERE commission_no=:c"),
+        {"c": commission_no},
+    )
+    row = comm.fetchone()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="委托单不存在")
+    if row[1]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该委托已归档")
+
+    # 校验：所有报告已发布/作废（无待审核/退回/签发中的报告）
+    pending = await db.execute(
+        text("""SELECT COUNT(*) FROM reports WHERE commission_no=:c
+                AND status NOT IN ('已发布','已作废','已撤回')"""),
+        {"c": commission_no},
+    )
+    if pending.fetchone()[0] > 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="存在未完结的报告，暂不能归档")
+
+    # 校验：样品已处置（销毁/报废/消耗归档）或已登记留样
+    undisposed = await db.execute(
+        text("""SELECT COUNT(*) FROM samples WHERE commission_no=:c
+                AND status NOT IN ('已销毁','已报废','全部消耗，记录归档')
+                AND (retention_period IS NULL OR retention_period = '')"""),
+        {"c": commission_no},
+    )
+    if undisposed.fetchone()[0] > 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="存在未处置且未留样的样品，暂不能归档")
+
+    await db.execute(
+        text("""UPDATE commissions SET status='已归档', archived_at=localtimestamp,
+                archived_by=:a, updated_at=localtimestamp WHERE commission_no=:c"""),
+        {"a": user["username"], "c": commission_no},
+    )
+    await db.execute(
+        text("UPDATE reports SET archived_at=localtimestamp WHERE commission_no=:c"),
+        {"c": commission_no},
+    )
+    await log_operation(db, "commission", commission_no, user, "归档委托", comment=body.note)
+    return {"message": "委托已归档", "commission_no": commission_no, "status": "已归档"}
 
 
 # ── 创建 ──
@@ -218,6 +280,8 @@ async def create_commission(
 class SampleGroupCreate(BaseModel):
     catalog_id: int | None = None
     material_name: str
+    sample_name: str | None = None
+    model: str | None = None
     sample_count: int = Field(ge=1, le=200)
     experiment_codes: list[str] = Field(default_factory=list)
     experiments: list[str] = Field(default_factory=list)
@@ -250,7 +314,8 @@ async def create_sample_group(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="委托单不存在")
 
     # 如果提供了 catalog_id，从样品资料库中获取预设信息
-    catalog_model = "标准"
+    catalog_model = ""
+    catalog_sample_name = ""
     catalog_material = body.material_name
     if body.catalog_id:
         cat_result = await db.execute(
@@ -259,12 +324,30 @@ async def create_sample_group(
         )
         cat_row = cat_result.fetchone()
         if cat_row:
+            catalog_sample_name = cat_row[0] or ""
             catalog_material = cat_row[2] or body.material_name
-            catalog_model = cat_row[1] or "标准"
+            catalog_model = normalize_model(cat_row[1])
             # 如果前端未指定检测项目，则使用资料库中的预设
             if not body.experiment_codes and cat_row[3]:
                 preset_codes = json.loads(cat_row[3]) if isinstance(cat_row[3], str) else cat_row[3]
-                body.experiment_codes = preset_codes
+                body.experiment_codes = preset_codes or []
+
+    # 最终取值：前端显式传入优先，其次资料库预设，最后用材料名称兜底
+    sample_name = body.sample_name or catalog_sample_name or catalog_material
+    material_name = catalog_material
+    model = normalize_model(body.model) or normalize_model(catalog_model)
+    if not model:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="规格型号不能为空或占位符（如「-」「无」），请填写真实规格型号",
+        )
+
+    # 检测项目为必填项
+    if not body.experiment_codes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请选择检测项目（检测项目为必填项）",
+        )
 
     # 生成样品组编号: BP + YYYYMMDD + 3位序号
     today_str = str(comm_row[1]) if comm_row[1] else "2026-01-01"
@@ -291,7 +374,7 @@ async def create_sample_group(
         """),
         {
             "gn": group_no, "cn": commission_no, "cid": body.catalog_id,
-            "sn": catalog_material, "mn": catalog_material, "md": catalog_model,
+            "sn": sample_name, "mn": material_name, "md": model,
             "bn": body.batch_no, "ec": ecodes_str, "qty": body.sample_count, "nt": body.notes,
         },
     )
@@ -308,12 +391,12 @@ async def create_sample_group(
         await db.execute(
             text("""
                 INSERT INTO samples (sample_no, group_id, group_no, commission_no, sample_name,
-                  material_name, condition, current_location, status, created_at, updated_at)
-                VALUES (:sn, :gid, :gn, :cn, :snm, :mn, '待检', '样品库', '待检', localtimestamp, localtimestamp)
+                  material_name, model, condition, current_location, status, created_at, updated_at)
+                VALUES (:sn, :gid, :gn, :cn, :snm, :mn, :md, '待检', '样品库', '待检', localtimestamp, localtimestamp)
             """),
             {
                 "sn": sno, "gid": group_id, "gn": group_no, "cn": commission_no,
-                "snm": catalog_material, "mn": catalog_material,
+                "snm": sample_name, "mn": material_name, "md": model,
             },
         )
 

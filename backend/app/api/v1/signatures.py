@@ -38,7 +38,7 @@ async def list_signatures(
     result = await db.execute(
         text("""
             SELECT u.username, u.display_name, u.role,
-                   s.source_file, s.uploaded_at
+                   s.image_file, s.uploaded_at
             FROM users u
             LEFT JOIN signatures s ON u.username = s.username
             ORDER BY u.role, u.username
@@ -98,19 +98,19 @@ async def upload_signature(
     # 计算 SHA256
     sha = hashlib.sha256(content).hexdigest()
 
-    # 更新数据库
+    # 更新数据库（signatures 表列：username / source_file / image_file / uploaded_by / uploaded_at）
     await db.execute(
         text("""
-            INSERT INTO signatures (username, file_path, sha256, file_size, uploaded_at, uploaded_by)
-            VALUES (:u, :fp, :sha, :fs, localtimestamp, :ub)
+            INSERT INTO signatures (username, source_file, image_file, uploaded_at, uploaded_by)
+            VALUES (:u, :sf, :if, localtimestamp, :ub)
             ON CONFLICT (username) DO UPDATE SET
-                file_path = :fp2, sha256 = :sha2, file_size = :fs2,
+                source_file = :sf2, image_file = :if2,
                 uploaded_at = localtimestamp, uploaded_by = :ub2
         """),
         {
-            "u": target_username, "fp": str(file_path), "sha": sha, "fs": file_size,
+            "u": target_username, "sf": file.filename, "if": str(file_path),
             "ub": current_user["username"],
-            "fp2": str(file_path), "sha2": sha, "fs2": file_size, "ub2": current_user["username"],
+            "sf2": file.filename, "if2": str(file_path), "ub2": current_user["username"],
         },
     )
 
@@ -133,7 +133,7 @@ async def get_signature_image(
 ):
     """获取用户的签名图片（可用作 <img src>）"""
     result = await db.execute(
-        text("SELECT file_path FROM signatures WHERE username=:u"), {"u": username.replace(".png", "")}
+        text("SELECT image_file FROM signatures WHERE username=:u"), {"u": username.replace(".png", "")}
     )
     row = result.fetchone()
     if not row or not row[0]:
@@ -157,7 +157,7 @@ async def delete_signature(
 ):
     """删除用户电子签名（管理员）"""
     result = await db.execute(
-        text("SELECT file_path FROM signatures WHERE username=:u"), {"u": username}
+        text("SELECT image_file FROM signatures WHERE username=:u"), {"u": username}
     )
     row = result.fetchone()
     if not row:

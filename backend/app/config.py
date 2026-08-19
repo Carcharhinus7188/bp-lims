@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # ── CORS ──
     CORS_ORIGINS: list[str] = ["*"]
 
+    # ── 前端一体化 ──
+    # 设为 true 时，后端直接提供前端静态文件（无需 nginx/node）
+    SERVE_FRONTEND: bool = False
+
     @property
     def DATABASE_URL(self) -> str:
         return (
@@ -47,7 +51,11 @@ class Settings(BaseSettings):
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
         )
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+    model_config = {
+        "env_file": str(Path(__file__).resolve().parent.parent.parent / ".env"),
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
 
 settings = Settings()

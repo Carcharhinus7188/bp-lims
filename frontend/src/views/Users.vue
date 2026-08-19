@@ -18,7 +18,7 @@ const form = reactive({
   role: '实验员',
 })
 
-const roles = ['管理员', '样品管理员', '实验员', '复核员', '质量负责人']
+const roles = ['管理员', '样品管理员', '实验员', '复核员', '质量负责人', '授权签字人']
 
 const rules = {
   username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
@@ -71,7 +71,7 @@ async function resetPassword(username) {
 async function changeRole(username, currentRole) {
   try {
     const { value } = await ElMessageBox.prompt(
-      `当前角色：${currentRole}\n\n请输入新角色（管理员 / 样品管理员 / 实验员 / 复核员 / 质量负责人）`,
+      `当前角色：${currentRole}\n\n请输入新角色（管理员 / 样品管理员 / 实验员 / 复核员 / 质量负责人 / 授权签字人）`,
       '修改角色',
       {
         inputValue: currentRole,

@@ -67,9 +67,6 @@ const routes = [
       // 报告发放
       { path: 'report-delivery', name: 'ReportDelivery', component: () => import('../views/ReportDelivery.vue'), meta: { title: '报告发放管理' } },
 
-      // 样品借出与归还
-      { path: 'sample-return', name: 'SampleReturn', component: () => import('../views/SampleReturn.vue'), meta: { title: '样品借出与归还' } },
-
       // 单据中心
       { path: 'documents', name: 'DocumentCenter', component: () => import('../views/DocumentCenter.vue'), meta: { title: '单据中心' } },
 

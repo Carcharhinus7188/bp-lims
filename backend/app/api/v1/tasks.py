@@ -14,6 +14,29 @@ from app.services.audit_service import log_operation
 router = APIRouter(prefix="/tasks", tags=["任务"])
 
 
+async def _column_exists(db: AsyncSession, table: str, column: str) -> bool:
+    """检查列是否存在（用于兼容尚未迁移 sample_name 列的数据库）"""
+    r = await db.execute(
+        text("SELECT 1 FROM information_schema.columns WHERE table_name=:t AND column_name=:c"),
+        {"t": table, "c": column},
+    )
+    return r.fetchone() is not None
+
+
+async def _display_names(db: AsyncSession, usernames: set[str]) -> dict[str, str]:
+    """批量解析 username → display_name（姓名），未命中时回退到账号名本身。"""
+    uniq = {u for u in usernames if u}
+    if not uniq:
+        return {}
+    placeholders = ", ".join(f":u{i}" for i in range(len(uniq)))
+    params = {f"u{i}": u for i, u in enumerate(uniq)}
+    result = await db.execute(
+        text(f"SELECT username, display_name FROM users WHERE username IN ({placeholders})"),
+        params,
+    )
+    return {uname: (dname or uname) for uname, dname in result.fetchall()}
+
+
 class TaskPackageBrief(BaseModel):
     package_no: str
     commission_no: str
@@ -21,7 +44,11 @@ class TaskPackageBrief(BaseModel):
     assignee: str
     reviewer: str
     assigned_by: str | None
+    assignee_name: str | None = None
+    reviewer_name: str | None = None
+    assigned_by_name: str | None = None
     material_name: str | None
+    sample_name: str | None = None
     experiments: str | None
     status: str
     assigned_at: str | None
@@ -45,38 +72,9 @@ class CreatePackageRequest(BaseModel):
     group_id: int
     experiment_codes: list[str]
     assignee: str
-    reviewer: str = ""          # 留空则自动匹配
-    quality_inspector: str = ""  # 留空则自动匹配
+    reviewer: str                # 必填，手动选择
+    quality_inspector: str       # 必填，手动选择
     detection_locations: dict[str, str] = {}  # experiment_code → location
-
-
-async def _auto_match_user(db: AsyncSession, role: str, exclude_usernames: set[str]) -> str | None:
-    """自动匹配角色用户 — 排除指定用户，选当前工作量最低的已启用用户"""
-    exclude_list = [u for u in exclude_usernames if u]
-    if not exclude_list:
-        exclude_list = [""]  # 避免 SQL 语法错误
-
-    placeholders = ", ".join(f":ex{i}" for i in range(len(exclude_list)))
-    params = {f"ex{i}": exclude_list[i] for i in range(len(exclude_list))}
-    params["role"] = role
-
-    result = await db.execute(
-        text(f"""
-            SELECT u.username,
-                   (SELECT COUNT(*) FROM tasks t
-                    WHERE (t.reviewer = u.username OR t.quality_inspector = u.username)
-                      AND t.status NOT IN ('已完成', '已回库')
-                   ) AS workload
-            FROM users u
-            WHERE u.role = :role AND u.enabled = TRUE
-              AND u.username NOT IN ({placeholders})
-            ORDER BY workload ASC, u.username ASC
-            LIMIT 1
-        """),
-        params,
-    )
-    row = result.fetchone()
-    return row[0] if row else None
 
 
 @router.post("/packages", status_code=201)
@@ -85,10 +83,10 @@ async def create_package(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[dict, Depends(require_role("管理员", "样品管理员"))],
 ):
-    """创建任务包并绑定委托、分配实验员（复核员/质量负责人可自动匹配）"""
+    """创建任务包并绑定委托、分配实验员（复核员/质量负责人必填手动选择）"""
     # 查询样品组信息
     group_result = await db.execute(
-        text("SELECT group_no, commission_no, material_name FROM sample_groups WHERE id=:i AND is_void=FALSE"),
+        text("SELECT group_no, commission_no, material_name, sample_name FROM sample_groups WHERE id=:i AND is_void=FALSE"),
         {"i": body.group_id},
     )
     group = group_result.fetchone()
@@ -98,6 +96,15 @@ async def create_package(
     group_no = group[0]
     commission_no = group[1]
     material_name = group[2]
+    sample_name = group[3] or ""
+
+    # 需求 11：新建任务包时带出委托样品组的「样品名称」（列到位后生效，兼容尚未迁移的库）
+    pkg_sample_col, pkg_sample_val = "", ""
+    task_sample_col, task_sample_val = "", ""
+    if await _column_exists(db, "task_packages", "sample_name"):
+        pkg_sample_col, pkg_sample_val = ", sample_name", ", :sname"
+    if await _column_exists(db, "tasks", "sample_name"):
+        task_sample_col, task_sample_val = ", sample_name", ", :sname"
 
     # 验证委托存在且有效
     comm_result = await db.execute(
@@ -110,6 +117,14 @@ async def create_package(
     if comm[1] == "已作废":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"委托 {commission_no} 已作废，无法创建任务包")
 
+    # 任务包整组去重：一个样品组只能分配一个任务包
+    existing_pkg = await db.execute(
+        text("SELECT package_no, status FROM task_packages WHERE group_id=:gid LIMIT 1"),
+        {"gid": body.group_id},
+    )
+    if existing_pkg.fetchone():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该样品组已分配过任务包，不能重复分配")
+
     # 验证实验员存在且为实验员角色
     tester_check = await db.execute(
         text("SELECT role FROM users WHERE username=:u AND enabled=TRUE"),
@@ -121,18 +136,33 @@ async def create_package(
     if tester_row[0] != "实验员":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{body.assignee} 不是实验员")
 
-    # 自动匹配复核员（如未指定）
+    # 复核员必须手动指定，并校验角色
     reviewer = body.reviewer.strip() if body.reviewer else ""
     if not reviewer:
-        reviewer = await _auto_match_user(db, "复核员", {body.assignee})
-        if not reviewer:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="没有可用的复核员，请先在用户管理中启用复核员")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请选择复核员")
+    rv_check = await db.execute(
+        text("SELECT role FROM users WHERE username=:u AND enabled=TRUE"),
+        {"u": reviewer},
+    )
+    rv_row = rv_check.fetchone()
+    if not rv_row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"复核员 {reviewer} 不存在或已禁用")
+    if rv_row[0] != "复核员":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{reviewer} 不是复核员")
 
-    # 自动匹配质量负责人（如未指定）
+    # 质量负责人必须手动指定，并校验角色
     quality_inspector = body.quality_inspector.strip() if body.quality_inspector else ""
     if not quality_inspector:
-        quality_inspector = await _auto_match_user(db, "质量负责人", {body.assignee, reviewer})
-        # 质量负责人可选 — 无人时留空，后续管理员可手动指定
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请选择质量负责人")
+    qi_check = await db.execute(
+        text("SELECT role FROM users WHERE username=:u AND enabled=TRUE"),
+        {"u": quality_inspector},
+    )
+    qi_row = qi_check.fetchone()
+    if not qi_row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"质量负责人 {quality_inspector} 不存在或已禁用")
+    if qi_row[0] != "质量负责人":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{quality_inspector} 不是质量负责人")
 
     # 查询实验方法
     experiments_str = ", ".join(body.experiment_codes)
@@ -148,7 +178,7 @@ async def create_package(
 
     experiments_label = ", ".join(method_names) if method_names else experiments_str
 
-    # 生成任务包编号: BAG-BP{group_no}-P{seq}
+    # 生成任务包编号（内部概念，不进入任务号/记录号/报告号）
     count_result = await db.execute(
         text("SELECT COUNT(*) FROM task_packages WHERE group_no=:g"),
         {"g": group_no},
@@ -158,22 +188,30 @@ async def create_package(
 
     # 插入任务包（绑定委托，记录分配人）
     await db.execute(
-        text("""
+        text(f"""
             INSERT INTO task_packages (package_no, commission_no, group_id, group_no, assignee, reviewer,
-              assigned_by, material_name, experiment_codes, experiments, status, assigned_at, created_at, updated_at)
-            VALUES (:pn, :cn, :gid, :gn, :a, :rv, :ab, :mn, :ec, :ex, '待接收', localtimestamp, localtimestamp, localtimestamp)
+              assigned_by, material_name{pkg_sample_col}, experiment_codes, experiments, status, assigned_at, created_at, updated_at)
+            VALUES (:pn, :cn, :gid, :gn, :a, :rv, :ab, :mn{pkg_sample_val}, :ec, :ex, '待接收', localtimestamp, localtimestamp, localtimestamp)
         """),
         {
             "pn": package_no, "cn": commission_no, "gid": body.group_id, "gn": group_no,
             "a": body.assignee, "rv": reviewer, "ab": user["username"],
             "mn": material_name, "ec": experiments_str, "ex": experiments_label,
+            "sname": sample_name,
         },
     )
 
     # 为每个实验方法创建任务
+    # 实验任务编号: {group_no}-T{NN}（NN 为同一样品组内全局两位序号，跨任务包累计）
+    task_count = await db.execute(
+        text("SELECT COUNT(*) FROM tasks WHERE group_no=:g"),
+        {"g": group_no},
+    )
+    start_seq = task_count.fetchone()[0] + 1
     tasks_created = []
-    for seq, code in enumerate(body.experiment_codes, 1):
-        task_no = f"{package_no}-T{seq:02d}"
+    for offset, code in enumerate(body.experiment_codes):
+        seq = start_seq + offset
+        task_no = f"{group_no}-T{seq:02d}"
         m = await db.execute(
             text("SELECT experiment_name, method_code, standard, kind FROM experiment_methods WHERE experiment_code=:c"),
             {"c": code},
@@ -194,11 +232,11 @@ async def create_package(
         sample_nos = sample_nos_row[0] if sample_nos_row else None
 
         await db.execute(
-            text("""
+            text(f"""
                 INSERT INTO tasks (task_no, package_no, commission_no, group_id, group_no, experiment,
-                  method_code, experiment_code, standard, material_name, sample_nos,
+                  method_code, experiment_code, standard, material_name{task_sample_col}, sample_nos,
                   assignee, reviewer, quality_inspector, status, detection_location, created_at, updated_at)
-                VALUES (:tn, :pn, :cn, :gid, :gn, :ex, :mc, :ec, :st, :mn, :sn,
+                VALUES (:tn, :pn, :cn, :gid, :gn, :ex, :mc, :ec, :st, :mn{task_sample_val}, :sn,
                   :a, :rv, :qi, '待接收', :dl, localtimestamp, localtimestamp)
             """),
             {
@@ -206,6 +244,7 @@ async def create_package(
                 "gn": group_no, "ex": exp_name, "mc": method_code, "ec": code,
                 "st": standard, "mn": material_name, "sn": sample_nos,
                 "a": body.assignee, "rv": reviewer, "qi": quality_inspector or "", "dl": location,
+                "sname": sample_name,
             },
         )
         tasks_created.append({
@@ -276,15 +315,51 @@ async def accept_package(
             {"dl": location, "t": task_no, "p": package_no},
         )
 
-    # 审计日志
-    comm_result = await db.execute(
-        text("SELECT commission_no FROM task_packages WHERE package_no=:p"),
+    # 锁定任务配置快照（检测开始前固化当前「现行」配置版本，检测期间不漂移）
+    from app.api.v1.experiment_config import snapshot_task_config
+    pkg_tasks = await db.execute(
+        text("SELECT task_no, experiment_code FROM tasks WHERE package_no=:p"),
         {"p": package_no},
     )
-    comm_row = comm_result.fetchone()
-    if comm_row:
-        await log_operation(db, "task_package", package_no, user, "接收任务包",
-                             commission_no=comm_row[0], comment=body.acceptance_note or "开始检测")
+    for tk in pkg_tasks.fetchall():
+        await snapshot_task_config(db, tk[0], tk[1])
+
+    # 自动创建借出记录（样品 → 实验员）
+    sample_tasks = await db.execute(
+        text("SELECT sample_nos, commission_no FROM tasks WHERE package_no=:p"),
+        {"p": package_no},
+    )
+    all_sample_nos: set[str] = set()
+    comm_no_from_task = None
+    for row in sample_tasks.fetchall():
+        if row[0]:
+            for s in str(row[0]).split(","):
+                s = s.strip()
+                if s:
+                    all_sample_nos.add(s)
+        if not comm_no_from_task and row[1]:
+            comm_no_from_task = row[1]
+
+    for sno in all_sample_nos:
+        await db.execute(
+            text("""INSERT INTO package_loans (
+                    package_no, sample_no, borrower, borrowed_at, purpose,
+                    detection_location, return_status
+                ) VALUES (
+                    :pn, :sn, :b, localtimestamp, '实验检测',
+                    '', '未归还'
+                ) ON CONFLICT (package_no, sample_no) DO NOTHING"""),
+            {"pn": package_no, "sn": sno, "b": user["username"]},
+        )
+        # 更新样品状态为借出中
+        await db.execute(
+            text("UPDATE samples SET status='借出中', current_holder=:a, updated_at=localtimestamp WHERE sample_no=:sn AND status='已入库'"),
+            {"sn": sno, "a": user["username"]},
+        )
+
+    # 审计日志
+    await log_operation(db, "task_package", package_no, user, "接收任务包",
+                         commission_no=comm_no_from_task, comment=body.acceptance_note or "开始检测")
 
     return {"message": "任务包已接收", "status": "检测中"}
 
@@ -373,14 +448,19 @@ async def list_packages(
     where = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
     result = await db.execute(
-        text(f"SELECT package_no, commission_no, group_no, assignee, reviewer, assigned_by, material_name, experiments, status, assigned_at FROM task_packages {where} ORDER BY created_at DESC LIMIT :limit"),
+        text(f"SELECT package_no, commission_no, group_no, assignee, reviewer, assigned_by, material_name, experiments, status, assigned_at, (SELECT sg.sample_name FROM sample_groups sg WHERE sg.id = task_packages.group_id LIMIT 1) AS sample_name FROM task_packages {where} ORDER BY created_at DESC LIMIT :limit"),
         {**params, "limit": limit},
     )
+    rows = result.fetchall()
+    names = await _display_names(db, {r[3] for r in rows} | {r[4] for r in rows} | {r[5] for r in rows if r[5]})
     return [
         TaskPackageBrief(package_no=r[0], commission_no=r[1], group_no=r[2], assignee=r[3],
                           reviewer=r[4], assigned_by=r[5], material_name=r[6], experiments=r[7],
-                          status=r[8], assigned_at=str(r[9]) if r[9] else None)
-        for r in result.fetchall()
+                          status=r[8], assigned_at=str(r[9]) if r[9] else None, sample_name=r[10],
+                          assignee_name=names.get(r[3], r[3]),
+                          reviewer_name=names.get(r[4], r[4]),
+                          assigned_by_name=names.get(r[5], r[5]) if r[5] else None)
+        for r in rows
     ]
 
 
@@ -398,6 +478,24 @@ async def get_package(
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务包不存在")
     pkg = dict(zip(result.keys(), row))
+
+    # 账号 → 姓名
+    pkg_names = await _display_names(
+        db, {pkg.get("assignee"), pkg.get("reviewer"), pkg.get("assigned_by")}
+    )
+    for key in ("assignee", "reviewer", "assigned_by"):
+        if pkg.get(key):
+            pkg[f"{key}_name"] = pkg_names.get(pkg[key], pkg[key])
+
+    # 补充 sample_name（task_packages 不存样品名称，从样品组回查）
+    if not pkg.get("sample_name") and pkg.get("group_id"):
+        sg = await db.execute(
+            text("SELECT sample_name FROM sample_groups WHERE id=:gid"),
+            {"gid": pkg["group_id"]},
+        )
+        srow = sg.fetchone()
+        if srow:
+            pkg["sample_name"] = srow[0]
 
     tasks_result = await db.execute(
         text("SELECT task_no, experiment, experiment_code, method_code, status, detection_location, experiment_started_at, experiment_ended_at FROM tasks WHERE package_no=:p ORDER BY task_no"),
@@ -452,17 +550,19 @@ async def get_task(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
     task = dict(zip(result.keys(), row))
 
-    # 补充可能缺失的 material_name / standard / sample_nos
-    # sample_nos 从 samples 表聚合，不在 sample_groups 中
-    if not task.get("material_name") or not task.get("standard") or not task.get("sample_nos"):
+    # 补充可能缺失的 material_name / standard / sample_nos / sample_name
+    # sample_nos 从 samples 表聚合，sample_name 从 sample_groups 回查
+    if not task.get("material_name") or not task.get("standard") or not task.get("sample_nos") or not task.get("sample_name"):
         enrich = await db.execute(
             text("""
                 SELECT pk.material_name, em.standard,
                   (SELECT string_agg(s.sample_no, ', ' ORDER BY s.sample_no)
-                   FROM samples s WHERE s.group_id = t.group_id)
+                   FROM samples s WHERE s.group_id = t.group_id),
+                  sg.sample_name
                 FROM tasks t
                 JOIN task_packages pk ON pk.package_no = t.package_no
                 LEFT JOIN experiment_methods em ON em.experiment_code = t.experiment_code
+                LEFT JOIN sample_groups sg ON sg.id = t.group_id
                 WHERE t.task_no = :t
             """),
             {"t": task_no},
@@ -475,6 +575,8 @@ async def get_task(
                 task["standard"] = enrich_row[1]
             if not task.get("sample_nos") and enrich_row[2]:
                 task["sample_nos"] = enrich_row[2]
+            if not task.get("sample_name") and enrich_row[3]:
+                task["sample_name"] = enrich_row[3]
 
     # 原始记录
     records_result = await db.execute(
@@ -489,6 +591,21 @@ async def get_task(
         {"t": task_no},
     )
     attachments = [dict(zip(att_result.keys(), r)) for r in att_result.fetchall()]
+
+    # 账号 → 姓名（表中显示姓名而非账号名）
+    usernames = {
+        task.get("assignee"), task.get("reviewer"), task.get("quality_inspector"),
+    } | {r.get("owner") for r in records} | {a.get("uploader") for a in attachments}
+    names = await _display_names(db, usernames)
+    for key in ("assignee", "reviewer", "quality_inspector"):
+        if task.get(key):
+            task[f"{key}_name"] = names.get(task[key], task[key])
+    for r in records:
+        if r.get("owner"):
+            r["owner_name"] = names.get(r["owner"], r["owner"])
+    for a in attachments:
+        if a.get("uploader"):
+            a["uploader_name"] = names.get(a["uploader"], a["uploader"])
 
     # 退回修改时，返回复核员的修改意见和修改字段
     correction_info = None

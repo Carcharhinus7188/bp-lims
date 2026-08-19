@@ -1,6 +1,7 @@
 """客户异议 API — 登记→调查→重测→回复→归档完整生命周期"""
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from typing import Annotated
@@ -102,15 +103,10 @@ async def list_objections(
     """客户异议列表（按角色过滤）"""
     role = user.get("role", "")
     username = user.get("username", "")
-    if role == "质量负责人":
-        result = await db.execute(
-            text("SELECT * FROM objections WHERE quality_inspector=:u ORDER BY updated_at DESC"),
-            {"u": username},
-        )
-    else:
-        result = await db.execute(
-            text("SELECT * FROM objections ORDER BY updated_at DESC"),
-        )
+    # 质量负责人和管理员查看全部异议
+    result = await db.execute(
+        text("SELECT * FROM objections ORDER BY updated_at DESC"),
+    )
     return [dict(zip(result.keys(), r)) for r in result.fetchall()]
 
 
@@ -178,20 +174,52 @@ async def register_objection(
     seq = int(last[0][-3:]) + 1 if last else 1
     objection_no = f"{prefix}{seq:03d}"
 
+    # ── 证据冻结（Track 10）：登记时对关联 report/record/photo 取版本 + hash 快照 ──
+    evidence_snapshot: dict = {
+        "report_no": body.report_no,
+        "report_status": report.get("status"),
+        "task_no": report.get("task_no"),
+    }
+    task_no = report.get("task_no")
+    if task_no:
+        rec = await db.execute(
+            text("SELECT version, status, payload FROM records WHERE record_no=:t ORDER BY version DESC LIMIT 1"),
+            {"t": task_no},
+        )
+        rec_row = rec.fetchone()
+        if rec_row:
+            payload = rec_row[2]
+            if isinstance(payload, str):
+                payload_obj = json.loads(payload) if payload else {}
+                payload_str = payload
+            else:
+                payload_obj = payload if isinstance(payload, dict) else {}
+                payload_str = json.dumps(payload_obj, ensure_ascii=False, default=str)
+            evidence_snapshot["record_version"] = rec_row[0]
+            evidence_snapshot["record_status"] = rec_row[1]
+            evidence_snapshot["record_payload_sha256"] = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
+            photos = payload_obj.get("_photos") or []
+            evidence_snapshot["photo_codes"] = [
+                p.get("code") for p in photos if isinstance(p, dict) and p.get("code")
+            ]
+
     await db.execute(
         text("""INSERT INTO objections (
                 objection_no, report_no, commission_no, client_name, contact,
                 description, evidence_note, disputed_items, involved_samples,
                 application_channel, status, quality_inspector, registered_by,
-                submitted_at, created_at, updated_at
+                submitted_at, evidence_frozen_at, evidence_snapshot,
+                created_at, updated_at
             ) VALUES (
                 :ono, :rno, :cno, :cn, :ct, :desc, :en, :di, :isamp,
-                :ac, '调查中', :qi, :a, localtimestamp, localtimestamp, localtimestamp
+                :ac, '调查中', :qi, :a, localtimestamp, localtimestamp, CAST(:snap AS jsonb),
+                localtimestamp, localtimestamp
             )"""),
         {"ono": objection_no, "rno": body.report_no, "cno": report.get("commission_no", ""),
          "cn": body.client_name, "ct": body.contact, "desc": body.description,
          "en": body.evidence_note, "di": "、".join(disputed), "isamp": body.involved_samples,
-         "ac": body.application_channel, "qi": inspector, "a": actor},
+         "ac": body.application_channel, "qi": inspector, "a": actor,
+         "snap": json.dumps(evidence_snapshot, ensure_ascii=False, default=str)},
     )
 
     await db.execute(
@@ -449,6 +477,53 @@ async def dispatch_retest(
                   "task", task_no)
 
     return {"message": "重测任务已下发", "retest_task_no": task_no, "package_no": package_no}
+
+
+@router.post("/{objection_no}/complete-retest")
+async def complete_retest(
+    objection_no: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """样品管理员确认重测报告已签发，将异议从「重测任务已下发」流转回「待异议回复」"""
+    actor = user["username"]
+    if user.get("role") != "样品管理员":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有样品管理员可以确认重测完成")
+
+    obj = await db.execute(
+        text("SELECT * FROM objections WHERE objection_no=:n"), {"n": objection_no})
+    row = obj.fetchone()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="异议不存在")
+    item = dict(zip(obj.keys(), row))
+    if item.get("status") != "重测任务已下发":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前异议不在重测任务已下发阶段")
+
+    retest_task_no = item.get("retest_task_no")
+    if not retest_task_no:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该异议未关联重测任务")
+
+    # 校验重测任务对应的报告已签发
+    rep = await db.execute(
+        text("SELECT status FROM reports WHERE task_no=:t ORDER BY created_at DESC LIMIT 1"),
+        {"t": retest_task_no})
+    rep_row = rep.fetchone()
+    if not rep_row or rep_row[0] != "已发布":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="重测任务尚未签发报告，暂不能确认完成重测")
+
+    await db.execute(
+        text("""UPDATE objections SET status='待异议回复',
+                retest_note=COALESCE(retest_note,'')||:rn, updated_at=localtimestamp
+                WHERE objection_no=:n"""),
+        {"rn": "；重测完成（报告已签发）", "n": objection_no},
+    )
+    await db.execute(
+        text("""INSERT INTO objection_actions (objection_no, actor, action, comment, created_at)
+                VALUES (:n, :a, '确认重测完成', :c, localtimestamp)"""),
+        {"n": objection_no, "a": actor, "c": f"重测任务 {retest_task_no} 报告已签发"},
+    )
+    return {"message": "重测已完成，异议进入待回复阶段", "status": "待异议回复"}
 
 
 @router.put("/{objection_no}/prepare-response")

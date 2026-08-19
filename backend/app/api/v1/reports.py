@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Annotated
 
@@ -19,6 +20,17 @@ from app.services.report_docx import generate_report_docx, docx_to_html
 router = APIRouter(prefix="/reports", tags=["报告"])
 
 
+def _resolve_attachment_url(url: str) -> Path | None:
+    """将 /api/v1/attachments/file/{task_no}/{filename} 解析为本地文件路径"""
+    if not url:
+        return None
+    prefix = "/api/v1/attachments/file/"
+    if prefix in url:
+        rel = url.split(prefix, 1)[1]
+        return Path(settings.ATTACHMENT_DIR) / rel
+    return None
+
+
 class ReportBrief(BaseModel):
     report_no: str
     commission_no: str
@@ -30,11 +42,20 @@ class ReportBrief(BaseModel):
     quality_inspector: str | None
     publish_date: str | None
     created_at: str | None
+    supersedes_report_no: str | None = None
 
 
 def _report_no_for_task(task_no: str) -> str:
     """报告编号 = R + task_no去掉BP前缀"""
     return "R" + task_no[2:] if task_no.startswith("BP") else f"R{task_no}"
+
+
+def _correction_report_no(supersedes_report_no: str) -> str:
+    """由被更正的报告号派生更正报告号：R…-T01 → R…-T01-V2 → R…-T01-V3"""
+    m = re.match(r"^(.*)-V(\d+)$", supersedes_report_no)
+    if m:
+        return f"{m.group(1)}-V{int(m.group(2)) + 1}"
+    return f"{supersedes_report_no}-V2"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -69,12 +90,14 @@ async def generate_report(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                           detail="任务未完成复核，无法生成报告")
 
-    # 检查是否已有报告
+    # 检查是否已有报告（支持更正：已作废的报告可生成新版本）
     existing = await db.execute(
-        text("SELECT report_no, status FROM reports WHERE task_no = :t"),
+        text("SELECT report_no, status FROM reports WHERE task_no = :t ORDER BY created_at DESC, report_no DESC"),
         {"t": body.task_no},
     )
-    existing_row = existing.fetchone()
+    existing_rows = existing.fetchall()
+    existing_row = existing_rows[0] if existing_rows else None
+    supersedes_report_no: str | None = None
     if existing_row:
         if existing_row[1] in ("质量退回", "复核退回"):
             # 重置为待质量审核
@@ -83,8 +106,11 @@ async def generate_report(
                 {"r": existing_row[0]},
             )
             return {"report_no": existing_row[0], "status": "待质量审核", "message": "报告已重置为待质量审核"}
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                          detail=f"该任务已有报告（状态：{existing_row[1]}）")
+        if existing_row[1] == "已作废":
+            supersedes_report_no = existing_row[0]  # 更正重签：生成新版本报告
+        else:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                              detail=f"该任务已有报告（状态：{existing_row[1]}）")
 
     # 检查是否有锁定记录
     rec_check = await db.execute(
@@ -100,7 +126,7 @@ async def generate_report(
     )
     admin_row = admin_result.fetchone()
 
-    report_no = _report_no_for_task(body.task_no)
+    report_no = _correction_report_no(supersedes_report_no) if supersedes_report_no else _report_no_for_task(body.task_no)
 
     await db.execute(
         text("""
@@ -108,12 +134,12 @@ async def generate_report(
                 report_no, commission_no, task_no, status,
                 tester, verifier, quality_inspector, approver,
                 source_versions, report_category, sample_statement,
-                conclusion, notes, created_at, updated_at
+                conclusion, notes, supersedes_report_no, created_at, updated_at
             ) VALUES (
                 :rn, :cn, :tn, '待质量审核',
                 :tr, :vf, :qi, :ap,
                 '{}'::jsonb, '委托检验', '',
-                '', '', localtimestamp, localtimestamp
+                '', '', :sn, localtimestamp, localtimestamp
             )
         """),
         {
@@ -121,6 +147,7 @@ async def generate_report(
             "tr": task[2] or "",
             "vf": task[3] or "", "qi": task[4] or "",
             "ap": admin_row[0] if admin_row else "",
+            "sn": supersedes_report_no,
         },
     )
 
@@ -193,15 +220,20 @@ async def quality_review_report(
                           comment=body.comment,
                           field_name="status", old_value=rep_row[0], new_value=new_status)
 
-        # 联动：将任务退回修改
+        # 联动：将任务退回修改，解锁原始记录以便实验员重新编辑
         task_no = rep_row[2]
         if task_no:
             await db.execute(
                 text("UPDATE tasks SET status='退回修改', updated_at=localtimestamp WHERE task_no=:t"),
                 {"t": task_no},
             )
+            # 解锁关联的原始记录
+            await db.execute(
+                text("UPDATE records SET status='编辑中', updated_at=localtimestamp WHERE task_no=:t AND status IN ('已锁定','已复核')"),
+                {"t": task_no},
+            )
 
-        return {"message": "质量审核退回，任务已退回修改", "status": new_status}
+        return {"message": "质量审核退回，任务已退回至实验员修改（修改后需重新提交→复核→质量审核）", "status": new_status}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -213,9 +245,9 @@ async def approve_report(
     report_no: str,
     body: ReviewReportRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[dict, Depends(require_role("管理员"))],
+    user: Annotated[dict, Depends(require_role("管理员", "授权签字人"))],
 ):
-    """管理员（授权签字人）最终审核签发 — 批准→已发布，退回→待质量审核"""
+    """管理员 / 授权签字人最终审核签发 — 批准→已发布，退回→待质量审核（approver 记录实际签署人）"""
     rep = await db.execute(
         text("SELECT status FROM reports WHERE report_no=:r"),
         {"r": report_no},
@@ -228,16 +260,24 @@ async def approve_report(
                           detail=f"报告状态为'{rep_row[0]}'，无法签发")
 
     if body.decision == "通过":
+        # ── 电子签名（Track 12）：从 signatures 表取签署人签名图引用 ──
+        sig_row = (await db.execute(
+            text("SELECT image_file FROM signatures WHERE username=:u"),
+            {"u": user["username"]},
+        )).fetchone()
+        approver_signature = (sig_row[0] if sig_row and sig_row[0] else user["username"])
+
         # ── 批准签发 ──
         await db.execute(
             text("""
                 UPDATE reports SET status='已发布',
                     approver=:ap, signed_by_approver=localtimestamp,
+                    approver_signature=:asg,
                     publish_date=CURRENT_DATE, validity_status='有效',
                     updated_at=localtimestamp
                 WHERE report_no=:r
             """),
-            {"ap": user["username"], "r": report_no},
+            {"ap": user["username"], "r": report_no, "asg": approver_signature},
         )
 
         await log_operation(db, "report", report_no, user, "批准签发",
@@ -261,7 +301,7 @@ async def approve_report(
         await log_operation(db, "report", report_no, user, "签发退回",
                           comment=body.comment,
                           field_name="status", old_value=old_status, new_value="待质量审核")
-        return {"message": "报告已退回质量审核", "status": "待质量审核"}
+        return {"message": "报告已退回质量负责人重新审核（一层层返回：管理员→质量负责人）", "status": "待质量审核"}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -292,6 +332,8 @@ async def list_reports(
     elif role == "管理员":
         # 管理员可看到待签发和已发布的报告
         where = "WHERE 1=1"
+    elif role == "样品管理员":
+        where = "WHERE 1=1"
     else:
         where = "WHERE 1=1"
 
@@ -302,7 +344,7 @@ async def list_reports(
     result = await db.execute(
         text(f"""
             SELECT report_no, commission_no, task_no, status, tester, verifier,
-                   quality_inspector, publish_date, created_at
+                   quality_inspector, publish_date, created_at, supersedes_report_no
             FROM reports {where}
             ORDER BY created_at DESC LIMIT :limit
         """),
@@ -314,6 +356,7 @@ async def list_reports(
             status=r[3], tester=r[4], verifier=r[5], quality_inspector=r[6],
             publish_date=str(r[7]) if r[7] else None,
             created_at=str(r[8]) if r[8] else None,
+            supersedes_report_no=r[9],
         )
         for r in result.fetchall()
     ]
@@ -344,6 +387,18 @@ async def get_report(
         {"r": report_no},
     )
     report["actions"] = [dict(zip(actions_result.keys(), r)) for r in actions_result.fetchall()]
+    actors = {a.get("actor") for a in report["actions"]}
+    if actors:
+        placeholders = ", ".join(f":u{i}" for i in range(len(actors)))
+        params = {f"u{i}": u for i, u in enumerate(actors)}
+        actor_rows = await db.execute(
+            text(f"SELECT username, display_name FROM users WHERE username IN ({placeholders})"),
+            params,
+        )
+        actor_names = {uname: (dname or uname) for uname, dname in actor_rows.fetchall()}
+        for a in report["actions"]:
+            if a.get("actor"):
+                a["actor_name"] = actor_names.get(a["actor"], a["actor"])
 
     # 关联原始记录
     if report.get("task_no"):
@@ -509,24 +564,32 @@ async def revoke_report(
     commission_no = row[1]
     task_no = row[2]
 
+    # ── 一层层返回：管理员撤回 → 质量负责人重新审核 → (如需)复核员 → 实验员 ──
+    # 报告重置为待质量审核，清除签发信息，任务保持已复核状态
     await db.execute(
-        text("UPDATE reports SET status='已撤回', validity_status='已作废', updated_at=localtimestamp WHERE report_no=:r"),
+        text("""
+            UPDATE reports SET status='待质量审核', validity_status=NULL,
+                approver=NULL, signed_by_approver=NULL, approver_signature=NULL, publish_date=NULL,
+                updated_at=localtimestamp
+            WHERE report_no=:r
+        """),
         {"r": report_no},
     )
 
-    # 同步退回关联任务
+    # 任务保持已复核 — 质量负责人重新审核报告后决定是否退回实验员
+    # 这样形成: 管理员 → 质量负责人 → (如需)复核员 → 实验员 的逐层返回链
     if task_no:
         await db.execute(
-            text("UPDATE tasks SET status='退回修改', updated_at=localtimestamp WHERE task_no=:t"),
+            text("UPDATE tasks SET updated_at=localtimestamp WHERE task_no=:t"),
             {"t": task_no},
         )
 
-    reason_text = body.reason or "撤回已签发报告"
+    reason_text = body.reason or "撤回已签发报告，退回质量负责人重新审核"
     await log_operation(db, "report", report_no, user, "撤回报告",
                       comment=reason_text,
-                      field_name="status", old_value=old_status, new_value="已撤回",
+                      field_name="status", old_value=old_status, new_value="待质量审核",
                       reason=reason_text)
-    return {"message": "报告已撤回", "report_no": report_no, "status": "已撤回"}
+    return {"message": "报告已撤回并退回质量负责人重新审核（一层层返回）", "report_no": report_no, "status": "待质量审核"}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -541,7 +604,7 @@ async def preview_report(
 ):
     """在线预览检验报告 DOCX（质量负责人/管理员专用）"""
     role = user.get("role", "")
-    if role not in ("质量负责人", "管理员", "复核员"):
+    if role not in ("质量负责人", "管理员", "复核员", "样品管理员"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权预览报告")
 
     # 查报告
@@ -609,8 +672,58 @@ async def preview_report(
     for u_row in u_result.fetchall():
         user_names[u_row[0]] = u_row[1] or u_row[0]
 
+    # 查照片附件 — 从 attachments 表 + 记录 payload 中收集
+    photo_paths: list[str] = []
+    seen_files: set[str] = set()  # 去重：用文件名做 key
+
+    # 1) 从 attachments 表
     try:
-        docx_bytes = generate_report_docx(comm, groups, tasks, records_map, report, user_names)
+        p_result = await db.execute(
+            text("SELECT relative_path, stored_name FROM attachments WHERE commission_no=:c AND attachment_type='photo'"),
+            {"c": commission_no},
+        )
+        for p_row in p_result.fetchall():
+            rel_path = p_row[0] or ""
+            stored = p_row[1] or ""
+            if rel_path:
+                full = settings.ATTACHMENT_DIR / rel_path
+            elif stored:
+                full = settings.UPLOAD_DIR / stored
+            else:
+                continue
+            if full.exists() and full.name not in seen_files:
+                photo_paths.append(str(full))
+                seen_files.add(full.name)
+    except Exception:
+        pass
+
+    # 2) 从记录 payload._photos 提取
+    for tn, rec in records_map.items():
+        payload = rec.get("payload", {}) if isinstance(rec.get("payload"), dict) else {}
+        photos_meta = payload.get("_photos", []) or []
+        if isinstance(photos_meta, list):
+            for cp in photos_meta:
+                if not isinstance(cp, dict):
+                    continue
+                # 主照片
+                url = cp.get("previewUrl", "")
+                if url:
+                    path = _resolve_attachment_url(url)
+                    if path and path.exists() and path.name not in seen_files:
+                        photo_paths.append(str(path))
+                        seen_files.add(path.name)
+                # 样品级照片
+                for sn, data in (cp.get("samplePhotos", {}) or {}).items():
+                    if isinstance(data, dict):
+                        url = data.get("previewUrl", "")
+                        if url:
+                            path = _resolve_attachment_url(url)
+                            if path and path.exists() and path.name not in seen_files:
+                                photo_paths.append(str(path))
+                                seen_files.add(path.name)
+
+    try:
+        docx_bytes = generate_report_docx(comm, groups, tasks, records_map, report, user_names, photo_paths or None)
         title = f"检验报告 — {report_no}"
         html = docx_to_html(docx_bytes, title)
         return HTMLResponse(content=html)
@@ -638,7 +751,7 @@ async def download_report(
     report = dict(zip(rep_result.keys(), rep_row))
 
     # 权限：质量负责人/管理员可下载任意状态；其他角色仅已发布
-    if role not in ("质量负责人", "管理员"):
+    if role not in ("质量负责人", "管理员", "样品管理员"):
         if report.get("status") != "已发布":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="仅可下载已签发的报告")
 
@@ -697,8 +810,56 @@ async def download_report(
     for u_row in u_result.fetchall():
         user_names[u_row[0]] = u_row[1] or u_row[0]
 
+    # 查照片附件 — 从 attachments 表 + 记录 payload 中收集
+    photo_paths: list[str] = []
+    seen_files: set[str] = set()
+
+    # 1) 从 attachments 表
     try:
-        docx_bytes = generate_report_docx(comm, groups, tasks, records_map, report, user_names)
+        p_result = await db.execute(
+            text("SELECT relative_path, stored_name FROM attachments WHERE commission_no=:c AND attachment_type='photo'"),
+            {"c": commission_no},
+        )
+        for p_row in p_result.fetchall():
+            rel_path = p_row[0] or ""
+            stored = p_row[1] or ""
+            if rel_path:
+                full = settings.ATTACHMENT_DIR / rel_path
+            elif stored:
+                full = settings.UPLOAD_DIR / stored
+            else:
+                continue
+            if full.exists() and full.name not in seen_files:
+                photo_paths.append(str(full))
+                seen_files.add(full.name)
+    except Exception:
+        pass
+
+    # 2) 从记录 payload._photos 提取
+    for tn, rec in records_map.items():
+        payload = rec.get("payload", {}) if isinstance(rec.get("payload"), dict) else {}
+        photos_meta = payload.get("_photos", []) or []
+        if isinstance(photos_meta, list):
+            for cp in photos_meta:
+                if not isinstance(cp, dict):
+                    continue
+                url = cp.get("previewUrl", "")
+                if url:
+                    path = _resolve_attachment_url(url)
+                    if path and path.exists() and path.name not in seen_files:
+                        photo_paths.append(str(path))
+                        seen_files.add(path.name)
+                for sn, data in (cp.get("samplePhotos", {}) or {}).items():
+                    if isinstance(data, dict):
+                        url = data.get("previewUrl", "")
+                        if url:
+                            path = _resolve_attachment_url(url)
+                            if path and path.exists() and path.name not in seen_files:
+                                photo_paths.append(str(path))
+                                seen_files.add(path.name)
+
+    try:
+        docx_bytes = generate_report_docx(comm, groups, tasks, records_map, report, user_names, photo_paths or None)
         return Response(
             content=docx_bytes,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -720,7 +881,7 @@ async def list_report_documents(
 ):
     """返回报告关联的所有单据清单和可用操作"""
     role = user.get("role", "")
-    if role not in ("质量负责人", "管理员", "复核员"):
+    if role not in ("质量负责人", "管理员", "复核员", "样品管理员"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权查看")
 
     rep_result = await db.execute(
@@ -753,15 +914,43 @@ async def list_report_documents(
                 "available": True,
             })
 
-    # 2. SOP
+    # 2. SOP — 通过关联任务查找对应 SOP 模板
+    sop_task_no = report.get("task_no", "")
+    sop_available = False
+    sop_preview_url = None
+    sop_download_url = None
+    sop_label = "标准操作规程 (SOP)"
+    if sop_task_no:
+        try:
+            from pathlib import Path
+            from app.config import settings
+            tk_result = await db.execute(
+                text("SELECT experiment_code FROM tasks WHERE task_no=:t"),
+                {"t": sop_task_no},
+            )
+            tk_row = tk_result.fetchone()
+            if tk_row and tk_row[0]:
+                exp_code = tk_row[0]
+                sop_code = exp_code.replace("R", "SOP-")
+                if not sop_code.startswith("SOP-"):
+                    sop_code = f"SOP-{sop_code}"
+                tmpl_dir = Path(settings.TEMPLATE_DIR)
+                for f in tmpl_dir.glob(f"{sop_code}_*.docx"):
+                    sop_available = True
+                    sop_label = f"标准操作规程 (SOP) — {exp_code}"
+                    sop_preview_url = f"/api/v1/export/sop/{sop_task_no}/preview"
+                    sop_download_url = f"/api/v1/export/sop/{sop_task_no}/export"
+                    break
+        except Exception:
+            pass
     documents.append({
         "type": "SOP",
         "code": "SOP",
-        "label": "标准操作规程 (SOP)",
-        "preview_url": None,
-        "download_url": None,
-        "available": False,
-        "note": "SOP文件请从方法管理模块查看",
+        "label": sop_label,
+        "preview_url": sop_preview_url,
+        "download_url": sop_download_url,
+        "available": sop_available,
+        "note": "" if sop_available else "SOP文件请从方法管理模块查看",
     })
 
     # 3. 委托单
@@ -903,9 +1092,10 @@ async def correct_report(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[dict, Depends(require_role("管理员"))],
 ):
-    """管理员更正并重新签发报告"""
+    """管理员更正并重新签发报告：作废旧报告 + 生成新版本更正报告"""
     rep = await db.execute(
-        text("SELECT status FROM reports WHERE report_no=:r"), {"r": report_no}
+        text("SELECT status, task_no, commission_no FROM reports WHERE report_no=:r"),
+        {"r": report_no},
     )
     row = rep.fetchone()
     if not row:
@@ -915,7 +1105,8 @@ async def correct_report(
                           detail=f"报告状态为'{row[0]}'，只能更正已发布的报告")
 
     old_status = row[0]
-    # Mark old as void, create new revision
+    task_no = row[1]
+    # 作废旧报告
     await db.execute(
         text("""
             UPDATE reports SET status='已作废', validity_status='已作废',
@@ -927,4 +1118,49 @@ async def correct_report(
                       comment=f"更正并重新签发。原因：{body.reason}",
                       field_name="status", old_value=old_status, new_value="已作废",
                       reason=body.reason)
-    return {"message": "报告已作废，请通过报告中心重新生成更正报告", "report_no": report_no, "status": "已作废"}
+
+    # 无任务号（异常数据）则仅作废，不生成更正版本
+    if not task_no:
+        return {"message": "报告已作废（无关联任务，无法自动生成更正版本）",
+                "report_no": report_no, "status": "已作废"}
+
+    # 生成更正报告新版本（status=待质量审核，走正常审核→签发流程）
+    new_report_no = _correction_report_no(report_no)
+    task_res = await db.execute(
+        text("SELECT assignee, reviewer, quality_inspector FROM tasks WHERE task_no=:t"),
+        {"t": task_no},
+    )
+    tr = task_res.fetchone()
+    admin_res = await db.execute(
+        text("SELECT username FROM users WHERE role='管理员' AND enabled=TRUE ORDER BY username LIMIT 1")
+    )
+    admin_row = admin_res.fetchone()
+
+    await db.execute(
+        text("""
+            INSERT INTO reports (
+                report_no, commission_no, task_no, status,
+                tester, verifier, quality_inspector, approver,
+                source_versions, report_category, sample_statement,
+                conclusion, notes, supersedes_report_no, created_at, updated_at
+            ) VALUES (
+                :rn, :cn, :tn, '待质量审核',
+                :tr, :vf, :qi, :ap,
+                '{}'::jsonb, '委托检验', '',
+                '', '', :sn, localtimestamp, localtimestamp
+            )
+        """),
+        {
+            "rn": new_report_no, "cn": row[2], "tn": task_no,
+            "tr": (tr[0] if tr else "") or "",
+            "vf": (tr[1] if tr else "") or "",
+            "qi": (tr[2] if tr else "") or "",
+            "ap": admin_row[0] if admin_row else "",
+            "sn": report_no,
+        },
+    )
+    await log_operation(db, "report", new_report_no, user, "生成更正报告",
+                      comment=f"更正自 {report_no}，原因：{body.reason}")
+    return {"message": "已作废旧报告并生成更正报告新版本",
+            "report_no": report_no, "new_report_no": new_report_no,
+            "status": "已作废", "new_status": "待质量审核"}

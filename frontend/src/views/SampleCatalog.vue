@@ -2,7 +2,8 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
-import { Search, Plus, Delete } from '@element-plus/icons-vue'
+import { Search, Plus, Edit, Delete } from '@element-plus/icons-vue'
+import { isRealModel } from '../utils/model'
 
 const user = JSON.parse(localStorage.getItem('user') || '{}')
 const canManage = computed(() => user.role === '管理员' || user.role === '样品管理员')
@@ -11,62 +12,153 @@ const catalog = ref([])
 const loading = ref(true)
 const searchText = ref('')
 
-// 新增对话框
+// 新增/编辑对话框
 const dialogVisible = ref(false)
+const editMode = ref(false)
+const editingId = ref(null)
 const saving = ref(false)
+const dialogTitle = computed(() => editMode.value ? '编辑样品资料' : '新增样品资料')
 const form = ref({
   sample_name: '', model: '', material_name: '',
   sample_code: '', process: '', material_suffix: '',
   source_sequence: '', category: '', unit: '',
-  experiment_codes: [], notes: '',
+  notes: '', enabled: true,
 })
+
+// 检测项目库（含标准）与选择状态
+const experiments = ref([])
+const selectedExperimentCodes = ref([])
+const standardChoices = ref({})   // { experiment_code: 选中标准全文 }
+
+function standardsFor(code) {
+  const m = experiments.value.find(e => e.experiment_code === code)
+  return m?.standards || []
+}
+function experimentName(code) {
+  const m = experiments.value.find(e => e.experiment_code === code)
+  return m?.experiment_name || code
+}
+function isMultiStandard(code) {
+  return standardsFor(code).length > 1
+}
+const multiStandardCodes = computed(() => selectedExperimentCodes.value.filter(isMultiStandard))
+// 检验项目 = 所选检测项目名称；检验依据 = 各检测项目选中标准（拼接）
+const detectionMethodText = computed(() => selectedExperimentCodes.value.map(experimentName).filter(Boolean).join('、'))
+const detectionBasisText = computed(() => selectedExperimentCodes.value.map(c => standardChoices.value[c]).filter(Boolean).join('；'))
+
+function onExperimentsChange(codes) {
+  const next = {}
+  for (const code of codes) {
+    const stds = standardsFor(code)
+    const prev = standardChoices.value[code]
+    next[code] = (prev && stds.includes(prev)) ? prev : (stds[0] || '')
+  }
+  standardChoices.value = next
+}
+
+async function loadExperiments() {
+  try {
+    const { data } = await request.get('/config/methods')
+    experiments.value = data
+  } catch { experiments.value = [] }
+}
 
 async function loadCatalog() {
   loading.value = true
   try {
-    const { data } = await request.get('/catalog', { params: { search: searchText.value || undefined, limit: 200 } })
-    catalog.value = data
+    const res = await request.get('/catalog', { params: { search: searchText.value || undefined, limit: 200 } })
+    catalog.value = res.data
   } finally {
     loading.value = false
   }
 }
 
-function showAddDialog() {
+function resetForm() {
   form.value = {
     sample_name: '', model: '', material_name: '',
     sample_code: '', process: '', material_suffix: '',
     source_sequence: '', category: '', unit: '',
-    experiment_codes: [], notes: '',
+    notes: '', enabled: true,
   }
+  selectedExperimentCodes.value = []
+  standardChoices.value = {}
+}
+
+function showAddDialog() {
+  editMode.value = false
+  editingId.value = null
+  resetForm()
   dialogVisible.value = true
 }
 
-async function handleAdd() {
+function openEdit(row) {
+  editMode.value = true
+  editingId.value = row.id
+  form.value = {
+    sample_name: row.sample_name || '',
+    model: row.model || '',
+    material_name: row.material_name || '',
+    sample_code: row.sample_code || '',
+    process: row.process || '',
+    material_suffix: '',
+    source_sequence: '',
+    category: row.category || '',
+    unit: row.unit || '',
+    notes: '',
+    enabled: row.enabled !== false,
+  }
+  const codes = Array.isArray(row.experiment_codes) ? row.experiment_codes : []
+  selectedExperimentCodes.value = codes
+  // 忽略空白做匹配：Excel 导入的检测依据已去掉空格，与标准全文（含空格）需归一化后比对
+  const basis = (row.detection_basis || '').replace(/\s+/g, '')
+  const choices = {}
+  for (const code of codes) {
+    const stds = standardsFor(code)
+    if (!stds.length) { choices[code] = ''; continue }
+    const matched = stds.find(s => s && basis.includes(s.replace(/\s+/g, '')))
+    choices[code] = matched || stds[0]
+  }
+  standardChoices.value = choices
+  dialogVisible.value = true
+}
+
+async function handleSave() {
   const f = form.value
   if (!f.sample_name) { ElMessage.warning('请输入样品名称'); return }
-  if (!f.model) { ElMessage.warning('请输入型号'); return }
+  if (!f.model) { ElMessage.warning('请输入规格型号'); return }
+  if (!isRealModel(f.model)) { ElMessage.warning('请输入真实规格型号（不能为「-」「无」等占位符）'); return }
   if (!f.material_name) { ElMessage.warning('请输入材料名称'); return }
+
+  const payload = {
+    sample_name: f.sample_name,
+    model: f.model,
+    material_name: f.material_name,
+    detection_method: detectionMethodText.value || '',
+    detection_basis: detectionBasisText.value || '',
+    experiment_codes: selectedExperimentCodes.value,
+    sample_code: f.sample_code || null,
+    process: f.process || '',
+    category: f.category || '',
+    unit: f.unit || '',
+    notes: f.notes || '',
+  }
 
   saving.value = true
   try {
-    await request.post('/catalog', {
-      sample_name: f.sample_name,
-      model: f.model,
-      material_name: f.material_name,
-      sample_code: f.sample_code || null,
-      process: f.process || null,
-      material_suffix: f.material_suffix || null,
-      source_sequence: f.source_sequence || null,
-      category: f.category || null,
-      unit: f.unit || null,
-      experiment_codes: f.experiment_codes.length ? f.experiment_codes : null,
-      notes: f.notes || null,
-    })
-    ElMessage.success('样品资料添加成功')
+    if (editMode.value) {
+      payload.enabled = f.enabled
+      await request.put(`/catalog/${editingId.value}`, payload)
+      ElMessage.success('样品资料已更新，并已回写历史记录')
+    } else {
+      payload.material_suffix = f.material_suffix || null
+      payload.source_sequence = f.source_sequence || null
+      await request.post('/catalog', payload)
+      ElMessage.success('样品资料添加成功')
+    }
     dialogVisible.value = false
     loadCatalog()
   } catch (e) {
-    ElMessage.error(e.response?.data?.detail || '添加失败')
+    ElMessage.error(e.response?.data?.detail || '保存失败')
   } finally {
     saving.value = false
   }
@@ -87,7 +179,10 @@ async function handleDelete(item) {
   }
 }
 
-onMounted(loadCatalog)
+onMounted(() => {
+  loadCatalog()
+  loadExperiments()
+})
 </script>
 
 <template>
@@ -112,8 +207,14 @@ onMounted(loadCatalog)
       <el-table :data="catalog" v-loading="loading" stripe empty-text="暂无数据" max-height="600">
         <el-table-column prop="sample_code" label="样品代码" width="120" />
         <el-table-column prop="sample_name" label="样品名称" min-width="200" />
-        <el-table-column prop="model" label="型号" width="150" />
+        <el-table-column prop="model" label="规格型号" width="150" />
         <el-table-column prop="material_name" label="材料名称" width="150" />
+        <el-table-column prop="detection_method" label="检验项目" min-width="120">
+          <template #default="{ row }">{{ row.detection_method || '—' }}</template>
+        </el-table-column>
+        <el-table-column prop="detection_basis" label="检测依据" min-width="200">
+          <template #default="{ row }">{{ row.detection_basis || '—' }}</template>
+        </el-table-column>
         <el-table-column prop="process" label="工艺" width="120" />
         <el-table-column prop="category" label="类别" width="120">
           <template #default="{ row }">
@@ -126,16 +227,17 @@ onMounted(loadCatalog)
             <el-tag :type="row.enabled ? 'success' : 'danger'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column v-if="canManage" label="操作" width="80" fixed="right">
+        <el-table-column v-if="canManage" label="操作" width="140" fixed="right">
           <template #default="{ row }">
+            <el-button text type="primary" :icon="Edit" @click.stop="openEdit(row)">编辑</el-button>
             <el-button text type="danger" :icon="Delete" @click.stop="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
     </el-card>
 
-    <!-- 新增样品资料对话框 -->
-    <el-dialog v-model="dialogVisible" title="新增样品资料" width="560px" :close-on-click-modal="false">
+    <!-- 新增/编辑对话框 -->
+    <el-dialog v-model="dialogVisible" :title="dialogTitle" width="560px" :close-on-click-modal="false">
       <el-form :model="form" label-width="100px">
         <el-row :gutter="16">
           <el-col :span="12">
@@ -151,7 +253,7 @@ onMounted(loadCatalog)
         </el-row>
         <el-row :gutter="16">
           <el-col :span="12">
-            <el-form-item label="型号" required>
+            <el-form-item label="规格型号" required>
               <el-input v-model="form.model" placeholder="如 φ10×50mm" />
             </el-form-item>
           </el-col>
@@ -161,6 +263,30 @@ onMounted(loadCatalog)
             </el-form-item>
           </el-col>
         </el-row>
+        <el-form-item label="检验项目">
+          <el-select
+            v-model="selectedExperimentCodes"
+            multiple filterable collapse-tags
+            placeholder="选择检测项目（可多选）"
+            style="width:100%"
+            @change="onExperimentsChange"
+          >
+            <el-option v-for="e in experiments" :key="e.experiment_code" :label="e.experiment_name" :value="e.experiment_code" />
+          </el-select>
+        </el-form-item>
+
+        <el-form-item v-for="code in multiStandardCodes" :key="code" label="选择标准">
+          <div style="width:100%">
+            <div style="font-size:12px;color:#64748B;margin-bottom:4px">{{ experimentName(code) }}</div>
+            <el-select v-model="standardChoices[code]" filterable style="width:100%">
+              <el-option v-for="s in standardsFor(code)" :key="s" :label="s" :value="s" />
+            </el-select>
+          </div>
+        </el-form-item>
+
+        <el-form-item v-if="selectedExperimentCodes.length" label="检验依据">
+          <div style="width:100%;padding:8px 12px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:4px;font-size:12px;color:#475569;line-height:1.6;white-space:pre-wrap">{{ detectionBasisText || '—' }}</div>
+        </el-form-item>
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="工艺">
@@ -179,13 +305,18 @@ onMounted(loadCatalog)
               <el-input v-model="form.unit" placeholder="如 件、kg" />
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col v-if="!editMode" :span="12">
             <el-form-item label="后缀">
               <el-input v-model="form.material_suffix" placeholder="材料后缀" />
             </el-form-item>
           </el-col>
+          <el-col v-else :span="12">
+            <el-form-item label="状态">
+              <el-switch v-model="form.enabled" active-text="启用" inactive-text="停用" />
+            </el-form-item>
+          </el-col>
         </el-row>
-        <el-form-item label="来源序号">
+        <el-form-item v-if="!editMode" label="来源序号">
           <el-input v-model="form.source_sequence" placeholder="来源序号" />
         </el-form-item>
         <el-form-item label="备注">
@@ -194,7 +325,7 @@ onMounted(loadCatalog)
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="handleAdd" :loading="saving">添加</el-button>
+        <el-button type="primary" @click="handleSave" :loading="saving">{{ editMode ? '保存' : '添加' }}</el-button>
       </template>
     </el-dialog>
   </div>

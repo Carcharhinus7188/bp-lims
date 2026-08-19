@@ -28,7 +28,7 @@ class UserCreate(BaseModel):
     username: str = Field(..., min_length=2, max_length=64)
     display_name: str = Field(..., min_length=1, max_length=64)
     password: str = Field(..., min_length=6)
-    role: str = Field(..., pattern=r"^(管理员|样品管理员|实验员|复核员|质量负责人)$")
+    role: str = Field(..., pattern=r"^(管理员|样品管理员|实验员|复核员|质量负责人|授权签字人)$")
 
 
 class UserResetPassword(BaseModel):
@@ -90,7 +90,7 @@ async def reset_password(
 
 
 class UserUpdateRole(BaseModel):
-    role: str = Field(..., pattern=r"^(管理员|样品管理员|实验员|复核员|质量负责人)$")
+    role: str = Field(..., pattern=r"^(管理员|样品管理员|实验员|复核员|质量负责人|授权签字人)$")
 
 
 @router.put("/{username}/role")

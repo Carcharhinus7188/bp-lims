@@ -3,6 +3,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import request from '../utils/request'
 import { ElMessage } from 'element-plus'
+import { materialWithSample } from '../utils/material'
 
 const router = useRouter()
 const user = JSON.parse(localStorage.getItem('user') || '{}')
@@ -110,6 +111,7 @@ const createForm = ref({
   experiment_codes: [],
   assignee: '',
   reviewer: '',
+  quality_inspector: '',
   detection_locations: {},
 })
 
@@ -172,7 +174,7 @@ async function onCommissionChange(cno) {
       return {
         ...g,
         preset_codes: presetCodes,
-        label: `${g.group_no} — ${g.material_name} (${g.quantity || g.sample_count || '?'}件)`,
+        label: `${g.group_no} — ${materialWithSample(g.material_name, g.sample_name)} (${g.quantity || g.sample_count || '?'}件)`,
         value: g.id,
       }
     })
@@ -199,6 +201,8 @@ async function handleCreate() {
   if (!f.group_id) { ElMessage.warning('请选择样品组'); return }
   if (!f.experiment_codes.length) { ElMessage.warning('请选择检测项目'); return }
   if (!f.assignee) { ElMessage.warning('请选择实验员'); return }
+  if (!f.reviewer) { ElMessage.warning('请选择复核员'); return }
+  if (!f.quality_inspector) { ElMessage.warning('请选择质量负责人'); return }
 
   creating.value = true
   try {
@@ -211,7 +215,7 @@ async function handleCreate() {
       detection_locations: f.detection_locations,
     })
     const data = resp.data || resp
-    ElMessage.success(`任务包创建成功 — 复核员: ${data.reviewer || '自动匹配'}, 质量负责人: ${data.quality_inspector || '待指定'}`)
+    ElMessage.success(`任务包创建成功 — 复核员: ${data.reviewer}, 质量负责人: ${data.quality_inspector}`)
     showCreateDialog.value = false
     createForm.value = { commission_no: '', group_id: null, experiment_codes: [], assignee: '', reviewer: '', quality_inspector: '', detection_locations: {} }
     loadPackages('')
@@ -242,11 +246,19 @@ async function handleCreate() {
       <el-table :data="packages" v-loading="loading" stripe @row-click="viewPackage" style="cursor:pointer">
         <el-table-column prop="package_no" label="任务包编号" width="220" />
         <el-table-column prop="commission_no" label="委托编号" width="180" />
-        <el-table-column prop="material_name" label="材料" width="150" />
+        <el-table-column label="材料" min-width="180">
+          <template #default="{ row }">{{ materialWithSample(row.material_name, row.sample_name) }}</template>
+        </el-table-column>
         <el-table-column prop="experiments" label="检测项目" min-width="180" />
-        <el-table-column prop="assignee" label="实验员" width="100" />
-        <el-table-column prop="reviewer" label="复核员" width="100" />
-        <el-table-column prop="assigned_by" label="分配人" width="100" />
+        <el-table-column prop="assignee" label="实验员" width="100">
+          <template #default="{ row }">{{ row.assignee_name || row.assignee }}</template>
+        </el-table-column>
+        <el-table-column prop="reviewer" label="复核员" width="100">
+          <template #default="{ row }">{{ row.reviewer_name || row.reviewer }}</template>
+        </el-table-column>
+        <el-table-column prop="assigned_by" label="分配人" width="100">
+          <template #default="{ row }">{{ row.assigned_by_name || row.assigned_by }}</template>
+        </el-table-column>
         <el-table-column prop="status" label="状态" width="100">
           <template #default="{ row }">
             <el-tag
@@ -356,8 +368,8 @@ async function handleCreate() {
           </el-select>
         </el-form-item>
 
-        <el-form-item label="复核员">
-          <el-select v-model="createForm.reviewer" placeholder="留空自动匹配" clearable filterable style="width:100%">
+        <el-form-item label="复核员" required>
+          <el-select v-model="createForm.reviewer" placeholder="请选择复核员" filterable style="width:100%">
             <el-option
               v-for="u in reviewers"
               :key="u.username"
@@ -365,11 +377,10 @@ async function handleCreate() {
               :value="u.username"
             />
           </el-select>
-          <div style="font-size:11px;color:#94A3B8;margin-top:2px">留空则由系统自动匹配工作量最低的复核员（排除实验员本人）</div>
         </el-form-item>
 
-        <el-form-item label="质量负责人">
-          <el-select v-model="createForm.quality_inspector" placeholder="留空自动匹配" clearable filterable style="width:100%">
+        <el-form-item label="质量负责人" required>
+          <el-select v-model="createForm.quality_inspector" placeholder="请选择质量负责人" filterable style="width:100%">
             <el-option
               v-for="u in qualityInspectors"
               :key="u.username"
@@ -377,7 +388,6 @@ async function handleCreate() {
               :value="u.username"
             />
           </el-select>
-          <div style="font-size:11px;color:#94A3B8;margin-top:2px">留空则由系统自动匹配工作量最低的质量负责人（排除实验员+复核员）</div>
         </el-form-item>
       </el-form>
 

@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onBeforeUnmount, nextTick } from 'vue'
+import { chinaDate, chinaTime } from '../utils/time'
 
 const props = defineProps({
   checkpoint: { type: Object, required: true },
@@ -32,6 +33,12 @@ function cameraErrorMsg(err) {
 async function start() {
   error.value = ''
   videoReady.value = false
+
+  // 非安全上下文（HTTP 且非 localhost）下浏览器禁用 getUserMedia
+  if (typeof navigator.mediaDevices === 'undefined' || !navigator.mediaDevices.getUserMedia || !window.isSecureContext) {
+    error.value = '当前页面为非安全连接（非 HTTPS / 非 localhost），浏览器禁止调用摄像头。请改用「从文件选择」上传照片，或通过 HTTPS 访问本系统。'
+    return
+  }
 
   try {
     const allDevices = await navigator.mediaDevices.enumerateDevices()
@@ -99,13 +106,7 @@ function capture() {
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
 
   // Draw timestamp watermark at bottom-right corner
-  const now = new Date()
-  const ts = now.getFullYear() + '-'
-    + String(now.getMonth() + 1).padStart(2, '0') + '-'
-    + String(now.getDate()).padStart(2, '0') + ' '
-    + String(now.getHours()).padStart(2, '0') + ':'
-    + String(now.getMinutes()).padStart(2, '0') + ':'
-    + String(now.getSeconds()).padStart(2, '0')
+  const ts = chinaDate() + ' ' + chinaTime()
   const fontSize = Math.max(14, Math.round(canvas.width * 0.025))
   ctx.font = `${fontSize}px "Courier New", monospace`
   const metrics = ctx.measureText(ts)
@@ -144,14 +145,8 @@ function handleFileInput(e) {
     canvas.height = img.naturalHeight
     const ctx = canvas.getContext('2d')
     ctx.drawImage(img, 0, 0)
-    // Timestamp watermark
-    const now = new Date()
-    const ts = now.getFullYear() + '-'
-      + String(now.getMonth() + 1).padStart(2, '0') + '-'
-      + String(now.getDate()).padStart(2, '0') + ' '
-      + String(now.getHours()).padStart(2, '0') + ':'
-      + String(now.getMinutes()).padStart(2, '0') + ':'
-      + String(now.getSeconds()).padStart(2, '0')
+    // Timestamp watermark（统一中国时间口径）
+    const ts = chinaDate() + ' ' + chinaTime()
     const fontSize = Math.max(14, Math.round(canvas.width * 0.025))
     ctx.font = `${fontSize}px "Courier New", monospace`
     const metrics = ctx.measureText(ts)

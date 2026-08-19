@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import request from '../utils/request'
 import { useAuthStore } from '../stores/auth'
 import { ElMessage } from 'element-plus'
+import { formatChinaDateTime } from '../utils/time'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -29,6 +30,8 @@ const reviewDialogVisible = ref(false)
 const reviewDecision = ref('通过')
 const reviewComment = ref('')
 const reviewing = ref(false)
+const signatureUrl = ref('')
+const signatureConfirmed = ref(false)
 
 const voidDialogVisible = ref(false)
 const voidReason = ref('')
@@ -109,7 +112,9 @@ async function loadPreview(doc) {
   previewTitle.value = doc.label
   previewHtml.value = ''
   try {
-    const resp = await request.get(doc.preview_url, { responseType: 'text' })
+    // Strip /api/v1 prefix since request already has baseURL: '/api/v1'
+    const url = doc.preview_url.replace(/^\/api\/v1/, '')
+    const resp = await request.get(url, { responseType: 'text' })
     previewHtml.value = typeof resp === 'string' ? resp : resp.data
   } catch (e) {
     previewHtml.value = `<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#EF4444"><div>⚠️ 预览失败：${e.response?.data?.detail || e.message}</div></body></html>`
@@ -118,12 +123,28 @@ async function loadPreview(doc) {
   }
 }
 
-function downloadDocument(doc) {
+async function downloadDocument(doc) {
   if (!doc?.download_url) {
     ElMessage.warning('该文档暂无下载')
     return
   }
-  window.open(`/api/v1${doc.download_url.replace('/api/v1', '')}`, '_blank')
+  try {
+    const url = doc.download_url.replace(/^\/api\/v1/, '')
+    const resp = await request.get(url, { responseType: 'blob' })
+    const blob = new Blob([resp.data || resp], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })
+    const objectUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = objectUrl
+    a.download = `${(doc.label || doc.type || '文档').replace(/[\\/:*?"<>|]/g, '_')}.docx`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(objectUrl)
+    ElMessage.success('下载完成')
+  } catch (e) {
+    if (e.response?.status === 403) ElMessage.error('无权限下载此文档')
+    else ElMessage.error('下载失败: ' + (e.response?.data?.detail || e.message))
+  }
 }
 
 // Watch previewTab change
@@ -146,9 +167,9 @@ function openQualityReview() {
   reviewDialogVisible.value = true
 }
 
-// ── Admin Approve ──
+// ── Admin Approve（管理员 / 授权签字人）──
 const canApprove = computed(() => {
-  if (userRole.value !== '管理员') return false
+  if (userRole.value !== '管理员' && userRole.value !== '授权签字人') return false
   if (!selectedReport.value) return false
   return selectedReport.value.status === '待管理员签发'
 })
@@ -156,7 +177,22 @@ const canApprove = computed(() => {
 function openApprove() {
   reviewDecision.value = '通过'
   reviewComment.value = ''
+  signatureConfirmed.value = false
   reviewDialogVisible.value = true
+  loadSignature()
+}
+
+// 加载当前签署人的电子签名（带 JWT 拉取 blob → objectURL）
+async function loadSignature() {
+  signatureUrl.value = ''
+  const username = userName.value
+  if (!username) return
+  try {
+    const res = await request.get(`/signatures/${username}.png`, { responseType: 'blob' })
+    signatureUrl.value = URL.createObjectURL(res.data)
+  } catch {
+    signatureUrl.value = ''
+  }
 }
 
 // ── Void / Correct ──
@@ -164,6 +200,12 @@ const canVoid = computed(() => {
   if (userRole.value !== '管理员') return false
   if (!selectedReport.value) return false
   return selectedReport.value.status === '已发布'
+})
+
+// 更正链：当前报告被哪份新报告所更正（若有）
+const correctionSuccessor = computed(() => {
+  if (!selectedReport.value) return null
+  return reports.value.find(r => r.supersedes_report_no === selectedReport.value.report_no) || null
 })
 
 function openVoidDialog(action) {
@@ -180,8 +222,12 @@ async function submitVoid() {
     const endpoint = voidAction.value === 'void'
       ? `/reports/${rn}/void`
       : `/reports/${rn}/correct`
-    await request.post(endpoint, { reason: voidReason.value, action: voidAction.value })
-    ElMessage.success(voidAction.value === 'void' ? '报告已作废' : '报告已标记更正')
+    const resp = await request.post(endpoint, { reason: voidReason.value, action: voidAction.value })
+    if (voidAction.value === 'correct' && resp.data?.new_report_no) {
+      ElMessage.success(`已作废旧报告并生成更正报告 ${resp.data.new_report_no}（待质量审核）`)
+    } else {
+      ElMessage.success(voidAction.value === 'void' ? '报告已作废' : '报告已标记更正')
+    }
     voidDialogVisible.value = false
     await loadReports()
     if (selectedReport.value) await selectReport(selectedReport.value)
@@ -238,6 +284,10 @@ async function submitDelivery() {
 async function submitReview() {
   if (reviewDecision.value === '退回' && !reviewComment.value.trim()) {
     ElMessage.warning('退回时必须填写意见'); return
+  }
+  // 签发（通过）需电子签名二次确认
+  if (canApprove.value && reviewDecision.value === '通过' && !signatureConfirmed.value) {
+    ElMessage.warning('请确认电子签名后再签发'); return
   }
   reviewing.value = true
   try {
@@ -345,6 +395,12 @@ onMounted(loadReports)
                   {{ selectedReport.report_no }}
                   <el-tag :type="getStatusType(selectedReport.status)" size="small" style="margin-left:8px">{{ selectedReport.status }}</el-tag>
                 </div>
+                <div v-if="reportDetail?.supersedes_report_no || correctionSuccessor" class="rc-correct-chain">
+                  <span v-if="reportDetail?.supersedes_report_no">更正自 {{ reportDetail.supersedes_report_no }}</span>
+                  <el-tag v-if="correctionSuccessor" type="warning" size="small" style="margin-left:6px">
+                    已被 {{ correctionSuccessor.report_no }} 更正
+                  </el-tag>
+                </div>
                 <div class="rc-meta-sub">
                   <span>委托：{{ selectedReport.commission_no }}</span>
                   <span>实验员：{{ selectedReport.tester || '-' }}</span>
@@ -370,11 +426,11 @@ onMounted(loadReports)
                 <el-timeline-item
                   v-for="(act, i) in reportDetail.actions.slice(-6)"
                   :key="i"
-                  :timestamp="act.created_at"
+                  :timestamp="formatChinaDateTime(act.created_at)"
                   size="small"
                   :type="act.action.includes('退回') || act.action.includes('作废') ? 'danger' : 'primary'"
                 >
-                  <strong>{{ act.actor }}</strong> — {{ act.action }}
+                  <strong>{{ act.actor_name || act.actor }}</strong> — {{ act.action }}
                   <span v-if="act.comment" style="color:#64748B;margin-left:4px">{{ act.comment }}</span>
                 </el-timeline-item>
               </el-timeline>
@@ -419,7 +475,7 @@ onMounted(loadReports)
                 </div>
                 <!-- iframe preview -->
                 <div v-if="previewHtml" class="rc-iframe-wrap">
-                  <iframe :srcdoc="previewHtml" class="rc-iframe" sandbox="allow-same-origin" />
+                  <iframe :srcdoc="previewHtml" class="rc-iframe" sandbox="allow-same-origin allow-scripts" />
                 </div>
                 <el-empty v-else-if="!previewLoading" description="该文档暂无在线预览" />
               </template>
@@ -460,6 +516,17 @@ onMounted(loadReports)
           </el-form-item>
           <el-form-item label="审核意见">
             <el-input v-model="reviewComment" type="textarea" :rows="3" placeholder="审核意见（退回时必填）" />
+          </el-form-item>
+          <el-form-item v-if="canApprove && reviewDecision === '通过'" label="电子签名">
+            <div style="width:100%">
+              <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+                <img v-if="signatureUrl" :src="signatureUrl" style="height:56px;max-width:180px;border:1px solid #E2E8F0;border-radius:4px;padding:4px;background:#fff" />
+                <el-alert v-else type="warning" :closable="false" show-icon style="flex:1">
+                  <template #title>当前签署人（{{ userName }}）未上传电子签名，将按无签名图签发</template>
+                </el-alert>
+              </div>
+              <el-checkbox v-model="signatureConfirmed">我确认以本人名义进行电子签名并签发本报告</el-checkbox>
+            </div>
           </el-form-item>
           <el-form-item v-if="!canApprove">
             <el-alert type="info" :closable="false" show-icon style="width:100%">
@@ -554,6 +621,7 @@ onMounted(loadReports)
 .rc-meta-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
 .rc-meta-main { flex: 1; }
 .rc-report-no { font-size: 17px; font-weight: 700; color: #0F172A; }
+.rc-correct-chain { font-size: 12px; color: #B45309; margin-top: 4px; display: flex; align-items: center; flex-wrap: wrap; }
 .rc-meta-sub { font-size: 12px; color: #64748B; margin-top: 4px; display: flex; gap: 16px; flex-wrap: wrap; }
 .rc-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .rc-docs-card { margin-bottom: 0; }

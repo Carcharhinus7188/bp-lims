@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, get_db, require_role
+from app.services.audit_service import log_operation
 
 router = APIRouter(prefix="/returns", tags=["回库确认"])
 
@@ -21,15 +22,6 @@ class ReturnConfirm(BaseModel):
 
 
 class SubmitReturnRequest(BaseModel):
-    package_no: str
-    sample_nos: list[str]
-    detection_location: str = ""
-    purpose: str = "实验检测"
-    issue_note: str = ""
-
-
-class SubmitLoanRequest(BaseModel):
-    """借出登记（实验员从样品库取出样品时登记）"""
     package_no: str
     sample_nos: list[str]
     detection_location: str = ""
@@ -90,7 +82,7 @@ async def confirm_return(
     """确认样品回库（样品管理员操作）"""
     # 检查记录存在
     result = await db.execute(
-        text("SELECT id, return_status FROM package_loans WHERE id=:id"),
+        text("SELECT id, return_status, sample_no, package_no FROM package_loans WHERE id=:id"),
         {"id": loan_id},
     )
     loan = result.fetchone()
@@ -98,6 +90,17 @@ async def confirm_return(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="借出记录不存在")
     if loan[1] == "已确认":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该记录已确认回库")
+
+    sample_no = loan[2]
+    package_no = loan[3]
+
+    # 解析 commission_no（用于审计追溯）
+    comm_row = await db.execute(
+        text("SELECT commission_no FROM samples WHERE sample_no=:sn"),
+        {"sn": sample_no},
+    )
+    comm_val = comm_row.fetchone()
+    commission_no = comm_val[0] if comm_val else None
 
     now = text("localtimestamp")
     await db.execute(
@@ -121,83 +124,19 @@ async def confirm_return(
         },
     )
 
-    # 记录审计日志
+    # 回写样品状态：借出中 → 已入库，清空持有人
     await db.execute(
-        text("""
-            INSERT INTO audit_logs (entity_type, entity_id, actor, actor_name, actor_role, action, created_at)
-            VALUES ('package_loan', :eid, :actor, :name, :role, 'confirm_return', localtimestamp)
-        """),
-        {
-            "eid": str(loan_id),
-            "actor": user["username"],
-            "name": user.get("display_name", ""),
-            "role": user.get("role", ""),
-        },
+        text("""UPDATE samples SET status='已入库', current_holder='', updated_at=localtimestamp
+                WHERE sample_no=:sn AND status='借出中'"""),
+        {"sn": sample_no},
     )
 
-    return {"message": "回库已确认", "loan_id": loan_id}
+    # 审计日志（完整落库，含哈希链 + commission_no 追溯）
+    await log_operation(db, "package_loan", str(loan_id), user, "确认回库",
+                        commission_no=commission_no,
+                        comment=body.return_condition or "样品已回库")
 
-
-@router.post("/loan", status_code=201)
-async def submit_loan(
-    body: SubmitLoanRequest,
-    db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[dict, Depends(get_current_user)],
-):
-    """实验员登记样品借出"""
-    actor = user["username"]
-    if user.get("role") != "实验员":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有实验员可以登记借出")
-
-    # 验证任务包
-    pkg = await db.execute(
-        text("SELECT package_no, commission_no, assignee FROM task_packages WHERE package_no=:pn"),
-        {"pn": body.package_no},
-    )
-    pkg_row = pkg.fetchone()
-    if not pkg_row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务包不存在")
-    pkg_data = dict(zip(pkg.keys(), pkg_row))
-    if pkg_data.get("assignee") != actor:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只能借出自己负责的任务包样品")
-
-    if not body.sample_nos:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="至少选择一个样品")
-
-    inserted = []
-    for sno in body.sample_nos:
-        # 验证样品属于该委托
-        s = await db.execute(
-            text("SELECT sample_no, status FROM samples WHERE sample_no=:sn"),
-            {"sn": sno},
-        )
-        s_row = s.fetchone()
-        if not s_row:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"样品 {sno} 不存在")
-        s_data = dict(zip(s.keys(), s_row))
-        if s_data.get("status") != "已入库":
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"样品 {sno} 状态为'{s_data.get('status')}'，不可借出")
-
-        await db.execute(
-            text("""INSERT INTO package_loans (
-                    package_no, sample_no, borrower, borrowed_at, purpose,
-                    detection_location, issue_note, return_status, created_at, updated_at
-                ) VALUES (
-                    :pn, :sn, :b, localtimestamp, :p, :dl, :inote, '未归还', localtimestamp, localtimestamp
-                )"""),
-            {"pn": body.package_no, "sn": sno, "b": actor,
-             "p": body.purpose, "dl": body.detection_location, "inote": body.issue_note},
-        )
-
-        # 更新样品状态
-        await db.execute(
-            text("UPDATE samples SET status='借出中', current_holder=:a, updated_at=localtimestamp WHERE sample_no=:sn"),
-            {"sn": sno, "a": actor},
-        )
-        inserted.append(sno)
-
-    return {"message": f"已登记 {len(inserted)} 个样品借出", "loan_count": len(inserted),
-            "package_no": body.package_no, "sample_nos": inserted}
+    return {"message": "回库已确认", "loan_id": loan_id, "sample_no": sample_no}
 
 
 @router.post("/submit", status_code=201)
@@ -213,6 +152,19 @@ async def submit_return(
 
     if not body.sample_nos:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="至少选择一个样品")
+
+    # 门禁：任务包内所有任务必须已走完复核流程，实验员才可归还样品
+    task_rows = await db.execute(
+        text("SELECT task_no, status FROM tasks WHERE package_no=:pn"),
+        {"pn": body.package_no},
+    )
+    pkg_tasks = task_rows.fetchall()
+    if not pkg_tasks:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务包不存在或未关联任务")
+    pending = [t[0] for t in pkg_tasks if t[1] not in ("已复核", "已完成", "已回库")]
+    if pending:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                             detail=f"任务未完成复核，暂不能归还样品：{', '.join(pending)}")
 
     updated = 0
     for sno in body.sample_nos:

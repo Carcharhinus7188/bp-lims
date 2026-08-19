@@ -3,7 +3,7 @@ import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import request from '../utils/request'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { VideoPlay, VideoPause, Plus, Delete, Camera } from '@element-plus/icons-vue'
+import { VideoPlay, VideoPause, Plus, Delete, Camera, RefreshRight } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -19,77 +19,43 @@ const sampleGroup = ref(null)
 const loading = ref(true)
 const saving = ref(false)
 const acting = ref(false)
+const returnDialogVisible = ref(false)
+const returnSamples = ref([])       // [{ sample_no, return_condition, note }]
+const returnSubmitting = ref(false)
 const activeTab = ref('1')
 
 const formData = reactive({})
 const measurementRows = ref([])
+const thicknessCollapse = ref(['rp1'])
 const photoCheckpoints = ref([])
 const cameraHints = ref({})
 
 // ── Inline camera state (replaces global camera) ──
 const activeCameraCp = ref(null)     // which checkpoint's camera is open
 const activeCameraSample = ref('')   // which sample within that checkpoint
+const activeSample = ref('')         // ④原始数据当前选中的样品页签
 import CameraCapture from '../components/CameraCapture.vue'
+import { evaluateRules } from '../utils/calcEngine'
+import { chinaDate, chinaDateTime, chinaNowISO, formatChinaDateTime } from '../utils/time'
 
 // ── Tab 1: Task confirmations ──
 const taskConfirmations = reactive({ sample_received: true, number_match: true, sample_condition: true })
+// 任务确认现场照（任务级拍照，不随样品数量变化；上传 checkpoint_code=TASK_CONFIRM）
+const taskConfirmPhoto = reactive({ code: 'TASK_CONFIRM', label: '任务确认现场照', required: true, isSampleLevel: false, file: null, previewUrl: '' })
 
 // ── Tab 2: Equipment & Prechecks ──
 const equipmentChecks = ref([])
 const precheckAllItems = ref([])
 const precheckSelected = ref([])
 const precheckNote = ref('')
-const addingEquipment = ref(false)
-const addEquipmentSelection = ref('')
-const availableEquipment = ref([])
-const loadingEquipment = ref(false)
-
-async function loadAvailableEquipment() {
-  loadingEquipment.value = true
-  try {
-    const { data } = await request.get('/equipment', { params: { limit: 200 } })
-    availableEquipment.value = data || []
-  } catch { availableEquipment.value = [] }
-  finally { loadingEquipment.value = false }
-}
-
-function addEquipment(mgmtNo) {
-  const eq = availableEquipment.value.find(e => e.management_no === mgmtNo)
-  if (!eq) return
-  if (equipmentChecks.value.some(e => e.management_no === mgmtNo)) {
-    ElMessage.warning('该设备已在列表中')
-    return
-  }
-  equipmentChecks.value.push({
-    management_no: eq.management_no || '',
-    equipment_name: eq.equipment_name || '',
-    model: eq.model || '',
-    binding_role: 'auxiliary',
-    measuring_range: eq.measuring_range || '',
-    manufacturer: eq.manufacturer || '',
-    serial_no: eq.serial_no || '',
-    calibration_time: eq.calibration_time || '',
-    equipment_class: eq.equipment_class || '',
-    responsible: eq.responsible || '',
-    status: '正常', note: '', required: false,
-  })
-  addingEquipment.value = false
-}
-
-function removeEquipment(index) {
-  const eq = equipmentChecks.value[index]
-  if (eq.required) {
-    ElMessage.warning('配置必需设备不可移除，仅可移除手动添加的辅助设备')
-    return
-  }
-  equipmentChecks.value.splice(index, 1)
-}
 
 // ── Tab 4: Parameters ──
 const fixedParamMode = ref('按默认参数执行')
 
 // ── Tab 5: Template supplement ──
 const templateFields = ref([])
+// 草稿恢复时暂存已保存的母版值（此时 templateFields 尚未由后端补齐），供预填合并
+const savedTemplateValues = {}
 
 // ── Tab 6: Exception & device files ──
 const overallStatus = ref('正常完成')
@@ -153,9 +119,44 @@ const deviceFileType = ref('设备原始数据文件')
 const deviceFileSampleNo = ref('')
 const deviceFiles = ref([])
 const uploadingFiles = ref(false)
+const uploadedDeviceFiles = ref([])
+const deviceFilesLoading = ref(false)
+
+const currentTaskNo = () => task.value?.task_no || taskNo
 
 function handleDeviceFileChange(file) {
   deviceFiles.value.push(file.raw)
+}
+
+async function loadDeviceFiles() {
+  deviceFilesLoading.value = true
+  try {
+    const { data } = await request.get('/traceability/attachments', {
+      params: { task_no: currentTaskNo(), capture_source: 'device_export', limit: 200 },
+    })
+    uploadedDeviceFiles.value = (data || []).filter(a => a.evidence_status !== '已删除')
+  } catch {
+    uploadedDeviceFiles.value = []
+  } finally {
+    deviceFilesLoading.value = false
+  }
+}
+
+function deviceFileUrl(row) {
+  return `/api/v1/attachments/file/${row.relative_path || (currentTaskNo() + '/' + row.stored_name)}`
+}
+
+async function deleteDeviceFile(row) {
+  try {
+    await ElMessageBox.confirm(`确定删除设备文件「${row.original_name}」吗？`, '删除附件', {
+      type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消',
+    })
+    await request.delete(`/attachments/${row.attachment_id}`)
+    ElMessage.success('附件已删除')
+    loadDeviceFiles()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(e.response?.data?.detail || '删除失败')
+  }
 }
 
 async function uploadDeviceFiles() {
@@ -166,7 +167,7 @@ async function uploadDeviceFiles() {
   uploadingFiles.value = true
   try {
     const fd = new FormData()
-    fd.append('task_no', taskNo)
+    fd.append('task_no', currentTaskNo())
     fd.append('attachment_type', deviceFileType.value)
     fd.append('capture_source', 'device_export')
     if (deviceFileSampleNo.value) fd.append('sample_no', deviceFileSampleNo.value)
@@ -179,6 +180,7 @@ async function uploadDeviceFiles() {
     const sampleInfo = deviceFileSampleNo.value ? `（关联样品 ${deviceFileSampleNo.value}）` : ''
     ElMessage.success(`已保存 ${deviceFiles.value.length} 个设备文件${sampleInfo}`)
     deviceFiles.value = []
+    loadDeviceFiles()
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '上传失败')
   } finally {
@@ -207,6 +209,7 @@ function resetAllState() {
   precheckSelected.value = []
   precheckNote.value = ''
   templateFields.value = []
+  for (const k of Object.keys(savedTemplateValues)) delete savedTemplateValues[k]
   reviewReturn.value = null
   correctionFields.value = []
   reportSummary.value = ''
@@ -219,6 +222,8 @@ function resetAllState() {
   fixedParamMode.value = '按默认参数执行'
   activeTab.value = '1'
   closeCamera()
+  taskConfirmPhoto.file = null
+  taskConfirmPhoto.previewUrl = ''
   task.value = null
   config.value = null
   commission.value = null
@@ -262,8 +267,6 @@ async function loadExperimentData() {
           precheckAllItems.value = rawPrechecks.length ? rawPrechecks
             : (PRECHECKS_BY_KIND[kind] || PRECHECKS_BY_KIND.generic)
           precheckSelected.value = [...precheckAllItems.value]
-          // Load template manifest for Tab ⑤
-          loadTemplateManifest(task.value.experiment_code)
         }
       } catch (e) { config.value = null }
     }
@@ -275,6 +278,8 @@ async function loadExperimentData() {
         if (commData.sample_groups?.length && task.value.group_no) {
           sampleGroup.value = commData.sample_groups.find(g => g.group_no === task.value.group_no) || commData.sample_groups[0]
         }
+        // 样品组加载后补齐依赖批号/生产日期的参数（此前 initFormDefaults 时 sampleGroup 尚未就绪）
+        applySampleGroupPrefill()
       } catch { }
     }
 
@@ -299,6 +304,7 @@ async function loadExperimentData() {
           if (pl._form) Object.assign(formData, pl._form)
           if (pl._rows) { measurementRows.value = pl._rows; measurementRows.value.forEach(r => { if (r._showNote === undefined) r._showNote = false }) }
           if (pl._photos) restorePhotos(pl._photos)
+          if (pl._task_confirm_photo) taskConfirmPhoto.previewUrl = pl._task_confirm_photo
           if (pl._task_confirmations) Object.assign(taskConfirmations, pl._task_confirmations)
           if (pl._equipment_checks) {
             const savedMap = new Map(pl._equipment_checks.map(e => [e.management_no, e]))
@@ -320,8 +326,7 @@ async function loadExperimentData() {
           changeReason.value = recRes.data.change_reason || ''
           if (pl._template_fields) {
             for (const tf of pl._template_fields) {
-              const existing = templateFields.value.find(f => f.key === tf.key)
-              if (existing) existing.value = tf.value || ''
+              savedTemplateValues[tf.key] = tf.value || ''
             }
           }
         }
@@ -345,6 +350,15 @@ async function loadExperimentData() {
       restoreFromLocalStorage()
     }
 
+    // 草稿/本地缓存恢复可能用旧的空值覆盖自动预填的样品批号/生产日期，恢复后再次补齐
+    applySampleGroupPrefill()
+
+    // ⑤母版过程确认：待①-④数据与草稿恢复完成后，统一由后端预填并返回仍需补充的字段
+    await loadTemplateSupplement()
+
+    // 已上传设备原始文件回显
+    loadDeviceFiles()
+
     if (isSecondaryEdit.value && correctionFields.value.length) {
       setTimeout(() => focusReturnedStep(), 300)
     }
@@ -352,7 +366,127 @@ async function loadExperimentData() {
     ElMessage.error('加载实验页面失败')
   } finally {
     loading.value = false
+    if (task.value?.experiment_code) {
+      loadedConfigFingerprint = null
+      startConfigPolling()
+    }
   }
+}
+
+// ── 配置实时刷新（切换现行版本 / 同版本就地修改字段后自动更新执行界面）──
+let configPollTimer = null
+let loadedConfigFingerprint = null
+const CONFIG_POLL_INTERVAL = 5000
+
+async function pollConfigVersion() {
+  const code = task.value?.experiment_code
+  if (!code) return
+  try {
+    const { data } = await request.get(`/config/${code}/current-version`)
+    const fp = data?.fingerprint ?? null
+    // 首次轮询：建立基线，不触发刷新
+    if (loadedConfigFingerprint === null) {
+      loadedConfigFingerprint = fp
+      return
+    }
+    if (fp !== null && fp !== loadedConfigFingerprint) {
+      loadedConfigFingerprint = fp
+      await applyConfigChange(code, data)
+    }
+  } catch { /* 忽略轮询错误 */ }
+}
+
+function isSameValue(a, b) {
+  if (Array.isArray(a) || Array.isArray(b)) return JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+  if (a == null || b == null) return a == null && b == null
+  return a === b
+}
+
+async function applyConfigChange(code, data) {
+  const from = config.value?.version || '默认模板'
+  const to = data?.version || '默认模板'
+  const started = task.value?.status !== '待接收'
+
+  // ── 刷新前快照「现场数据」，刷新后恢复，避免覆盖实验员已填/已拍的内容 ──
+  const oldFields = config.value?.fields || []
+  const oldDefaults = {}
+  for (const f of oldFields) if (f.key) oldDefaults[f.key] = f.default
+
+  // 1) 表单：仅保留与旧默认值不同的「已填值」
+  const enteredForm = {}
+  for (const [key, val] of Object.entries(formData)) {
+    if (key in oldDefaults && !isSameValue(val, oldDefaults[key])) enteredForm[key] = val
+  }
+
+  // 2) 测量行：按 sample_no + face 定位，保留非空已填值
+  const enteredRows = (measurementRows.value || []).map(r => {
+    const keep = { _key: `${r.sample_no ?? ''}__${r.face ?? ''}` }
+    for (const [k, v] of Object.entries(r)) {
+      if (k.startsWith('_')) continue
+      if (v !== null && v !== undefined && v !== '') keep[k] = v
+    }
+    return keep
+  })
+
+  // 3) 设备检查状态与备注
+  const equipmentSnapshot = (equipmentChecks.value || []).map(e => ({ management_no: e.management_no, status: e.status, note: e.note }))
+
+  // 4) 照片文件
+  const photosSnapshot = (photoCheckpoints.value || []).map(cp => ({ code: cp.code, file: cp.file, previewUrl: cp.previewUrl, samplePhotos: cp.samplePhotos }))
+
+  await reloadConfig(code) // 内部 initFormDefaults(true) 覆盖默认值 + 重建结构
+
+  // ── 恢复现场数据 ──
+  for (const [key, val] of Object.entries(enteredForm)) formData[key] = val
+  for (const r of enteredRows) {
+    const target = measurementRows.value.find(m => `${m.sample_no ?? ''}__${m.face ?? ''}` === r._key)
+    if (!target) continue
+    for (const [k, v] of Object.entries(r)) {
+      if (k === '_key') continue
+      if (k in target) target[k] = v
+    }
+  }
+  for (const e of equipmentSnapshot) {
+    const t = equipmentChecks.value.find(x => x.management_no === e.management_no)
+    if (t) { t.status = e.status; t.note = e.note }
+  }
+  for (const p of photosSnapshot) {
+    const t = photoCheckpoints.value.find(x => x.code === p.code)
+    if (t) { t.file = p.file; t.previewUrl = p.previewUrl; if (p.samplePhotos) t.samplePhotos = p.samplePhotos }
+  }
+
+  const versionChanged = from !== to
+  const msg = versionChanged ? `配置版本已更新：${from} → ${to}` : '配置内容已更新'
+  ElMessage.success(`${msg}，执行界面已自动刷新${started ? '（已填数据保留）' : ''}`)
+}
+
+async function reloadConfig(code) {
+  try {
+    const cfgRes = await request.get(`/config/${code}`)
+    const raw = cfgRes.data || {}
+    if ((!raw.fields || !raw.fields.length) && (!raw.columns || !raw.columns.length)) {
+      config.value = null
+    } else {
+      config.value = raw
+      initFormDefaults(true)
+      initMeasurementRows()
+      initEquipmentChecks()
+      initPhotoCheckpoints()
+      const kind = config.value?.kind || ''
+      const rawPrechecks = (raw.prechecks || []).map(pc => pc.label || pc)
+      precheckAllItems.value = rawPrechecks.length ? rawPrechecks : (PRECHECKS_BY_KIND[kind] || PRECHECKS_BY_KIND.generic)
+      precheckSelected.value = [...precheckAllItems.value]
+    }
+  } catch { }
+}
+
+function startConfigPolling() {
+  stopConfigPolling()
+  configPollTimer = setInterval(pollConfigVersion, CONFIG_POLL_INTERVAL)
+}
+
+function stopConfigPolling() {
+  if (configPollTimer) { clearInterval(configPollTimer); configPollTimer = null }
 }
 
 onMounted(() => { loadExperimentData() })
@@ -365,7 +499,7 @@ watch(() => route.params.taskNo, (newVal, oldVal) => {
   }
 })
 
-onBeforeUnmount(() => { closeCamera(); saveDraftToLocalStorage() })
+onBeforeUnmount(() => { closeCamera(); saveDraftToLocalStorage(); stopConfigPolling() })
 
 // ── localStorage draft persistence (matching Streamlit save_form_draft/load_form_draft) ──
 const DRAFT_KEY = `experiment_draft_${taskNo}`
@@ -392,6 +526,7 @@ function saveDraftToLocalStorage() {
         ),
       })),
       _task_confirmations: { ...taskConfirmations },
+      _task_confirm_photo: taskConfirmPhoto.previewUrl || '',
       _equipment_checks: equipmentChecks.value.map(e => ({ ...e })),
       _prechecks: [...precheckSelected.value], _precheck_note: precheckNote.value,
       _precheck_all_items: [...precheckAllItems.value], _fixed_param_mode: fixedParamMode.value,
@@ -400,7 +535,7 @@ function saveDraftToLocalStorage() {
       _tester_self_check: testerSelfCheck.value, _change_reason: changeReason.value,
       _template_fields: templateFields.value.map(f => ({ key: f.key, value: f.value || '' })),
       _active_tab: activeTab.value,
-      _saved_at: new Date().toISOString(),
+      _saved_at: chinaNowISO(),
     }
     localStorage.setItem(DRAFT_KEY, JSON.stringify(draft))
   } catch { /* localStorage may be full or unavailable */ }
@@ -414,6 +549,7 @@ function restoreFromLocalStorage() {
     if (pl._form) Object.assign(formData, pl._form)
     if (pl._rows) { measurementRows.value = pl._rows; measurementRows.value.forEach(r => { if (r._showNote === undefined) r._showNote = false }) }
     if (pl._photos) restorePhotos(pl._photos)
+    if (pl._task_confirm_photo) taskConfirmPhoto.previewUrl = pl._task_confirm_photo
     if (pl._task_confirmations) Object.assign(taskConfirmations, pl._task_confirmations)
     if (pl._equipment_checks) {
       // Merge saved status/note into fresh config equipment ONLY
@@ -436,8 +572,7 @@ function restoreFromLocalStorage() {
     if (pl._change_reason) changeReason.value = pl._change_reason
     if (pl._template_fields) {
       for (const tf of pl._template_fields) {
-        const existing = templateFields.value.find(f => f.key === tf.key)
-        if (existing) existing.value = tf.value || ''
+        savedTemplateValues[tf.key] = tf.value || ''
       }
     }
     if (pl._active_tab) activeTab.value = pl._active_tab
@@ -519,9 +654,14 @@ function buildBusinessRecord() {
     _form: cleanForm, _rows: cleanRows,
     _photos: photoCheckpoints.value.filter(cp => cp.file || Object.keys(cp.samplePhotos || {}).length).map(cp => ({
       code: cp.code, label: cp.label,
+      previewUrl: cp.previewUrl || '',
+      samplePhotos: Object.fromEntries(
+        Object.entries(cp.samplePhotos || {}).map(([sn, data]) => [sn, { previewUrl: data?.previewUrl || '' }])
+      ),
       samples: Object.keys(cp.samplePhotos || {}).filter(sn => cp.samplePhotos[sn]?.file),
     })),
     _task_confirmations: { ...taskConfirmations },
+    _task_confirm_photo: taskConfirmPhoto.previewUrl || '',
     _equipment_checks: equipmentChecks.value.map(e => ({ ...e })),
     _prechecks: [...precheckSelected.value], _precheck_note: precheckNote.value,
     _precheck_all_items: [...precheckAllItems.value], _fixed_param_mode: fixedParamMode.value,
@@ -559,6 +699,8 @@ const OPTIONAL_ROW_KEYS = new Set([
   'shape', 'size', 'cover_method', 'cover_direction', 'measurement_item',
   'unit', 'calculated_value', 'retest_mean', 'failure_mode', 'retake',
   'cut_start', 'cut_end',
+  // 判定要求/判定依据在模板中为固定文本（如厚度 ±0.05 mm），非实验员填写项
+  'limit',
 ])
 
 // File/index fields filled from internal trace index rather than manual entry.
@@ -602,7 +744,25 @@ const SELECT_DEFAULTS = {
   observer_qualification: '均已确认合格', lamp_box_ready: '已完成',
 }
 
-function initFormDefaults() {
+function computeFieldDefault(f) {
+  if (f.key === 'detection_location') return task.value?.detection_location || f.default || ''
+  if (f.key === 'start_time') return task.value?.experiment_started_at || ''
+  if (f.key === 'end_time') return task.value?.experiment_ended_at || ''
+  if (f.key === 'test_date' || f.type === 'date') return chinaDate()
+  if (f.type === 'select' && f.default == null) {
+    return SELECT_DEFAULTS[f.key] || (f.options?.length ? f.options[0] : '')
+  }
+  if (f.type === 'multiselect') {
+    // multiselect defaults: keep as array (from hardcoded) or parse comma-joined string (from DB)
+    const def = f.default
+    if (Array.isArray(def)) return [...def]
+    if (typeof def === 'string' && def) return def.split(',').map(s => s.trim()).filter(Boolean)
+    return []
+  }
+  return f.default ?? ''
+}
+
+function initFormDefaults(force = false) {
   if (!config.value?.fields) return
   const kind = config.value?.kind || ''
   // ── Data isolation: remove keys from other experiment types ──
@@ -611,24 +771,11 @@ function initFormDefaults() {
     if (!currentFieldKeys.has(key)) delete formData[key]
   }
   for (const f of config.value.fields) {
-    if (f.key && !(f.key in formData)) {
-      if (f.key === 'detection_location') formData[f.key] = task.value?.detection_location || f.default || ''
-      else if (f.key === 'start_time') formData[f.key] = task.value?.experiment_started_at || ''
-      else if (f.key === 'end_time') formData[f.key] = task.value?.experiment_ended_at || ''
-      else if (f.key === 'test_date' || f.type === 'date') formData[f.key] = new Date().toISOString().slice(0, 10)
-      else if (f.type === 'select' && f.default == null) {
-        formData[f.key] = SELECT_DEFAULTS[f.key] || (f.options?.length ? f.options[0] : '')
-      } else if (f.type === 'multiselect') {
-        // multiselect defaults: keep as array (from hardcoded) or parse comma-joined string (from DB)
-        const def = f.default
-        if (Array.isArray(def)) {
-          formData[f.key] = [...def]
-        } else if (typeof def === 'string' && def) {
-          formData[f.key] = def.split(',').map(s => s.trim()).filter(Boolean)
-        } else {
-          formData[f.key] = []
-        }
-      } else formData[f.key] = f.default ?? ''
+    if (!f.key) continue
+    // force=true（配置实时刷新）时覆盖既有键，使「就地修改默认值」也能同步；
+    // 默认 false 仍只在键缺失时写入，避免覆盖已填写数据
+    if (force || !(f.key in formData)) {
+      formData[f.key] = computeFieldDefault(f)
     }
   }
   // ── Remove obsolete keys (matches Streamlit initialize_business_record) ──
@@ -652,26 +799,37 @@ function initFormDefaults() {
     if (!formData.humidity_after) formData.humidity_after = formData.humidity
   }
   // ── Kind-specific parameter prefill (matches Streamlit initialize_business_record) ──
-  const sg = sampleGroup.value || {}
-  if (kind === 'hv') {
-    if (!formData.sample_production_date) formData.sample_production_date = sg.product_no || ''
-  }
-  if (kind === 'mc_crack') {
-    if (!formData.metal_name) formData.metal_name = sg.sample_name || ''
-    if (!formData.metal_batch) formData.metal_batch = sg.product_no || ''
-  }
-  if (kind === 'thickness') {
-    if (!formData.sample_production_date) formData.sample_production_date = sg.product_no || ''
-    if (!formData.production_date) formData.production_date = sg.production_date || ''
-  }
+  applySampleGroupPrefill()
   // CTE: no start/end time displayed; just keep test_date
   if (task.value?.experiment_started_at) {
     formData.start_time = String(task.value.experiment_started_at).replace('T', ' ')
-    if (!formData.test_date || formData.test_date === new Date().toISOString().slice(0, 10))
+    if (!formData.test_date || formData.test_date === chinaDate())
       formData.test_date = String(task.value.experiment_started_at).slice(0, 10)
   }
   if (task.value?.experiment_ended_at) {
     formData.end_time = String(task.value.experiment_ended_at).replace('T', ' ')
+  }
+}
+
+// ── 样品批号/生产日期等随任务包一同来，统一预填，实验员无需填写 ──
+function applySampleGroupPrefill() {
+  const kind = config.value?.kind || ''
+  const sg = sampleGroup.value || {}
+  const fillFromGroup = (key, val) => {
+    if (!(key in formData)) return
+    const cur = formData[key]
+    // 未填或仍为占位默认值时，用权威值覆盖
+    if (!cur || cur === '委托资料未提供') formData[key] = val || ''
+  }
+  fillFromGroup('sample_production_date', sg.batch_no)
+  // 生产日期 = 接收任务的时间（接收任务包时记录到 experiment_started_at）
+  const receiveDate = task.value?.experiment_started_at
+    ? String(task.value.experiment_started_at).slice(0, 10)
+    : ''
+  fillFromGroup('production_date', receiveDate)
+  if (kind === 'mc_crack') {
+    if (!formData.metal_name) formData.metal_name = sg.sample_name || ''
+    if (!formData.metal_batch) formData.metal_batch = sg.batch_no || ''
   }
 }
 
@@ -812,19 +970,23 @@ function addMeasurementRow() {
 }
 function removeMeasurementRow(index) { if (measurementRows.value.length > 1) measurementRows.value.splice(index, 1) }
 
-async function loadTemplateManifest(experimentCode) {
+async function loadTemplateSupplement() {
   try {
-    const { data } = await request.get(`/config/${experimentCode}/template-manifest`)
-    const manifestFields = data.fields || []
-    // Filter to fields that still need user input (have blanks or checkboxes)
-    templateFields.value = manifestFields.map(f => ({
+    // 携带当前①-④数据 + 草稿保存值 + 当前已填母版值（当前输入优先），统一交由后端预填
+    const businessRecord = buildBusinessRecord()
+    const merged = {}
+    for (const [key, value] of Object.entries(savedTemplateValues)) merged[key] = value || ''
+    for (const f of templateFields.value) merged[f.key] = f.value || ''
+    businessRecord._template_fields = Object.entries(merged).map(([key, value]) => ({ key, value }))
+    const { data } = await request.post('/records/template-supplement', {
+      task_no: taskNo,
+      business_record: businessRecord,
+    })
+    templateFields.value = (data.fields || []).map(f => ({
       ...f,
-      value: templateFields.value.find(tf => tf.key === f.key)?.value || '',
       _showNote: false,
       _note: '',
     }))
-    // Pre-fill from business data after loading
-    prefillTemplateSupplement()
   } catch {
     templateFields.value = []
   }
@@ -838,7 +1000,7 @@ const PARAM_ALIASES = {
   '样品名称': 'sample_name', '试样名称': 'sample_name',
   '规格型号': 'model', '型号规格': 'model', '样品规格': 'model',
   '材料名称': 'material_name', '材料工艺': 'material_name',
-  '产品编号': 'product_no', '批号': 'product_no', '样品批号': 'product_no',
+  '产品编号': 'batch_no', '批号': 'batch_no', '样品批号': 'batch_no',
   '样品编号': 'sample_nos', '试样编号': 'sample_nos', '实验室样品编号': 'sample_nos',
   '检测依据': 'standard', '检测方法': 'method_code',
   '检测地点': 'detection_location', '检测场所': 'detection_location',
@@ -956,6 +1118,46 @@ function prefillTemplateSupplement() {
 async function markTime(action) {
   try {
     const label = action === '开始' ? '开始实验' : '结束实验'
+    // 结束实验前校验：必填字段 + 照片 + 业务记录 + 母版⑤ 全部完成
+    if (action === '结束') {
+      const { missingFields: _mf, missingPhotos } = collectMissingRequired()
+      // 结束时间由「结束实验」动作本身写入，不能作为结束前置条件（否则永远无法结束）
+      const missingFields = _mf.filter(f => !f.includes('结束时间'))
+      const businessIssues = validate_business_record().filter(i => !i.includes('结束时间'))
+      const templateMissing = templateFields.value
+        .filter(f => !isReadonlyTemplateField(f) && !(f.value && f.value.trim()))
+        .map(f => `母版⑤：${f.label || f.position}`)
+      const total = missingFields.length + missingPhotos.length + businessIssues.length + templateMissing.length
+      if (total > 0) {
+        let msg = `<p style="margin-bottom:8px">以下 <b>${total}</b> 项必填内容未完成（含照片与母版确认），无法结束实验：</p>`
+        if (missingFields.length) {
+          msg += `<p style="margin:4px 0;color:#DC2626;font-weight:600">▸ 必填字段 (${missingFields.length})：</p><ul style="margin:4px 0;padding-left:20px;font-size:13px;max-height:160px;overflow-y:auto">`
+          for (const f of missingFields) msg += `<li>${f}</li>`
+          msg += `</ul>`
+        }
+        if (missingPhotos.length) {
+          msg += `<p style="margin:4px 0;color:#DC2626;font-weight:600">▸ 必拍照节点 (${missingPhotos.length})：</p><ul style="margin:4px 0;padding-left:20px;font-size:13px;max-height:160px;overflow-y:auto">`
+          for (const p of missingPhotos) msg += `<li>${p}</li>`
+          msg += `</ul>`
+        }
+        if (businessIssues.length) {
+          msg += `<p style="margin:4px 0;color:#DC2626;font-weight:600">▸ 业务记录 (${businessIssues.length})：</p><ul style="margin:4px 0;padding-left:20px;font-size:13px;max-height:160px;overflow-y:auto">`
+          for (const i of businessIssues) msg += `<li>${i}</li>`
+          msg += `</ul>`
+        }
+        if (templateMissing.length) {
+          msg += `<p style="margin:4px 0;color:#DC2626;font-weight:600">▸ 母版⑤未填项 (${templateMissing.length})：</p><ul style="margin:4px 0;padding-left:20px;font-size:13px;max-height:160px;overflow-y:auto">`
+          for (const t of templateMissing) msg += `<li>${t}</li>`
+          msg += `</ul>`
+        }
+        await ElMessageBox.alert(
+          msg,
+          '结束实验校验未通过',
+          { dangerouslyUseHTMLString: true, type: 'error', confirmButtonText: '返回填写' }
+        )
+        return
+      }
+    }
     await ElMessageBox.confirm(`确认「${label}」？`, '', { type: 'info', confirmButtonText: '确认', cancelButtonText: '取消' })
     acting.value = true
     await request.put(`/tasks/${taskNo}/time`, { action })
@@ -967,6 +1169,38 @@ async function markTime(action) {
   } catch (e) {
     if (e !== 'cancel') ElMessage.error(e.response?.data?.detail || '操作失败')
   } finally { acting.value = false }
+}
+
+// ── 样品归还 ──
+function openReturnDialog() {
+  returnSamples.value = sampleIds.value.map(sno => ({
+    sample_no: sno,
+    return_condition: '完好',
+    note: '',
+  }))
+  returnDialogVisible.value = true
+}
+
+async function submitSampleReturn() {
+  if (!returnSamples.value.length) {
+    ElMessage.warning('没有可归还的样品')
+    return
+  }
+  returnSubmitting.value = true
+  try {
+    await request.post('/returns/submit', {
+      package_no: task.value?.package_no || '',
+      sample_nos: returnSamples.value.map(s => s.sample_no),
+      detection_location: task.value?.detection_location || '',
+      purpose: '实验检测',
+    })
+    ElMessage.success('样品已归还，请等待样品管理员确认回库')
+    returnDialogVisible.value = false
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '归还提交失败')
+  } finally {
+    returnSubmitting.value = false
+  }
 }
 
 // ── Sync & Check (matching Streamlit synchronize-and-check) ──
@@ -996,8 +1230,8 @@ function collectMissingRequired() {
   if (config.value?.fields) {
     for (const f of config.value.fields) {
       if (f.readonly) continue
-      // Required = actual flag is true, or type is select/multiselect with actual=true
-      const isActual = f.actual === true || f.is_actual === true
+      // Required = actual 真值字段 或 required 必填字段（如影像测量参数·样品批号/生产日期）
+      const isActual = f.actual === true || f.is_actual === true || f.required === true || f.is_required === true
       if (!isActual) continue
       const val = formData[f.key]
       const isEmpty = val == null || val === '' || (Array.isArray(val) && val.length === 0)
@@ -1030,6 +1264,58 @@ function collectMissingRequired() {
   return { missingFields, missingPhotos }
 }
 
+// ── Upload photos to server before saving ──
+async function uploadPhotosToServer() {
+  const uploads = []
+  for (const cp of photoCheckpoints.value) {
+    // Task-level photo (non-sample-level checkpoints)
+    if (cp.file && cp.previewUrl?.startsWith('blob:')) {
+      const formData = new FormData()
+      formData.append('file', cp.file)
+      formData.append('task_no', taskNo)
+      formData.append('checkpoint_code', cp.code)
+      formData.append('sample_no', '')
+      uploads.push(
+        request.post('/attachments/upload', formData)
+          .then(({ data }) => { cp.previewUrl = data.url })
+          .catch(e => { console.error('Photo upload failed:', cp.code, e) })
+      )
+    }
+    // Per-sample photos
+    for (const [sn, photoData] of Object.entries(cp.samplePhotos || {})) {
+      if (photoData?.file && photoData?.previewUrl?.startsWith('blob:')) {
+        const formData = new FormData()
+        formData.append('file', photoData.file)
+        formData.append('task_no', taskNo)
+        formData.append('checkpoint_code', cp.code)
+        formData.append('sample_no', sn)
+        uploads.push(
+          request.post('/attachments/upload', formData)
+            .then(({ data }) => { photoData.previewUrl = data.url })
+            .catch(e => { console.error('Photo upload failed:', cp.code, sn, e) })
+        )
+      }
+    }
+  }
+  // 任务确认现场照（任务级）
+  if (taskConfirmPhoto.file && taskConfirmPhoto.previewUrl?.startsWith('blob:')) {
+    const fd = new FormData()
+    fd.append('file', taskConfirmPhoto.file)
+    fd.append('task_no', taskNo)
+    fd.append('checkpoint_code', 'TASK_CONFIRM')
+    fd.append('sample_no', '')
+    uploads.push(
+      request.post('/attachments/upload', fd)
+        .then(({ data }) => { taskConfirmPhoto.previewUrl = data.url })
+        .catch(e => { console.error('TASK_CONFIRM photo upload failed:', e) })
+    )
+  }
+  if (uploads.length > 0) {
+    await Promise.all(uploads)
+    ElMessage.success(`已上传 ${uploads.length} 张照片`)
+  }
+}
+
 async function handleSave(submitForReview) {
   if (!task.value) return
 
@@ -1058,6 +1344,11 @@ async function handleSave(submitForReview) {
       })
       return
     }
+  }
+
+  // 提交复核前，先将所有照片上传到服务器
+  if (submitForReview) {
+    await uploadPhotosToServer()
   }
 
   const businessRecord = buildBusinessRecord()
@@ -1092,6 +1383,11 @@ const fieldSections = computed(() => {
 const readonlySections = computed(() => fieldSections.value.map(s => ({ ...s, fields: s.fields.filter(f => f.readonly) })).filter(s => s.fields.length))
 const envParamSections = computed(() => fieldSections.value.map(s => ({ ...s, fields: s.fields.filter(f => !f.readonly) })).filter(s => s.fields.length))
 const sampleIds = computed(() => measurementRows.value.map(r => r.sample_no).filter((v, i, a) => v && a.indexOf(v) === i))
+// 材料名称 + 样品名称 合并展示（去重，兼容旧数据两者相同的情况）
+const materialWithSample = computed(() => {
+  const parts = [task.value?.material_name || sampleGroup.value?.material_name, sampleGroup.value?.sample_name]
+  return parts.filter((v, i, a) => v && a.indexOf(v) === i).join(' ')
+})
 const missingPhotos = computed(() => {
   let count = 0
   for (const cp of photoCheckpoints.value) {
@@ -1180,6 +1476,21 @@ const photoCheckpointGroups = computed(() => {
   }
   return groups
 })
+// 样品级拍照点（逐样拍摄，随样品卡片展示） vs 实验级拍照点（任务级，统一放底部）
+const sampleLevelCheckpoints = computed(() => sortedPhotoCheckpoints.value.filter(cp => cp.isSampleLevel))
+const taskLevelCheckpoints = computed(() => sortedPhotoCheckpoints.value.filter(cp => !cp.isSampleLevel))
+const taskLevelPhotoCheckpointGroups = computed(() => {
+  const groups = {}
+  for (const cp of taskLevelCheckpoints.value) {
+    const g = cp.checkpointGroup || '其他拍照节点'
+    if (!groups[g]) groups[g] = []
+    groups[g].push(cp)
+  }
+  return groups
+})
+const taskLevelPhotoCompletionCount = computed(() => taskLevelCheckpoints.value.filter(cp => cp.file && cp.previewUrl).length)
+const taskLevelPhotoRequired = computed(() => taskLevelCheckpoints.value.filter(cp => cp.required !== false).length)
+const taskLevelMissingPhotoCount = computed(() => taskLevelCheckpoints.value.filter(cp => cp.required !== false && !cp.file && !cp.previewUrl).length)
 const canEdit = computed(() => isTester.value && isAssignee.value && (task.value?.status === '检测中' || task.value?.status === '退回修改'))
 const hasException = computed(() => overallStatus.value === '存在异常' || fixedParamMode.value === '存在偏离')
 
@@ -1200,6 +1511,20 @@ const returnedStepLabels = computed(() => {
 })
 const photoEditAllowed = computed(() => !isSecondaryEdit.value || returnedStepLabels.value['⑥'].size > 0)
 const deviceFileEditAllowed = computed(() => !isSecondaryEdit.value || returnedStepLabels.value['⑥'].size > 0)
+
+// 按字段解锁：退回修改时，仅复核员指定步骤可编辑，其余步骤锁定
+const stepEditable = computed(() => {
+  const all = { '①': true, '②': true, '③': true, '④': true, '⑤': true, '⑥': true, '⑦': true }
+  if (!isSecondaryEdit.value || !correctionFields.value.length) return all
+  for (const k of Object.keys(all)) all[k] = returnedStepLabels.value[k].size > 0
+  return all
+})
+function canEditStep(step) {
+  return canEdit.value && (!isSecondaryEdit.value || stepEditable.value[step])
+}
+function stepLocked(step) {
+  return canEdit.value && isSecondaryEdit.value && !stepEditable.value[step]
+}
 
 // Auto-focus on the tab with the first returned field
 function focusReturnedStep() {
@@ -1234,13 +1559,7 @@ function getFieldType(f) { const t = f.type || 'text'; return ['select','multise
 const TIME_KEYS = new Set(['start_time', 'end_time'])
 
 function captureTime(key) {
-  const now = new Date()
-  formData[key] = now.getFullYear() + '-'
-    + String(now.getMonth() + 1).padStart(2, '0') + '-'
-    + String(now.getDate()).padStart(2, '0') + ' '
-    + String(now.getHours()).padStart(2, '0') + ':'
-    + String(now.getMinutes()).padStart(2, '0') + ':'
-    + String(now.getSeconds()).padStart(2, '0')
+  formData[key] = chinaDateTime()
   ElMessage.success(`已记录${key === 'start_time' ? '开始' : '结束'}时间：${formData[key]}`)
 }
 function getFieldOptions(f) { if (f.options?.length) return f.options; if (f.type?.startsWith('select:')) return f.type.replace('select:', '').split('|'); if (f.type?.startsWith('multiselect:')) return f.type.replace('multiselect:', '').split('|'); return [] }
@@ -1292,82 +1611,32 @@ const CALC_LABELS = {
   shock: ['耐急冷急热结果', '', 'conclusion'],
 }
 
-function calculateRows(kind, rows) {
-  return rows.map(raw => {
-    const row = { ...raw }
-    try {
-      if (kind === 'mc_crack') {
-        const vs = [_n(row.dm1), _n(row.dm2), _n(row.dm3)]
-        if (vs.every(v => v !== null)) row.dm_mean = +((vs[0] + vs[1] + vs[2]) / 3).toFixed(4)
-        const k = _n(row.k), f = _n(row.ffail)
-        if (k !== null && f !== null) row.tau = +(k * f).toFixed(2)
-        row.conclusion = row.tau != null ? (row.tau > 25 ? '符合' : '不符合') : ''
-      } else if (kind === 'rough') {
-        const vs = [_n(row.ra1), _n(row.ra2), _n(row.ra3)]
-        if (vs.every(v => v !== null)) row.mean = +((vs[0] + vs[1] + vs[2]) / 3).toFixed(3)
-        row.conclusion = row.mean != null ? (row.mean <= _num(row.limit, 15) ? '符合' : '不符合') : ''
-      } else if (kind === 'warp') {
-        const h1 = _n(row.h1), h2 = _n(row.h2)
-        if (h1 !== null && h2 !== null) row.delta = +(h1 - h2).toFixed(4)
-        row.conclusion = row.delta != null ? (Math.abs(row.delta) <= _num(row.limit, 0.5) ? '合格' : '不合格') : ''
-      } else if (kind === 'cte') {
-        const t1 = _n(row.t1), t2 = _n(row.t2)
-        if (t1 !== null && t2 !== null) row.delta_t = +(t2 - t1).toFixed(3)
-        const l0 = _n(row.l0), dt = _n(row.delta_t), dl = _n(row.delta_l)
-        if (l0 && dt && dl !== null) {
-          const alpha = _safeDiv(dl / 1000, l0 * dt)
-          if (alpha !== null) row.alpha = +(alpha * 1000000).toFixed(3)
-        }
-        row.conclusion = row.judgement_result || row.conclusion || ''
-      } else if (kind === 'shock') {
-        row.conclusion = ['crack', 'chipping', 'fracture'].every(k => (row[k] || '无') === '无') ? '符合' : '不符合'
-      } else if (kind === 'bend') {
-        row.conclusion = _num(row.stress_02) >= 800 ? '符合' : '不符合'
-      } else if (kind === 'hv') {
-        const vs = [_n(row.indent1), _n(row.indent2), _n(row.indent3)]
-        if (vs.every(v => v !== null)) row.mean = +((vs[0] + vs[1] + vs[2]) / 3).toFixed(1)
-      } else if (kind === 'thickness') {
-        let all = []
-        for (const sec of ['fixed', 'middle', 'free']) {
-          const keys = []
-          for (let r = 1; r <= 3; r++) for (let p = 1; p <= 3; p++) keys.push(`r${r}_${sec}_p${p}`)
-          const vs = keys.map(k => _n(row[k]))
-          if (vs.every(v => v !== null)) row[`${sec}_mean`] = +((vs.reduce((a, b) => a + b, 0)) / vs.length).toFixed(4)
-          all = all.concat(vs)
-        }
-        if (all.every(v => v !== null)) row.mean = +(all.reduce((a, b) => a + b, 0) / all.length).toFixed(4)
-        const design = _n(row._design_thickness) || _n(row.design_thickness)
-        if (row.mean != null && design !== null) row.deviation = +(row.mean - design).toFixed(4)
-        row.conclusion = row.deviation != null ? (Math.abs(row.deviation) <= 0.05 ? '符合' : '不符合') : ''
-      } else if (kind === 'color') {
-        const obs = [row.observer1, row.observer2, row.observer3]
-        const severe = obs.filter(x => x === '明显差异').length
-        const unable = obs.filter(x => x === '无法判定').length
-        row.overall = unable >= 2 ? '无法判定' : (severe >= 2 ? '明显差异' : '未见明显差异/轻微差异')
-        row.conclusion = severe >= 2 ? '不符合' : (unable >= 2 ? '需复核' : '符合')
-      } else if (kind === 'xray') {
-        let roiMeans = []
-        for (let roi = 1; roi <= 3; roi++) {
-          let vs = []
-          for (let rd = 1; rd <= 3; rd++) vs.push(_n(row[`roi${roi}_reading${rd}`]))
-          const m = vs.every(v => v !== null) ? +((vs[0] + vs[1] + vs[2]) / 3).toFixed(2) : _n(row[`roi${roi}`])
-          row[`roi${roi}`] = m
-          roiMeans.push(m)
-        }
-        if (roiMeans.every(v => v !== null)) row.roi_mean = +((roiMeans[0] + roiMeans[1] + roiMeans[2]) / 3).toFixed(2)
-      }
-    } catch (e) { /* ignore */ }
-    return row
-  })
+// 从配置列收集计算规则（column_type==='calc' 且 calc_expression 为合法单规则 JSON），
+// 按 sort_order 顺序求值，与后端 calc_engine.evaluate_rules 语义一致。
+function collectCalcRules(config) {
+  const rules = []
+  const cols = (config?.columns || []).slice().sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
+  for (const c of cols) {
+    if (c.column_type !== 'calc') continue
+    const expr = c.calc_expression
+    if (expr && typeof expr === 'object' && expr.op) {
+      rules.push({ ...expr, column_key: expr.column_key || c.column_key })
+    }
+  }
+  return rules
 }
 
-const calculatedRows = computed(() => {
-  const kind = config.value?.kind || task.value?.experiment_code || ''
-  return calculateRows(kind, measurementRows.value)
-})
+function calculateRows(config, rows) {
+  const rules = collectCalcRules(config)
+  if (!rules.length) return rows.map(raw => ({ ...raw }))
+  return evaluateRules(rules, rows)
+}
+
+const calculatedRows = computed(() => calculateRows(config.value, measurementRows.value))
 
 function resultSummary(kind, rows) {
-  const conclusions = rows.map(r => r.conclusion).filter(Boolean)
+  // cte 无 conclusion 列，结论取自判定结果列 judgement_result（仅用于汇总展示）
+  const conclusions = rows.map(r => r.conclusion ?? r.judgement_result).filter(Boolean)
   let overall = ''
   if (conclusions.length && conclusions.every(c => ['符合', '合格'].includes(c))) overall = '符合'
   else if (conclusions.some(c => ['不符合', '不合格'].includes(c))) overall = '不符合'
@@ -1488,6 +1757,14 @@ const sampleGroups = computed(() => {
   return Object.entries(map)
 })
 
+// 样品页签：确保 activeSample 始终指向一个存在的样品
+watch(sampleGroups, (groups) => {
+  const keys = groups.map(([sno]) => sno)
+  if (keys.length && !keys.includes(activeSample.value)) {
+    activeSample.value = keys[0]
+  }
+}, { immediate: true })
+
 // Columns with only visible (non-hidden) fields
 const visibleColumns = computed(() => {
   const cols = config.value?.columns || []
@@ -1511,6 +1788,85 @@ const templateFieldsGrouped = computed(() => {
   }
   return groups
 })
+
+// ── ⑤ 母版过程确认：正确字段名（行标识 · 列头）与辅助判断 ──
+const fieldNameMap = computed(() => {
+  const byTable = {}
+  for (const f of templateFields.value) {
+    const t = f.table ?? 0
+    if (!byTable[t]) byTable[t] = []
+    byTable[t].push(f)
+  }
+  const map = {}
+  for (const t in byTable) {
+    const fields = byTable[t]
+    // 行标识 = 每行最左可填字段的 row_label（该行左侧第一个有文字的表头/名称）
+    const rowIds = {}
+    const rowNums = []
+    for (const f of fields) {
+      const r = f.row ?? 0
+      if (rowIds[r] === undefined) { rowIds[r] = f.row_label || ''; rowNums.push(r) }
+    }
+    // 行标识为空或重复时（纯网格表，如测量/异常记录），用「试样N / 第N条」区分行
+    const ids = rowNums.map(r => rowIds[r])
+    const distinct = new Set(ids.filter(Boolean))
+    const needRowNum = ids.some(v => !v) || distinct.size < rowNums.length
+    const leftmostCol = Math.min(...fields.map(f => f.col ?? 0))
+    const isSample = fields.some(f => (f.col ?? 0) === leftmostCol && /试样编号|样品编号/.test(f.col_header || ''))
+    const ordinal = {}
+    rowNums.forEach((r, i) => { ordinal[r] = i + 1 })
+    for (const f of fields) {
+      const r = f.row ?? 0
+      const rawHeader = (f.col_header || '').trim()
+      // 列头为占位符（____/＿/…/□）时视为无有效列头，按行标签字段处理
+      const isMarkerColHeader = /_{2,}|＿{2,}|…{2,}|□|☐/.test(rawHeader)
+      const colHeader = isMarkerColHeader ? '' : rawHeader
+      let rid
+      if (colHeader) {
+        // 网格字段（有有效列头）：用「行标识 · 列头」
+        rid = rowIds[r] || ''
+        if (needRowNum) rid = isSample ? `试样${ordinal[r]}` : `第${ordinal[r]}条`
+      } else {
+        // 行标签字段（无有效列头，如头部信息表「接收日期」「检测日期」）：优先用字段自身更
+        // 具体的 label（如「方法确认文件编号」），否则退回行标签，避免同一行多个字段被错误
+        // 显示成行首字段的名字（导致重复项）。
+        const lbl = (f.label || '').trim()
+        const rl = (f.row_label || '').trim()
+        const isGeneric = /^表\d+第\d+行第\d+列$/.test(lbl)
+        rid = (lbl && lbl !== rl && !isGeneric) ? lbl : (rl || lbl)
+      }
+      const parts = [rid, colHeader].filter(v => v && v.trim())
+      map[f.key] = [...new Set(parts)].join(' · ') || f.label || f.position
+    }
+    // 同一表内仍可能重名（如「适用状态」两个勾选项、三个空槽位），追加序号去重
+    const seen = {}
+    for (const f of fields) {
+      const name = map[f.key]
+      if (!name) continue
+      if (seen[name]) {
+        seen[name] += 1
+        map[f.key] = `${name}（第${seen[name]}项）`
+      } else {
+        seen[name] = 1
+      }
+    }
+  }
+  return map
+})
+function fieldName(f) { return fieldNameMap.value[f.key] || f.label || f.position }
+function hasCheckbox(f) { return (f.template_text || '').includes('□') || (f.template_text || '').includes('☐') }
+function hasBlank(f) { return /_{2,}|＿{2,}|…{2,}/.test(f.template_text || '') }
+
+// ── ⑤ 母版头部信息字段：由样品管理员/委托确定，实验员只读引用，不可填写 ──
+const READONLY_TEMPLATE_TOKENS = [
+  '生产日期', '批号', '产品编号', '材料名称', '规格型号', '样品名称',
+  '检测方法', '检测依据', '委托单位', '委托方', '生产单位', '生产厂家',
+]
+function isReadonlyTemplateField(f) {
+  const text = `${fieldName(f) || ''} ${f.label || ''} ${f.row_label || ''} ${f.col_header || ''}`
+  return READONLY_TEMPLATE_TOKENS.some(t => text.includes(t))
+}
+const editableTemplateFields = computed(() => templateFields.value.filter(f => !isReadonlyTemplateField(f)))
 
 // ── Template supplement checkbox helpers (ported from Streamlit render_template_supplement) ──
 const BLANK_RE = /_{2,}|＿{2,}|…{2,}/
@@ -1576,6 +1932,7 @@ function batchConfirmSection(sectionName) {
   const sectionFields = templateFieldsGrouped.value[sectionName] || []
   const batchValues = {}
   for (const field of sectionFields) {
+    if (isReadonlyTemplateField(field)) continue
     const original = field.template_text || ''
     const choices = _checkboxChoices(original)
     if (!choices.length) continue
@@ -1590,6 +1947,31 @@ function batchConfirmSection(sectionName) {
       if (tf) tf.value = batchValues[key]
     }
     ElMessage.success(`已一键确认本区正常项（${Object.keys(batchValues).length}项）`)
+  }
+}
+
+// ── 全局一键确认并填充：后端重算预填 + 各区正常项勾选 + 未填标红 ──
+async function batchConfirmAll() {
+  if (!canEditStep('⑤')) return
+  // 1) 携带最新①-④数据重跑后端预填，取回仍缺字段
+  await loadTemplateSupplement()
+  if (!templateFields.value.length) {
+    ElMessage.success('母版过程确认全部完成（后端已预填所有可确定字段）')
+    return
+  }
+  const before = editableTemplateFields.value.filter(f => f.value && f.value.trim()).length
+  // 2) 各分区一键确认明确的正常项（操作员主动确认，不臆造正向结果）
+  for (const sectionName of Object.keys(templateFieldsGrouped.value)) {
+    batchConfirmSection(sectionName)
+  }
+  const after = editableTemplateFields.value.filter(f => f.value && f.value.trim()).length
+  const remaining = editableTemplateFields.value.filter(f => !(f.value && f.value.trim()))
+  const filled = after - before
+  const filledMsg = filled > 0 ? `已确认 ${filled} 项` : '本次未能自动确认新项'
+  if (remaining.length) {
+    ElMessage.warning(`${filledMsg}；仍有 ${remaining.length} 项需本人填写，已标红`)
+  } else {
+    ElMessage.success(`母版过程确认全部完成（共 ${after} 项）`)
   }
 }
 
@@ -1653,6 +2035,7 @@ function _choiceNeedsNote(selected) {
           <el-button v-if="isTester && isAssignee && task?.status==='待接收'" type="primary" :icon="VideoPlay" :loading="acting" @click="markTime('开始')">开始实验</el-button>
           <el-button v-if="isTester && isAssignee && task?.status==='检测中'" type="danger" :icon="VideoPause" :loading="acting" @click="markTime('结束')">结束实验</el-button>
         </template>
+        <el-button v-if="isTester && isAssignee && ['已复核','已完成','已回库'].includes(task?.status)" type="success" :icon="RefreshRight" @click="openReturnDialog">归还样品</el-button>
         <span v-if="config?.kind==='cte'" style="font-size:12px;color:#94A3B8">CTE实验不显示开始/结束时间操作，系统仍在后台保留任务进入时间等审计记录。</span>
       </div>
     </div>
@@ -1662,15 +2045,15 @@ function _choiceNeedsNote(selected) {
       <el-tag :type="task.status==='检测中'?'warning':task.status==='已完成'?'success':task.status==='退回修改'?'danger':'info'" size="small">{{ task.status }}</el-tag>
       <span v-if="recordVersion>1" style="color:#DC2626;font-weight:500">V{{ recordVersion }}</span>
       <span v-if="config" class="config-source">配置: {{ config._source==='database'?`v${config.version}`:'默认模板' }}｜SOP: {{ config.sop_version || 'A/0' }}｜模板: {{ config.record_template_file || config.record_template_version || 'A/0' }}</span>
-      <span v-if="task.experiment_started_at" class="time-info">开始: {{ task.experiment_started_at }}</span>
-      <span v-if="task.experiment_ended_at" class="time-info">结束: {{ task.experiment_ended_at }}</span>
+      <span v-if="task.experiment_started_at" class="time-info">开始: {{ formatChinaDateTime(task.experiment_started_at) }}</span>
+      <span v-if="task.experiment_ended_at" class="time-info">结束: {{ formatChinaDateTime(task.experiment_ended_at) }}</span>
     </div>
 
     <!-- Review return / correction warning -->
     <el-alert v-if="isSecondaryEdit" :title="task?.status === '退回修改' ? '⚠️ 此实验已被复核员退回，请根据修改意见修正后重新提交' : '⚠️ 此实验为二次编辑：上一提交版本已由复核员退回'" type="error" :closable="false" show-icon style="margin-bottom:16px">
       <template v-if="reviewReturn">
         <div style="font-size:13px;line-height:1.6">
-          <div>复核员：{{ reviewReturn.reviewer_name || reviewReturn.reviewer || '-' }}｜退回时间：{{ reviewReturn.reviewed_at || '-' }}</div>
+          <div>复核员：{{ reviewReturn.reviewer_name || reviewReturn.reviewer || '-' }}｜退回时间：{{ formatChinaDateTime(reviewReturn.reviewed_at) }}</div>
           <div>复核意见：{{ reviewReturn.comment || '无' }}</div>
         </div>
         <div v-if="correctionFields.length" style="margin-top:8px">
@@ -1700,8 +2083,11 @@ function _choiceNeedsNote(selected) {
                 <el-descriptions-item label="委托单位">{{ commission?.client_name || '-' }}</el-descriptions-item>
                 <el-descriptions-item label="生产单位">{{ commission?.production_org_name || '-' }}</el-descriptions-item>
                 <el-descriptions-item label="样品名称">{{ sampleGroup?.sample_name || '-' }}</el-descriptions-item>
-                <el-descriptions-item label="规格型号">{{ sampleGroup?.model || '-' }}</el-descriptions-item>
-                <el-descriptions-item label="材料名称">{{ task.material_name || sampleGroup?.material_name || '-' }}</el-descriptions-item>
+                <el-descriptions-item label="规格型号">
+                  <span v-if="sampleGroup?.model && sampleGroup.model !== '-'">{{ sampleGroup.model }}</span>
+                  <span v-else style="color:#F59E0B;font-weight:600">未填写</span>
+                </el-descriptions-item>
+                <el-descriptions-item label="材料名称">{{ sampleGroup?.material_name || '-' }}</el-descriptions-item>
                 <el-descriptions-item label="实体样品编号">{{ sampleIds.length ? sampleIds.join('、') : '-' }}</el-descriptions-item>
                 <el-descriptions-item label="检测方法">{{ task.method_code || '-' }}</el-descriptions-item>
                 <el-descriptions-item label="检测依据">{{ task.standard || '-' }}</el-descriptions-item>
@@ -1713,10 +2099,25 @@ function _choiceNeedsNote(selected) {
             <el-card shadow="never" class="mb-card">
               <template #header><strong>样品接收确认</strong> <span style="font-size:12px;color:#94A3B8">正常情况下保持默认选中；发现问题时取消对应项，并在异常说明中记录。</span></template>
               <div style="display:flex;gap:32px">
-                <el-checkbox v-model="taskConfirmations.sample_received" :disabled="!canEdit">样品已收到</el-checkbox>
-                <el-checkbox v-model="taskConfirmations.number_match" :disabled="!canEdit">样品编号一致</el-checkbox>
-                <el-checkbox v-model="taskConfirmations.sample_condition" :disabled="!canEdit">样品状态正常</el-checkbox>
+                <el-checkbox v-model="taskConfirmations.sample_received" :disabled="!canEditStep('①')">样品已收到</el-checkbox>
+                <el-checkbox v-model="taskConfirmations.number_match" :disabled="!canEditStep('①')">样品编号一致</el-checkbox>
+                <el-checkbox v-model="taskConfirmations.sample_condition" :disabled="!canEditStep('①')">样品状态正常</el-checkbox>
               </div>
+            </el-card>
+
+            <el-card shadow="never" class="mb-card">
+              <template #header>
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                  <strong>任务确认现场照</strong>
+                  <el-tag v-if="taskConfirmPhoto.previewUrl" size="small" type="success">已拍摄</el-tag>
+                </div>
+              </template>
+              <div v-if="taskConfirmPhoto.previewUrl" style="margin-bottom:6px"><img :src="taskConfirmPhoto.previewUrl" style="max-width:100%;max-height:180px;border-radius:6px;border:1px solid #E2E8F0" /></div>
+              <div v-if="activeCameraCp !== taskConfirmPhoto || activeCameraSample !== ''" style="display:flex;gap:6px">
+                <el-button size="small" :type="taskConfirmPhoto.previewUrl ? 'default' : 'primary'" @click="openCamera(taskConfirmPhoto)" :disabled="!canEditStep('①')"><el-icon style="margin-right:3px"><Camera /></el-icon>{{ taskConfirmPhoto.previewUrl ? '重拍' : '拍照' }}</el-button>
+                <el-button v-if="taskConfirmPhoto.previewUrl" size="small" type="danger" @click="removePhoto(taskConfirmPhoto)" :disabled="!canEditStep('①')">删除</el-button>
+              </div>
+              <CameraCapture v-if="activeCameraCp === taskConfirmPhoto && activeCameraSample === ''" :checkpoint="taskConfirmPhoto" :sampleNo="''" :cameraHint="''" @photo-taken="onPhotoTaken" @close="closeCamera" />
             </el-card>
 
             <div class="step-nav"><el-button type="primary" @click="activeTab='2'">下一步：设备与实验前检查</el-button></div>
@@ -1731,7 +2132,7 @@ function _choiceNeedsNote(selected) {
               <template #header>
                 <div style="display:flex;justify-content:space-between;align-items:center">
                   <strong>设备确认</strong>
-                  <span style="font-size:12px;color:#94A3B8">设备由任务配置自动带入，也可手动添加辅助设备。正常情况下仅确认状态；选择异常后才填写说明。</span>
+                  <span style="font-size:12px;color:#94A3B8">设备由任务配置自动带入。正常情况下仅确认状态；选择异常后才填写说明。</span>
                 </div>
               </template>
               <el-empty v-if="!equipmentChecks.length" description="该实验配置尚未绑定设备。" />
@@ -1742,7 +2143,6 @@ function _choiceNeedsNote(selected) {
                       <div style="font-weight:600;display:flex;align-items:center;gap:6px">
                         {{ eq.equipment_name }}
                         <el-tag v-if="eq.required!==false" size="small" type="warning">必需</el-tag>
-                        <el-tag v-else size="small" type="info">手动添加</el-tag>
                       </div>
                       <div style="color:#64748B;font-size:13px">{{ eq.model }}</div>
                       <div style="font-size:12px;color:#94A3B8">管理编号：<code>{{ eq.management_no }}</code></div>
@@ -1757,34 +2157,16 @@ function _choiceNeedsNote(selected) {
                     </div>
                     <div style="flex:1">
                       <div style="font-size:13px;color:#475569;margin-bottom:4px">使用前状态：</div>
-                      <el-radio-group v-model="eq.status" :disabled="!canEdit" size="small">
+                      <el-radio-group v-model="eq.status" :disabled="!canEditStep('②')" size="small">
                         <el-radio value="正常">正常</el-radio>
                         <el-radio value="异常">异常</el-radio>
                       </el-radio-group>
                       <div v-if="eq.status==='异常'" style="margin-top:6px">
-                        <el-input v-model="eq.note" type="textarea" :rows="2" placeholder="异常说明及处理" size="small" :disabled="!canEdit" />
-                      </div>
-                      <div v-if="eq.required===false && canEdit" style="margin-top:10px">
-                        <el-button size="small" type="danger" plain @click="removeEquipment(i)">✕ 移除此设备</el-button>
+                        <el-input v-model="eq.note" type="textarea" :rows="2" placeholder="异常说明及处理" size="small" :disabled="!canEditStep('②')" />
                       </div>
                     </div>
                   </div>
                 </el-card>
-              </div>
-              <!-- Add equipment -->
-              <div v-if="canEdit" style="margin-top:12px">
-                <template v-if="!addingEquipment">
-                  <el-button size="small" @click="addingEquipment=true; loadAvailableEquipment()"><el-icon style="margin-right:3px"><Plus /></el-icon>添加辅助设备</el-button>
-                </template>
-                <div v-else style="display:flex;gap:8px;align-items:center">
-                  <el-select v-model="addEquipmentSelection" filterable placeholder="搜索设备名称或管理编号" :loading="loadingEquipment" style="flex:1;max-width:480px" @change="addEquipment">
-                    <el-option v-for="eq in availableEquipment" :key="eq.management_no" :label="`${eq.equipment_name}｜${eq.model||'-'}｜${eq.management_no}`" :value="eq.management_no">
-                      <div style="font-size:13px">{{ eq.equipment_name }} <span style="color:#94A3B8;font-size:11px">{{ eq.model }}</span></div>
-                      <div style="font-size:11px;color:#64748B">{{ eq.management_no }}</div>
-                    </el-option>
-                  </el-select>
-                  <el-button size="small" @click="addingEquipment=false">取消</el-button>
-                </div>
               </div>
             </el-card>
 
@@ -1794,12 +2176,12 @@ function _choiceNeedsNote(selected) {
               <el-empty v-if="!precheckAllItems.length" description="本实验无预检查项" />
               <div v-else>
                 <div style="margin-bottom:8px;font-size:13px;color:#475569">已确认项目</div>
-                <el-checkbox-group v-model="precheckSelected" :disabled="!canEdit" style="display:flex;flex-direction:column;gap:6px">
+                <el-checkbox-group v-model="precheckSelected" :disabled="!canEditStep('②')" style="display:flex;flex-direction:column;gap:6px">
                   <el-checkbox v-for="(item,i) in precheckAllItems" :key="i" :value="item">{{ item }}</el-checkbox>
                 </el-checkbox-group>
                 <div v-if="precheckSelected.length === precheckAllItems.length" style="color:#22C55E;margin-top:8px;font-size:13px">实验前检查默认全部正常。</div>
                 <div v-else style="margin-top:12px">
-                  <el-input v-model="precheckNote" type="textarea" :rows="2" placeholder="未通过项目说明及处理" :disabled="!canEdit" />
+                  <el-input v-model="precheckNote" type="textarea" :rows="2" placeholder="未通过项目说明及处理" :disabled="!canEditStep('②')" />
                 </div>
               </div>
             </el-card>
@@ -1830,29 +2212,29 @@ function _choiceNeedsNote(selected) {
                   <el-col v-for="f in envFields" :key="f.key" :span="8">
                     <el-form-item :label="f.label" :required="isFieldRequired(f)">
                       <!-- number -->
-                      <el-input-number v-if="getFieldType(f)==='number'" v-model="formData[f.key]" :disabled="!canEdit" style="width:100%" controls-position="right" />
+                      <el-input-number v-if="getFieldType(f)==='number'" v-model="formData[f.key]" :disabled="!canEditStep('③')" style="width:100%" controls-position="right" />
                       <!-- date -->
-                      <el-date-picker v-else-if="getFieldType(f)==='date'" v-model="formData[f.key]" type="date" value-format="YYYY-MM-DD" :disabled="!canEdit" style="width:100%" />
+                      <el-date-picker v-else-if="getFieldType(f)==='date'" v-model="formData[f.key]" type="date" value-format="YYYY-MM-DD" :disabled="!canEditStep('③')" style="width:100%" />
                       <!-- datetime -->
                       <template v-else-if="TIME_KEYS.has(f.key)">
                         <div style="display:flex;align-items:center;gap:8px">
                           <el-input :model-value="formData[f.key] || '未记录'" readonly style="flex:1" />
-                          <el-button size="small" type="primary" :disabled="!canEdit" @click="captureTime(f.key)">记录</el-button>
+                          <el-button size="small" type="primary" :disabled="!canEditStep('③')" @click="captureTime(f.key)">记录</el-button>
                         </div>
                       </template>
-                      <el-date-picker v-else-if="getFieldType(f)==='datetime'" v-model="formData[f.key]" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" :disabled="!canEdit" style="width:100%" />
+                      <el-date-picker v-else-if="getFieldType(f)==='datetime'" v-model="formData[f.key]" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" :disabled="!canEditStep('③')" style="width:100%" />
                       <!-- select -->
-                      <el-select v-else-if="getFieldType(f)==='select'" v-model="formData[f.key]" :disabled="!canEdit" style="width:100%" clearable>
+                      <el-select v-else-if="getFieldType(f)==='select'" v-model="formData[f.key]" :disabled="!canEditStep('③')" style="width:100%" clearable>
                         <el-option v-for="opt in getFieldOptions(f)" :key="opt" :label="opt" :value="opt" />
                       </el-select>
                       <!-- multiselect -->
-                      <el-select v-else-if="getFieldType(f)==='multiselect'" v-model="formData[f.key]" :disabled="!canEdit" style="width:100%" multiple collapse-tags>
+                      <el-select v-else-if="getFieldType(f)==='multiselect'" v-model="formData[f.key]" :disabled="!canEditStep('③')" style="width:100%" multiple collapse-tags>
                         <el-option v-for="opt in getFieldOptions(f)" :key="opt" :label="opt" :value="opt" />
                       </el-select>
                       <!-- textarea -->
-                      <el-input v-else-if="getFieldType(f)==='textarea'" v-model="formData[f.key]" :disabled="!canEdit" type="textarea" :rows="2" />
+                      <el-input v-else-if="getFieldType(f)==='textarea'" v-model="formData[f.key]" :disabled="!canEditStep('③')" type="textarea" :rows="2" />
                       <!-- text (default) -->
-                      <el-input v-else v-model="formData[f.key]" :disabled="!canEdit" />
+                      <el-input v-else v-model="formData[f.key]" :disabled="!canEditStep('③')" />
                     </el-form-item>
                   </el-col>
                 </el-row>
@@ -1871,23 +2253,23 @@ function _choiceNeedsNote(selected) {
                 <el-row :gutter="16">
                   <el-col v-for="f in fixedFields" :key="f.key" :span="8">
                     <el-form-item :label="f.label" :required="isFieldRequired(f)">
-                      <el-input v-if="getFieldType(f)==='text'" v-model="formData[f.key]" :disabled="!canEdit" />
-                      <el-input-number v-else-if="getFieldType(f)==='number'" v-model="formData[f.key]" :disabled="!canEdit" style="width:100%" controls-position="right" />
-                      <el-date-picker v-else-if="getFieldType(f)==='date'" v-model="formData[f.key]" type="date" value-format="YYYY-MM-DD" :disabled="!canEdit" style="width:100%" />
+                      <el-input v-if="getFieldType(f)==='text'" v-model="formData[f.key]" :disabled="!canEditStep('③')" />
+                      <el-input-number v-else-if="getFieldType(f)==='number'" v-model="formData[f.key]" :disabled="!canEditStep('③')" style="width:100%" controls-position="right" />
+                      <el-date-picker v-else-if="getFieldType(f)==='date'" v-model="formData[f.key]" type="date" value-format="YYYY-MM-DD" :disabled="!canEditStep('③')" style="width:100%" />
                       <template v-else-if="TIME_KEYS.has(f.key)">
                         <div style="display:flex;align-items:center;gap:8px">
                           <el-input :model-value="formData[f.key] || '未记录'" readonly style="flex:1" />
-                          <el-button size="small" type="primary" :disabled="!canEdit" @click="captureTime(f.key)">记录</el-button>
+                          <el-button size="small" type="primary" :disabled="!canEditStep('③')" @click="captureTime(f.key)">记录</el-button>
                         </div>
                       </template>
-                      <el-date-picker v-else-if="getFieldType(f)==='datetime'" v-model="formData[f.key]" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" :disabled="!canEdit" style="width:100%" />
-                      <el-select v-else-if="getFieldType(f)==='select'" v-model="formData[f.key]" :disabled="!canEdit" style="width:100%" clearable>
+                      <el-date-picker v-else-if="getFieldType(f)==='datetime'" v-model="formData[f.key]" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" :disabled="!canEditStep('③')" style="width:100%" />
+                      <el-select v-else-if="getFieldType(f)==='select'" v-model="formData[f.key]" :disabled="!canEditStep('③')" style="width:100%" clearable>
                         <el-option v-for="opt in getFieldOptions(f)" :key="opt" :label="opt" :value="opt" />
                       </el-select>
-                      <el-select v-else-if="getFieldType(f)==='multiselect'" v-model="formData[f.key]" :disabled="!canEdit" style="width:100%" multiple collapse-tags>
+                      <el-select v-else-if="getFieldType(f)==='multiselect'" v-model="formData[f.key]" :disabled="!canEditStep('③')" style="width:100%" multiple collapse-tags>
                         <el-option v-for="opt in getFieldOptions(f)" :key="opt" :label="opt" :value="opt" />
                       </el-select>
-                      <el-input v-else-if="getFieldType(f)==='textarea'" v-model="formData[f.key]" :disabled="!canEdit" type="textarea" :rows="2" />
+                      <el-input v-else-if="getFieldType(f)==='textarea'" v-model="formData[f.key]" :disabled="!canEditStep('③')" type="textarea" :rows="2" />
                       <span v-else>{{ formData[f.key] }}</span>
                     </el-form-item>
                   </el-col>
@@ -1895,7 +2277,7 @@ function _choiceNeedsNote(selected) {
               </el-form>
               <div style="margin-top:12px">
                 <span style="font-size:13px;color:#475569">固定参数执行情况：</span>
-                <el-radio-group v-model="fixedParamMode" :disabled="!canEdit" size="small">
+                <el-radio-group v-model="fixedParamMode" :disabled="!canEditStep('③')" size="small">
                   <el-radio value="按默认参数执行">按默认参数执行</el-radio>
                   <el-radio value="存在偏离">存在偏离</el-radio>
                 </el-radio-group>
@@ -1913,23 +2295,23 @@ function _choiceNeedsNote(selected) {
                 <el-row :gutter="16">
                   <el-col v-for="f in coreManualFields" :key="f.key" :span="8">
                     <el-form-item :label="f.label" :required="isFieldRequired(f)">
-                      <el-input v-if="getFieldType(f)==='text'" v-model="formData[f.key]" :disabled="!canEdit" />
-                      <el-input-number v-else-if="getFieldType(f)==='number'" v-model="formData[f.key]" :disabled="!canEdit" style="width:100%" controls-position="right" />
-                      <el-date-picker v-else-if="getFieldType(f)==='date'" v-model="formData[f.key]" type="date" value-format="YYYY-MM-DD" :disabled="!canEdit" style="width:100%" />
+                      <el-input v-if="getFieldType(f)==='text'" v-model="formData[f.key]" :disabled="!canEditStep('③')" />
+                      <el-input-number v-else-if="getFieldType(f)==='number'" v-model="formData[f.key]" :disabled="!canEditStep('③')" style="width:100%" controls-position="right" />
+                      <el-date-picker v-else-if="getFieldType(f)==='date'" v-model="formData[f.key]" type="date" value-format="YYYY-MM-DD" :disabled="!canEditStep('③')" style="width:100%" />
                       <template v-else-if="TIME_KEYS.has(f.key)">
                         <div style="display:flex;align-items:center;gap:8px">
                           <el-input :model-value="formData[f.key] || '未记录'" readonly style="flex:1" />
-                          <el-button size="small" type="primary" :disabled="!canEdit" @click="captureTime(f.key)">记录</el-button>
+                          <el-button size="small" type="primary" :disabled="!canEditStep('③')" @click="captureTime(f.key)">记录</el-button>
                         </div>
                       </template>
-                      <el-date-picker v-else-if="getFieldType(f)==='datetime'" v-model="formData[f.key]" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" :disabled="!canEdit" style="width:100%" />
-                      <el-select v-else-if="getFieldType(f)==='select'" v-model="formData[f.key]" :disabled="!canEdit" style="width:100%" clearable>
+                      <el-date-picker v-else-if="getFieldType(f)==='datetime'" v-model="formData[f.key]" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" :disabled="!canEditStep('③')" style="width:100%" />
+                      <el-select v-else-if="getFieldType(f)==='select'" v-model="formData[f.key]" :disabled="!canEditStep('③')" style="width:100%" clearable>
                         <el-option v-for="opt in getFieldOptions(f)" :key="opt" :label="opt" :value="opt" />
                       </el-select>
-                      <el-select v-else-if="getFieldType(f)==='multiselect'" v-model="formData[f.key]" :disabled="!canEdit" style="width:100%" multiple collapse-tags>
+                      <el-select v-else-if="getFieldType(f)==='multiselect'" v-model="formData[f.key]" :disabled="!canEditStep('③')" style="width:100%" multiple collapse-tags>
                         <el-option v-for="opt in getFieldOptions(f)" :key="opt" :label="opt" :value="opt" />
                       </el-select>
-                      <el-input v-else-if="getFieldType(f)==='textarea'" v-model="formData[f.key]" :disabled="!canEdit" type="textarea" :rows="2" />
+                      <el-input v-else-if="getFieldType(f)==='textarea'" v-model="formData[f.key]" :disabled="!canEditStep('③')" type="textarea" :rows="2" />
                       <span v-else>{{ formData[f.key] }}</span>
                     </el-form-item>
                   </el-col>
@@ -1954,23 +2336,23 @@ function _choiceNeedsNote(selected) {
                 <el-row :gutter="16">
                   <el-col v-for="f in processFields" :key="f.key" :span="8">
                     <el-form-item :label="f.label" :required="isFieldRequired(f)">
-                      <el-input v-if="getFieldType(f)==='text'" v-model="formData[f.key]" :disabled="!canEdit" />
-                      <el-input-number v-else-if="getFieldType(f)==='number'" v-model="formData[f.key]" :disabled="!canEdit" style="width:100%" controls-position="right" />
-                      <el-date-picker v-else-if="getFieldType(f)==='date'" v-model="formData[f.key]" type="date" value-format="YYYY-MM-DD" :disabled="!canEdit" style="width:100%" />
+                      <el-input v-if="getFieldType(f)==='text'" v-model="formData[f.key]" :disabled="!canEditStep('③')" />
+                      <el-input-number v-else-if="getFieldType(f)==='number'" v-model="formData[f.key]" :disabled="!canEditStep('③')" style="width:100%" controls-position="right" />
+                      <el-date-picker v-else-if="getFieldType(f)==='date'" v-model="formData[f.key]" type="date" value-format="YYYY-MM-DD" :disabled="!canEditStep('③')" style="width:100%" />
                       <template v-else-if="TIME_KEYS.has(f.key)">
                         <div style="display:flex;align-items:center;gap:8px">
                           <el-input :model-value="formData[f.key] || '未记录'" readonly style="flex:1" />
-                          <el-button size="small" type="primary" :disabled="!canEdit" @click="captureTime(f.key)">记录</el-button>
+                          <el-button size="small" type="primary" :disabled="!canEditStep('③')" @click="captureTime(f.key)">记录</el-button>
                         </div>
                       </template>
-                      <el-date-picker v-else-if="getFieldType(f)==='datetime'" v-model="formData[f.key]" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" :disabled="!canEdit" style="width:100%" />
-                      <el-select v-else-if="getFieldType(f)==='select'" v-model="formData[f.key]" :disabled="!canEdit" style="width:100%" clearable>
+                      <el-date-picker v-else-if="getFieldType(f)==='datetime'" v-model="formData[f.key]" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" :disabled="!canEditStep('③')" style="width:100%" />
+                      <el-select v-else-if="getFieldType(f)==='select'" v-model="formData[f.key]" :disabled="!canEditStep('③')" style="width:100%" clearable>
                         <el-option v-for="opt in getFieldOptions(f)" :key="opt" :label="opt" :value="opt" />
                       </el-select>
-                      <el-select v-else-if="getFieldType(f)==='multiselect'" v-model="formData[f.key]" :disabled="!canEdit" style="width:100%" multiple collapse-tags>
+                      <el-select v-else-if="getFieldType(f)==='multiselect'" v-model="formData[f.key]" :disabled="!canEditStep('③')" style="width:100%" multiple collapse-tags>
                         <el-option v-for="opt in getFieldOptions(f)" :key="opt" :label="opt" :value="opt" />
                       </el-select>
-                      <el-input v-else-if="getFieldType(f)==='textarea'" v-model="formData[f.key]" :disabled="!canEdit" type="textarea" :rows="2" />
+                      <el-input v-else-if="getFieldType(f)==='textarea'" v-model="formData[f.key]" :disabled="!canEditStep('③')" type="textarea" :rows="2" />
                       <span v-else>{{ formData[f.key] }}</span>
                     </el-form-item>
                   </el-col>
@@ -1991,14 +2373,21 @@ function _choiceNeedsNote(selected) {
             <el-empty v-if="!config?.columns?.length" description="本实验无测量数据表格" />
             <div v-else>
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-                <span style="font-size:12px;color:#94A3B8">按样品逐个填写；平均值和计算结果会实时刷新。</span>
-                <el-button v-if="canEdit" type="primary" size="small" :icon="Plus" @click="addMeasurementRow">添加行</el-button>
+                <span style="font-size:12px;color:#94A3B8">按样品逐个填写，点击上方页签切换样品；平均值和计算结果会实时刷新。</span>
+                <el-button v-if="canEditStep('④')" type="primary" size="small" :icon="Plus" @click="addMeasurementRow">添加行</el-button>
               </div>
 
-              <!-- Per-sample groups with per-row expanders -->
-              <div v-for="[sno, rows] in sampleGroups" :key="sno" style="margin-bottom:16px">
-                <el-card shadow="never" class="mb-card-sm">
-                  <template #header><strong>样品：{{ sno }}</strong></template>
+              <!-- 按样品分页签：一个样品一个页签，切换查看 -->
+              <el-tabs v-model="activeSample" type="card" class="sample-tabs">
+                <el-tab-pane v-for="[sno, rows] in sampleGroups" :key="sno" :name="sno">
+                  <template #label>样品 {{ sno }}</template>
+                  <el-card shadow="never" class="mb-card-sm">
+                    <template #header>
+                      <div style="display:flex;justify-content:space-between;align-items:center">
+                        <strong>样品：{{ sno }}</strong>
+                        <span style="font-size:12px;color:#94A3B8">{{ rows.length }} 行测量数据</span>
+                      </div>
+                    </template>
 
                   <!-- Per-row (per-face) containers -->
                   <div v-for="row in rows" :key="'row-'+row._index" style="margin-bottom:12px;padding:10px;border:1px solid #E2E8F0;border-radius:8px;background:#FAFBFC">
@@ -2008,21 +2397,21 @@ function _choiceNeedsNote(selected) {
                     <!-- HV face direction select (2nd+ direction) -->
                     <div v-if="config?.kind==='hv' && row.face" style="margin-bottom:8px">
                       <span style="font-size:12px;color:#64748B;margin-right:8px">测量方向</span>
-                      <el-select v-if="row._index > 0" v-model="measurementRows[row._index].face" :disabled="!canEdit" size="small" style="width:160px">
+                      <el-select v-if="row._index > 0" v-model="measurementRows[row._index].face" :disabled="!canEditStep('④')" size="small" style="width:160px">
                         <el-option v-for="d in ['X轴方向','Y轴方向']" :key="d" :label="d" :value="d" />
                       </el-select>
                       <el-tag v-else size="small" type="info">Z轴方向</el-tag>
                     </div>
 
-                    <!-- Thickness: 3 repeat expanders -->
+                    <!-- Thickness: 单次测量（固定端 / 中点 / 自由端） -->
                     <div v-if="config?.kind==='thickness'">
-                      <el-collapse>
-                        <el-collapse-item v-for="rp in [1,2,3]" :key="'rp'+rp" :title="'第'+rp+'次测量（固定端 / 中点 / 自由端）'" :name="'rp'+rp">
+                      <el-collapse v-model="thicknessCollapse">
+                        <el-collapse-item v-for="rp in [1]" :key="'rp'+rp" :title="'第'+rp+'次测量（固定端 / 中点 / 自由端）'" :name="'rp'+rp">
                           <el-row :gutter="12">
                             <el-col v-for="col in inputColumns.filter(c=>c.column_key.startsWith('r'+rp+'_'))" :key="col.column_key" :span="8" style="margin-bottom:8px">
                               <div style="font-size:11px;color:#64748B;margin-bottom:2px">{{ col.column_label }}</div>
-                              <el-input-number v-if="getColumnType(col)==='number'" v-model="measurementRows[row._index][col.column_key]" :disabled="!canEdit" size="small" controls-position="right" style="width:100%" />
-                              <el-input v-else v-model="measurementRows[row._index][col.column_key]" :disabled="!canEdit" size="small" />
+                              <el-input-number v-if="getColumnType(col)==='number'" v-model="measurementRows[row._index][col.column_key]" :disabled="!canEditStep('④')" size="small" controls-position="right" style="width:100%" />
+                              <el-input v-else v-model="measurementRows[row._index][col.column_key]" :disabled="!canEditStep('④')" size="small" />
                             </el-col>
                           </el-row>
                         </el-collapse-item>
@@ -2031,14 +2420,14 @@ function _choiceNeedsNote(selected) {
 
                     <!-- Input fields in compact 3-col grid -->
                     <el-row :gutter="12">
-                      <template v-for="col in inputColumns.filter(c => c.column_key !== 'note' && !c.column_key.startsWith('r') && (config?.kind!=='hv' || c.column_key!=='face'))" :key="col.column_key">
+                      <template v-for="col in inputColumns.filter(c => c.column_key !== 'note' && (config?.kind!=='hv' || c.column_key!=='face'))" :key="col.column_key">
                         <el-col :span="8" v-if="!(config?.kind==='thickness' && c.column_key.startsWith('r'))" style="margin-bottom:8px">
                           <div style="font-size:11px;color:#64748B;margin-bottom:2px">{{ col.column_label }}</div>
-                          <el-select v-if="getColumnType(col)==='select'" v-model="measurementRows[row._index][col.column_key]" :disabled="!canEdit" size="small" clearable style="width:100%">
+                          <el-select v-if="getColumnType(col)==='select'" v-model="measurementRows[row._index][col.column_key]" :disabled="!canEditStep('④')" size="small" clearable style="width:100%">
                             <el-option v-for="opt in getColumnOptions(col)" :key="opt" :label="opt" :value="opt" />
                           </el-select>
-                          <el-input-number v-else-if="getColumnType(col)==='number'" v-model="measurementRows[row._index][col.column_key]" :disabled="!canEdit" size="small" controls-position="right" style="width:100%" />
-                          <el-input v-else v-model="measurementRows[row._index][col.column_key]" :disabled="!canEdit" size="small" />
+                          <el-input-number v-else-if="getColumnType(col)==='number'" v-model="measurementRows[row._index][col.column_key]" :disabled="!canEditStep('④')" size="small" controls-position="right" style="width:100%" />
+                          <el-input v-else v-model="measurementRows[row._index][col.column_key]" :disabled="!canEditStep('④')" size="small" />
                         </el-col>
                       </template>
                     </el-row>
@@ -2063,29 +2452,53 @@ function _choiceNeedsNote(selected) {
                     <!-- Note toggle (per row, auto-shown when abnormal) -->
                     <div style="margin-top:6px">
                       <template v-if="isRowAbnormal(row)">
-                        <el-input v-model="measurementRows[row._index].note" type="textarea" :rows="1" placeholder="备注/异常说明" :disabled="!canEdit" size="small" style="margin-top:4px" />
+                        <el-input v-model="measurementRows[row._index].note" type="textarea" :rows="1" placeholder="备注/异常说明" :disabled="!canEditStep('④')" size="small" style="margin-top:4px" />
                       </template>
                       <template v-else>
-                        <el-input v-if="measurementRows[row._index]._showNote" v-model="measurementRows[row._index].note" type="textarea" :rows="1" placeholder="备注/异常说明" :disabled="!canEdit" size="small" style="margin-top:4px" />
+                        <el-input v-if="measurementRows[row._index]._showNote" v-model="measurementRows[row._index].note" type="textarea" :rows="1" placeholder="备注/异常说明" :disabled="!canEditStep('④')" size="small" style="margin-top:4px" />
                         <el-button size="small" text @click="measurementRows[row._index]._showNote = !measurementRows[row._index]._showNote">{{ measurementRows[row._index]._showNote ? '收起备注' : '补充说明' }}</el-button>
                       </template>
                     </div>
                   </div>
-                </el-card>
-              </div>
+                  <!-- 样品级拍照点：逐样拍摄，随样品卡片展示 -->
+                  <div v-if="sampleLevelCheckpoints.length" style="margin-top:14px;padding-top:12px;border-top:1px dashed #E2E8F0">
+                    <div style="font-size:13px;font-weight:600;color:#475569;margin-bottom:8px">📷 样品拍照留档</div>
+                    <div v-for="cp in sampleLevelCheckpoints" :key="'sp-'+cp.code" style="margin-bottom:10px;padding:8px 10px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:6px">
+                      <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+                        <span v-if="cp.required!==false" style="color:#EF4444;font-weight:700">*</span>
+                        <span :style="{color:cp.samplePhotos[sno]?.previewUrl?'#166534':'#334155'}">{{ cp.label }}</span>
+                        <el-tag v-if="cp.samplePhotos[sno]?.previewUrl" size="small" type="success">已拍摄</el-tag>
+                      </div>
+                      <div v-if="cameraHints[cp.code]" style="font-size:11px;color:#94A3B8;margin-bottom:4px">📷 {{ cameraHints[cp.code] }}</div>
+                      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                        <template v-if="cp.samplePhotos[sno]?.previewUrl">
+                          <img :src="cp.samplePhotos[sno].previewUrl" style="height:64px;width:auto;border-radius:4px;border:1px solid #CBD5E1" />
+                          <el-button v-if="activeCameraCp !== cp || activeCameraSample !== sno" size="small" @click="openCamera(cp, sno)" :disabled="!canEdit || !photoEditAllowed">重拍</el-button>
+                          <el-button v-if="(activeCameraCp !== cp || activeCameraSample !== sno) && cp.samplePhotos[sno]?.previewUrl" size="small" type="danger" @click="removePhoto(cp, sno)" :disabled="!canEdit || !photoEditAllowed">删除</el-button>
+                        </template>
+                        <template v-else>
+                          <span style="font-size:11px;color:#EF4444">未拍摄</span>
+                          <el-button v-if="activeCameraCp !== cp || activeCameraSample !== sno" size="small" type="primary" @click="openCamera(cp, sno)" :disabled="!canEdit || !photoEditAllowed"><el-icon style="margin-right:2px"><Camera /></el-icon>拍照</el-button>
+                        </template>
+                      </div>
+                      <CameraCapture v-if="activeCameraCp === cp && activeCameraSample === sno" :checkpoint="cp" :sampleNo="sno" :cameraHint="cameraHints[cp.code] || ''" @photo-taken="onPhotoTaken" @close="closeCamera" />
+                    </div>
+                  </div>
+                  </el-card>
+                </el-tab-pane>
+              </el-tabs>
             </div>
 
-            <!-- ALL photos consolidated here, sorted by importance and grouped by category -->
-            <el-card v-if="photoCheckpoints.length" shadow="never" class="mb-card" style="margin-top:16px">
+            <!-- 实验级拍照点统一放在底部，按重要性排序、按类别分组 -->
+            <el-card v-if="taskLevelCheckpoints.length" shadow="never" class="mb-card" style="margin-top:16px">
               <template #header>
                 <div style="display:flex;justify-content:space-between;align-items:center">
-                  <strong>拍照留档</strong>
-                  <span style="font-size:12px" :style="{color:missingPhotos.length?'#EA580C':'#22C55E'}">{{ photoCompletionCount }}/{{ totalPhotoRequired }} 已完成{{ missingPhotos.length ? '（'+missingPhotos.length+'张未拍）' : ' ✓' }}</span>
+                  <strong>实验级拍照留档</strong>
+                  <span style="font-size:12px" :style="{color:taskLevelMissingPhotoCount?'#EA580C':'#22C55E'}">{{ taskLevelPhotoCompletionCount }}/{{ taskLevelPhotoRequired }} 已完成{{ taskLevelMissingPhotoCount ? '（'+taskLevelMissingPhotoCount+'张未拍）' : ' ✓' }}</span>
                 </div>
               </template>
               <div v-if="isSecondaryEdit && !photoEditAllowed" style="font-size:12px;color:#94A3B8;margin-bottom:8px">照片留档未被退回，本步骤照片已锁定。</div>
-              <!-- Grouped by checkpoint_group -->
-              <div v-for="(cps, groupName) in photoCheckpointGroups" :key="groupName" style="margin-bottom:16px">
+              <div v-for="(cps, groupName) in taskLevelPhotoCheckpointGroups" :key="groupName" style="margin-bottom:16px">
                 <div style="font-size:13px;font-weight:600;color:#475569;margin-bottom:8px;padding:4px 8px;background:#F1F5F9;border-radius:4px">
                   {{ groupName }}
                   <span style="font-weight:400;color:#94A3B8;font-size:12px;margin-left:8px">{{ cps.filter(cp=>cp.file&&cp.previewUrl).length }}/{{ cps.length }}</span>
@@ -2094,39 +2507,15 @@ function _choiceNeedsNote(selected) {
                   <div class="photo-cl-label">
                     <span v-if="cp.required!==false" style="color:#EF4444;font-weight:700">*</span>
                     <span :style="{color:cp.previewUrl?'#166534':'#334155'}">{{ cp.label }}</span>
-                    <el-tag v-if="cp.isSampleLevel" size="small" type="info" style="margin-left:4px">逐样拍摄</el-tag>
                     <el-tag v-if="cp.previewUrl" size="small" type="success" style="margin-left:6px">已拍摄</el-tag>
                   </div>
-                  <!-- Camera hint -->
                   <div v-if="cameraHints[cp.code]" style="font-size:11px;color:#94A3B8;margin-bottom:4px">📷 {{ cameraHints[cp.code] }}</div>
-                  <!-- Task-level photo (only for non-sample-level checkpoints) -->
-                  <template v-if="!cp.isSampleLevel">
-                    <div v-if="cp.previewUrl" style="margin-bottom:6px"><img :src="cp.previewUrl" style="max-width:100%;max-height:140px;border-radius:6px;border:1px solid #E2E8F0" /></div>
-                    <div v-if="activeCameraCp !== cp || activeCameraSample !== ''" style="display:flex;gap:6px;margin-bottom:6px">
-                      <el-button size="small" :type="cp.previewUrl?'default':'primary'" @click="openCamera(cp)" :disabled="!canEdit || !photoEditAllowed"><el-icon style="margin-right:3px"><Camera /></el-icon>{{ cp.previewUrl?'重拍':'拍照' }}</el-button>
-                      <el-button v-if="cp.previewUrl" size="small" type="danger" @click="removePhoto(cp)" :disabled="!canEdit || !photoEditAllowed">删除</el-button>
-                    </div>
-                    <CameraCapture v-if="activeCameraCp === cp && activeCameraSample === ''" :checkpoint="cp" :sampleNo="''" :cameraHint="cameraHints[cp.code] || ''" @photo-taken="onPhotoTaken" @close="closeCamera" />
-                  </template>
-                  <!-- Per-sample slots for sample-level checkpoints -->
-                  <div v-if="cp.isSampleLevel && sampleIds.length" class="sample-photo-slots">
-                    <div style="font-size:11px;font-weight:600;color:#64748B;margin-bottom:6px">逐样拍照（共{{ sampleIds.length }}个样品）</div>
-                    <div v-for="sno in sampleIds" :key="sno" style="display:flex;align-items:center;gap:8px;margin-bottom:6px;padding:6px 8px;background:#F8FAFC;border-radius:4px;border:1px solid #E2E8F0">
-                      <span style="font-size:12px;font-weight:500;min-width:80px">{{ sno }}</span>
-                      <template v-if="cp.samplePhotos[sno]?.previewUrl">
-                        <img :src="cp.samplePhotos[sno].previewUrl" style="height:40px;width:auto;border-radius:3px;border:1px solid #CBD5E1" />
-                        <el-tag size="small" type="success">✓</el-tag>
-                        <el-button v-if="activeCameraCp !== cp || activeCameraSample !== sno" size="small" @click="openCamera(cp, sno)" :disabled="!canEdit || !photoEditAllowed">重拍</el-button>
-                        <el-button v-if="(activeCameraCp !== cp || activeCameraSample !== sno) && cp.samplePhotos[sno]?.previewUrl" size="small" type="danger" @click="removePhoto(cp, sno)" :disabled="!canEdit || !photoEditAllowed">删除</el-button>
-                      </template>
-                      <template v-else>
-                        <span v-if="activeCameraCp !== cp || activeCameraSample !== sno" style="font-size:11px;color:#EF4444">未拍摄</span>
-                        <el-button v-if="activeCameraCp !== cp || activeCameraSample !== sno" size="small" type="primary" @click="openCamera(cp, sno)" :disabled="!canEdit || !photoEditAllowed"><el-icon style="margin-right:2px"><Camera /></el-icon>拍照</el-button>
-                      </template>
-                    </div>
-                    <!-- Inline camera for per-sample checkpoint -->
-                    <CameraCapture v-if="activeCameraCp === cp && activeCameraSample" :checkpoint="cp" :sampleNo="activeCameraSample" :cameraHint="cameraHints[cp.code] || ''" @photo-taken="onPhotoTaken" @close="closeCamera" />
+                  <div v-if="cp.previewUrl" style="margin-bottom:6px"><img :src="cp.previewUrl" style="max-width:100%;max-height:140px;border-radius:6px;border:1px solid #E2E8F0" /></div>
+                  <div v-if="activeCameraCp !== cp || activeCameraSample !== ''" style="display:flex;gap:6px;margin-bottom:6px">
+                    <el-button size="small" :type="cp.previewUrl?'default':'primary'" @click="openCamera(cp)" :disabled="!canEdit || !photoEditAllowed"><el-icon style="margin-right:3px"><Camera /></el-icon>{{ cp.previewUrl?'重拍':'拍照' }}</el-button>
+                    <el-button v-if="cp.previewUrl" size="small" type="danger" @click="removePhoto(cp)" :disabled="!canEdit || !photoEditAllowed">删除</el-button>
                   </div>
+                  <CameraCapture v-if="activeCameraCp === cp && activeCameraSample === ''" :checkpoint="cp" :sampleNo="''" :cameraHint="cameraHints[cp.code] || ''" @photo-taken="onPhotoTaken" @close="closeCamera" />
                 </div>
               </div>
             </el-card>
@@ -2143,12 +2532,28 @@ function _choiceNeedsNote(selected) {
           <div class="tab-inner">
             <el-card shadow="never" class="mb-card">
               <template #header><strong>母版过程确认</strong></template>
-              <div style="font-size:13px;color:#64748B;margin-bottom:16px">这里仅显示前四步尚不能自动取得的现场观察和实际填空。按原始记录表分区排列，可对明确的正常项一键确认。</div>
+              <div style="font-size:13px;color:#64748B;margin-bottom:16px">头部信息由委托与样品管理员确定，此处只读引用；下方按原始记录表分区排列仍需实验员补充的现场观察与实际填空，可对明确的正常项一键确认。</div>
               <el-descriptions :column="2" border size="small" style="margin-bottom:16px">
                 <el-descriptions-item label="SOP版本">{{ config.sop_version || 'A/0' }}</el-descriptions-item>
                 <el-descriptions-item label="原始记录模板">{{ config.record_template_file || config.record_template_version || '-' }}</el-descriptions-item>
                 <el-descriptions-item label="实验配置版本">{{ config.version || '-' }}</el-descriptions-item>
                 <el-descriptions-item label="检测标准">{{ task.standard || '-' }}</el-descriptions-item>
+              </el-descriptions>
+
+              <!-- 头部信息只读引用（委托/样品管理员确定，实验员不可修改） -->
+              <el-descriptions :column="3" border size="small" style="margin-bottom:16px">
+                <el-descriptions-item label="委托单位">{{ commission?.client_name || '-' }}</el-descriptions-item>
+                <el-descriptions-item label="生产单位">{{ commission?.production_org_name || '-' }}</el-descriptions-item>
+                <el-descriptions-item label="样品名称">{{ sampleGroup?.sample_name || '-' }}</el-descriptions-item>
+                <el-descriptions-item label="规格型号">
+                  <span v-if="sampleGroup?.model && sampleGroup.model !== '-'">{{ sampleGroup.model }}</span>
+                  <span v-else style="color:#F59E0B;font-weight:600">未填写</span>
+                </el-descriptions-item>
+                <el-descriptions-item label="材料名称">{{ sampleGroup?.material_name || '-' }}</el-descriptions-item>
+                <el-descriptions-item label="实体样品编号">{{ sampleIds.length ? sampleIds.join('、') : '-' }}</el-descriptions-item>
+                <el-descriptions-item label="检测方法">{{ task.method_code || '-' }}</el-descriptions-item>
+                <el-descriptions-item label="检测依据">{{ task.standard || '-' }}</el-descriptions-item>
+                <el-descriptions-item label="检测地点">{{ task.detection_location || '-' }}</el-descriptions-item>
               </el-descriptions>
 
               <!-- Template supplement fields -->
@@ -2158,72 +2563,68 @@ function _choiceNeedsNote(selected) {
                 <div v-if="!config.record_template_file" style="font-size:12px;color:#94A3B8;margin-top:4px">未检测到模板文件，请上传受控原始记录模板后刷新。</div>
               </div>
               <div v-else>
-                <div style="margin-bottom:12px;padding:8px 12px;background:#EFF6FF;border-radius:6px;border:1px solid #BFDBFE">
-                  <span style="color:#1E40AF;font-size:13px">母版过程确认：{{ templateFields.filter(f => f.value).length }}/{{ templateFields.length }} 项已完成。每个分区可一键确认明确的正常项；实际参数、类别和异常内容仍需本人填写。</span>
+                <div style="margin-bottom:12px;padding:8px 12px;background:#EFF6FF;border-radius:6px;border:1px solid #BFDBFE;display:flex;align-items:center;justify-content:space-between;gap:12px">
+                  <span style="color:#1E40AF;font-size:13px">母版过程确认：{{ editableTemplateFields.filter(f => f.value && f.value.trim()).length }}/{{ editableTemplateFields.length }} 项已完成。字段名按「行标识 · 列头」对齐原始记录表，并展示原文格式；可分区一键确认明确的正常项，实际参数、类别和异常内容仍需本人填写。头部信息（生产日期/批号/材料名称/规格型号/样品名称等）由样品管理员确定，此处只读引用。</span>
+                  <el-button type="primary" size="small" :disabled="!canEditStep('⑤')" @click="batchConfirmAll">一键确认并填充</el-button>
                 </div>
-                <!-- Group by section -->
-                <div v-for="(sectionFields, sectionName) in templateFieldsGrouped" :key="sectionName" style="margin-bottom:16px">
-                  <el-collapse>
-                    <el-collapse-item :title="`${sectionName}｜${sectionFields.filter(f=>f.value).length}/${sectionFields.length} 已完成`" :name="sectionName">
-                      <!-- Batch confirm button -->
-                      <div v-if="sectionFields.some(f => (f.template_text || '').includes('□') || (f.template_text || '').includes('☐'))" style="margin-bottom:8px">
-                        <el-button size="small" :disabled="!canEdit" @click="batchConfirmSection(sectionName)">本区正常项一键确认</el-button>
-                        <div style="font-size:12px;color:#94A3B8;margin-top:3px">只批量确认含义明确的"正常/符合/无异常"项目；具体参数和类别不会被代填。</div>
-                      </div>
-                      <el-form label-position="top" size="small">
-                        <el-row :gutter="16">
-                          <el-col v-for="f in sectionFields" :key="f.key" :span="8" style="margin-bottom:12px">
-                            <el-form-item :label="f.label || f.position">
-                              <!-- Checkbox-detected fields -->
-                              <template v-if="(f.template_text || '').includes('□') || (f.template_text || '').includes('☐')">
-                                <div style="font-size:11px;color:#94A3B8;margin-bottom:3px">
-                                  选项：{{ _checkboxChoices(f.template_text || '').join('、') }}
-                                </div>
-                                <!-- Multi-select for independent confirmations -->
-                                <el-select
-                                  v-if="_checkboxFieldMeta(f.label||'', _checkboxChoices(f.template_text||'')).multi"
-                                  v-model="_parseCheckboxValue(f.template_text||'', templateFields.find(tf=>tf.key===f.key)?.value||'').selected"
-                                  multiple
-                                  :disabled="!canEdit"
-                                  placeholder="选择所有实际符合的项目"
-                                  style="width:100%"
-                                  @change="(vals) => { const tf = templateFields.find(t=>t.key===f.key); if(tf) { const s = _parseCheckboxValue(f.template_text||'', tf.value||''); tf.value = _filledCheckboxText(f.template_text||'', vals||[], s.note) } }"
-                                >
-                                  <el-option v-for="c in _checkboxChoices(f.template_text||'')" :key="c" :label="c" :value="c" />
-                                </el-select>
-                                <!-- Single-select for exclusive choices -->
-                                <el-select
-                                  v-else
-                                  :model-value="_parseCheckboxValue(f.template_text||'', templateFields.find(tf=>tf.key===f.key)?.value||'').selected[0] || '请选择'"
-                                  :disabled="!canEdit"
-                                  placeholder="选择实际记录值"
-                                  style="width:100%"
-                                  @change="(val) => { const tf = templateFields.find(t=>t.key===f.key); if(tf) { const s = _parseCheckboxValue(f.template_text||'', tf.value||''); tf.value = _filledCheckboxText(f.template_text||'', val && val!=='请选择' ? [val] : [], s.note) } }"
-                                >
-                                  <el-option value="请选择" label="请选择" />
-                                  <el-option v-for="c in _checkboxChoices(f.template_text||'')" :key="c" :label="c" :value="c" />
-                                </el-select>
-                                <!-- Note for "其他"/"异常" selections -->
-                                <el-input
-                                  v-if="_choiceNeedsNote(_parseCheckboxValue(f.template_text||'', templateFields.find(tf=>tf.key===f.key)?.value||'').selected) || ((f.template_text||'').match(/(_{2,}|＿{2,}|…{2,})/) && _parseCheckboxValue(f.template_text||'', templateFields.find(tf=>tf.key===f.key)?.value||'').selected.length)"
-                                  :model-value="_parseCheckboxValue(f.template_text||'', templateFields.find(tf=>tf.key===f.key)?.value||'').note"
-                                  @update:model-value="(note) => { const tf = templateFields.find(t=>t.key===f.key); if(tf) { const s = _parseCheckboxValue(f.template_text||'', tf.value||''); tf.value = _filledCheckboxText(f.template_text||'', s.selected, note||'') } }"
-                                  placeholder="补充说明"
-                                  :disabled="!canEdit"
-                                  size="small"
-                                  style="margin-top:4px"
-                                />
-                              </template>
-                              <!-- Blank-fill fields -->
-                              <template v-else>
-                                <el-input v-model="templateFields.find(tf=>tf.key===f.key).value" :placeholder="'填写实际记录'" :disabled="!canEdit" />
-                              </template>
-                            </el-form-item>
-                          </el-col>
-                        </el-row>
-                      </el-form>
-                    </el-collapse-item>
-                  </el-collapse>
+                <!-- 按原始记录表分区渲染，字段名 = 行标识 · 列头 -->
+                <div v-for="(sectionFields, sectionName) in templateFieldsGrouped" :key="sectionName" style="margin-bottom:20px">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:12px">
+                    <strong style="font-size:14px">{{ sectionName }}</strong>
+                    <el-button v-if="sectionFields.some(hasCheckbox)" size="small" :disabled="!canEditStep('⑤')" @click="batchConfirmSection(sectionName)">本区正常项一键确认</el-button>
+                  </div>
+                  <el-form label-position="top" size="small">
+                    <el-row :gutter="16">
+                      <el-col v-for="f in sectionFields" :key="f.key" :span="8" style="margin-bottom:12px" :class="{'tf-missing': !isReadonlyTemplateField(f) && !(f.value && f.value.trim())}">
+                        <el-form-item :label="fieldName(f)">
+                          <div v-if="isReadonlyTemplateField(f)" class="tmpl-ro" style="padding-top:6px;color:#1F2937;font-size:13px;word-break:break-all">{{ f.value || '—' }}</div>
+                          <template v-else>
+                          <div v-if="hasBlank(f) && !hasCheckbox(f)" class="tmpl-fmt">原文：{{ f.template_text }}</div>
+                          <!-- Checkbox-detected fields -->
+                          <template v-if="hasCheckbox(f)">
+                            <div class="tmpl-choices">选项：{{ _checkboxChoices(f.template_text || '').join('、') }}</div>
+                            <!-- Multi-select for independent confirmations -->
+                            <el-select
+                              v-if="_checkboxFieldMeta(f.label||'', _checkboxChoices(f.template_text||'')).multi"
+                              :model-value="_parseCheckboxValue(f.template_text||'', f.value||'').selected"
+                              multiple
+                              :disabled="!canEditStep('⑤')"
+                              placeholder="选择所有实际符合的项目"
+                              style="width:100%"
+                              @change="(vals) => { const s = _parseCheckboxValue(f.template_text||'', f.value||''); f.value = _filledCheckboxText(f.template_text||'', vals||[], s.note) }"
+                            >
+                              <el-option v-for="c in _checkboxChoices(f.template_text||'')" :key="c" :label="c" :value="c" />
+                            </el-select>
+                            <!-- Single-select for exclusive choices -->
+                            <el-select
+                              v-else
+                              :model-value="_parseCheckboxValue(f.template_text||'', f.value||'').selected[0] || '请选择'"
+                              :disabled="!canEditStep('⑤')"
+                              placeholder="选择实际记录值"
+                              style="width:100%"
+                              @change="(val) => { const s = _parseCheckboxValue(f.template_text||'', f.value||''); f.value = _filledCheckboxText(f.template_text||'', val && val!=='请选择' ? [val] : [], s.note) }"
+                            >
+                              <el-option value="请选择" label="请选择" />
+                              <el-option v-for="c in _checkboxChoices(f.template_text||'')" :key="c" :label="c" :value="c" />
+                            </el-select>
+                            <!-- Note for "其他"/"异常" selections -->
+                            <el-input
+                              v-if="_choiceNeedsNote(_parseCheckboxValue(f.template_text||'', f.value||'').selected) || (hasBlank(f) && _parseCheckboxValue(f.template_text||'', f.value||'').selected.length)"
+                              :model-value="_parseCheckboxValue(f.template_text||'', f.value||'').note"
+                              @update:model-value="(note) => { const s = _parseCheckboxValue(f.template_text||'', f.value||''); f.value = _filledCheckboxText(f.template_text||'', s.selected, note||'') }"
+                              placeholder="补充说明"
+                              :disabled="!canEditStep('⑤')"
+                              size="small"
+                              style="margin-top:4px"
+                            />
+                          </template>
+                          <!-- Blank-fill fields -->
+                          <el-input v-else v-model="f.value" :placeholder="f.template_text || '填写实际记录'" :disabled="!canEditStep('⑤')" />
+                          </template>
+                        </el-form-item>
+                      </el-col>
+                    </el-row>
+                  </el-form>
                 </div>
               </div>
             </el-card>
@@ -2243,16 +2644,16 @@ function _choiceNeedsNote(selected) {
               <template #header><strong>异常与结果</strong></template>
               <div style="margin-bottom:12px">
                 <span style="font-size:13px;color:#475569">实验完成状态：</span>
-                <el-radio-group v-model="overallStatus" :disabled="!canEdit" size="small">
+                <el-radio-group v-model="overallStatus" :disabled="!canEditStep('⑦')" size="small">
                   <el-radio value="正常完成">正常完成</el-radio>
                   <el-radio value="存在异常">存在异常</el-radio>
                 </el-radio-group>
               </div>
               <div v-if="hasException">
-                <el-input v-model="deviation" type="textarea" :rows="3" placeholder="异常、偏离、影响评估及处理措施" :disabled="!canEdit" style="margin-bottom:12px" />
+                <el-input v-model="deviation" type="textarea" :rows="3" placeholder="异常、偏离、影响评估及处理措施" :disabled="!canEditStep('⑦')" style="margin-bottom:12px" />
                 <div style="margin-bottom:8px">
                   <span style="font-size:13px;color:#475569">是否复测/重制：</span>
-                  <el-radio-group v-model="retest" :disabled="!canEdit" size="small">
+                  <el-radio-group v-model="retest" :disabled="!canEditStep('⑦')" size="small">
                     <el-radio value="否">否</el-radio>
                     <el-radio value="是">是</el-radio>
                   </el-radio-group>
@@ -2276,8 +2677,8 @@ function _choiceNeedsNote(selected) {
               <!-- Manual override toggle -->
               <el-collapse>
                 <el-collapse-item title="手动修正报告结果（仅在系统自动生成不准确时使用）">
-                  <el-input v-model="reportSummary" type="textarea" :rows="3" placeholder="手动输入检验结果摘要（覆盖自动生成）" :disabled="!canEdit" style="margin-bottom:8px" />
-                  <el-input v-model="reportConclusion" placeholder="手动输入单项结论（覆盖自动生成）" :disabled="!canEdit" />
+                  <el-input v-model="reportSummary" type="textarea" :rows="3" placeholder="手动输入检验结果摘要（覆盖自动生成）" :disabled="!canEditStep('⑦')" style="margin-bottom:8px" />
+                  <el-input v-model="reportConclusion" placeholder="手动输入单项结论（覆盖自动生成）" :disabled="!canEditStep('⑦')" />
                 </el-collapse-item>
               </el-collapse>
             </el-card>
@@ -2321,6 +2722,31 @@ function _choiceNeedsNote(selected) {
                   <el-button size="small" :disabled="!canEdit || !deviceFileEditAllowed">上传设备原始文件</el-button>
                 </el-upload>
                 <el-button v-if="deviceFiles.length" size="small" type="primary" @click="uploadDeviceFiles" :loading="uploadingFiles" :disabled="!deviceFileType">保存{{ deviceFiles.length }}个设备文件</el-button>
+              </div>
+
+              <!-- 已上传设备文件列表 -->
+              <div style="margin-top:12px">
+                <el-table v-if="uploadedDeviceFiles.length" :data="uploadedDeviceFiles" size="small" v-loading="deviceFilesLoading">
+                  <el-table-column prop="attachment_type" label="类型" width="150" />
+                  <el-table-column label="文件名" min-width="220">
+                    <template #default="{ row }">
+                      <a :href="deviceFileUrl(row)" :download="row.original_name" target="_blank" style="color:#3B82F6">{{ row.original_name }}</a>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="关联样品" width="110">
+                    <template #default="{ row }">{{ row.sample_no || '—' }}</template>
+                  </el-table-column>
+                  <el-table-column label="上传者" width="100">
+                    <template #default="{ row }">{{ row.uploader_name || row.uploader }}</template>
+                  </el-table-column>
+                  <el-table-column prop="created_at" label="上传时间" width="170" />
+                  <el-table-column v-if="canEdit && deviceFileEditAllowed" label="操作" width="80" fixed="right">
+                    <template #default="{ row }">
+                      <el-button text type="danger" size="small" @click="deleteDeviceFile(row)">删除</el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <div v-else style="font-size:12px;color:#94A3B8">暂无已上传设备文件</div>
               </div>
             </el-card>
 
@@ -2424,7 +2850,7 @@ function _choiceNeedsNote(selected) {
               <div style="font-size:12px;color:#94A3B8;margin-bottom:12px">提交后，系统会把七个步骤中的业务数据回填至受控Word母版原位置。</div>
               <el-form label-position="top" size="small">
                 <el-form-item>
-                  <el-checkbox v-model="testerSelfCheck" :disabled="!canEdit">我已完成实验员自查：样品、设备、环境、原始数据、计算结果、照片和异常记录均已核对</el-checkbox>
+                  <el-checkbox v-model="testerSelfCheck" :disabled="!canEditStep('⑦')">我已完成实验员自查：样品、设备、环境、原始数据、计算结果、照片和异常记录均已核对</el-checkbox>
                 </el-form-item>
                 <el-form-item label="修改原因（首次记录可不填）">
                   <el-input v-model="changeReason" placeholder="首次记录可不填" :disabled="!canEdit" />
@@ -2444,6 +2870,34 @@ function _choiceNeedsNote(selected) {
 
       </el-tabs>
     </div>
+
+    <!-- 归还样品对话框 -->
+    <el-dialog v-model="returnDialogVisible" title="归还样品" width="550px" :close-on-click-modal="false">
+      <el-alert type="info" :closable="false" show-icon style="margin-bottom:16px"
+        title="实验结束后，请归还以下样品。样品管理员将在「回库确认」中接收。" />
+      <el-table :data="returnSamples" size="small" border>
+        <el-table-column prop="sample_no" label="样品编号" width="160" />
+        <el-table-column label="归还状况" width="160">
+          <template #default="{ row }">
+            <el-select v-model="row.return_condition" size="small" style="width:130px">
+              <el-option label="完好" value="完好" />
+              <el-option label="部分消耗" value="部分消耗" />
+              <el-option label="已破坏" value="已破坏" />
+              <el-option label="全部消耗" value="全部消耗" />
+            </el-select>
+          </template>
+        </el-table-column>
+        <el-table-column label="备注" min-width="160">
+          <template #default="{ row }">
+            <el-input v-model="row.note" size="small" placeholder="选填" />
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="returnDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitSampleReturn" :loading="returnSubmitting">确认归还</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -2464,6 +2918,16 @@ function _choiceNeedsNote(selected) {
 .tab-inner { padding:20px 0; }
 .step-nav { display:flex; gap:12px; margin-top:20px; padding-top:16px; border-top:1px solid #F1F5F9; }
 .mb-card { margin-bottom:16px; }
+
+/* ⑤母版未填字段标红 */
+.tf-missing :deep(.el-form-item__label) { color:#DC2626; }
+.tf-missing :deep(.el-form-item__label)::before { content:'* '; color:#DC2626; }
+.tf-missing :deep(.el-input__wrapper), .tf-missing :deep(.el-select__wrapper) { box-shadow:0 0 0 1px #FCA5A5 inset; }
+.tf-missing :deep(.el-form-item__label) { font-weight:600; }
+
+/* ⑤母版字段名与原文格式 */
+.tmpl-choices { font-size:11px; color:#94A3B8; margin-bottom:3px; }
+.tmpl-fmt { font-size:11px; color:#94A3B8; margin-bottom:3px; }
 .mb-card-sm { margin-bottom:12px; }
 .mb-table { margin-bottom:8px; }
 

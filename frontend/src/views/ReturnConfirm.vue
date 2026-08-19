@@ -3,6 +3,8 @@ import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, Check, Box } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import { chinaDate, chinaTime } from '../utils/time'
+import { materialWithSample } from '../utils/material'
 
 const loading = ref(false)
 const stats = reactive({ total: 0, unreturned: 0, returned: 0, confirmed: 0 })
@@ -58,7 +60,7 @@ function statusTag(s) {
 
 function formatDate(d) {
   if (!d) return '—'
-  return new Date(d).toLocaleString('zh-CN')
+  return chinaDate(new Date(d)) + ' ' + chinaTime(new Date(d))
 }
 
 onMounted(() => {
@@ -113,7 +115,9 @@ onMounted(() => {
       <el-table-column prop="package_no" label="任务包编号" width="200" />
       <el-table-column prop="sample_no" label="样品编号" width="160" />
       <el-table-column prop="sample_name" label="样品名称" width="140" />
-      <el-table-column prop="material_name" label="材料" width="100" />
+      <el-table-column label="材料" min-width="160">
+        <template #default="{ row }">{{ materialWithSample(row.material_name, row.sample_name) }}</template>
+      </el-table-column>
       <el-table-column prop="borrower" label="借用人" width="100" />
       <el-table-column label="借出时间" width="160">
         <template #default="{ row }">{{ formatDate(row.borrowed_at) }}</template>

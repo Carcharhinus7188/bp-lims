@@ -43,7 +43,6 @@ const allMenus = {
   'SOP与模板版本':         { icon: Document,  path: '/templates' },
   '实验配置版本':          { icon: Monitor,   path: '/methods' },
   '审计追踪':             { icon: Lock,      path: '/audit-trail' },
-  '样品借出与归还':         { icon: Van,       path: '/sample-return' },
   '危废处理登记':          { icon: Delete,    path: '/hazardous-waste' },
   '回库确认':             { icon: Checked,   path: '/return-confirm' },
   '通知中心':             { icon: Bell,      path: '/notifications' },
@@ -70,7 +69,7 @@ const menuGroups = computed(() => {
 
   // 业务与追溯
   const biz = ['委托与样品管理', '新建委托与入库', '任务包分配', '我的任务包', '实验记录', '我的任务',
-               '原始记录复核', '样品借出与归还', '回库确认', '危废处理登记',
+               '原始记录复核', '回库确认', '危废处理登记',
                '单据中心', '一键下载', '附件与内部追溯', '修改中心']
   const bizFiltered = biz.filter(m => menus.includes(m))
   if (bizFiltered.length) groups.push({ label: '业务与追溯', items: bizFiltered })

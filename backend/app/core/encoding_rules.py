@@ -1,6 +1,6 @@
 """BPLab Trace LIMS — 编号与命名规则
 
-从 templates/7.29_BPLab_Trace编号与命名规则汇总_修改版.docx 提取
+从 8.10 BP编号与命名规则汇总_副本.docx 提取
 整合到系统编号生成逻辑中。
 """
 from __future__ import annotations
@@ -186,8 +186,8 @@ PHOTO_CHECKPOINT_CODES = {
     "OTHER": "其他补充照片",
 }
 
-# 照片命名格式: {TaskNo}_{CheckpointCode}_{SampleNo}_{Timestamp}.jpg
-PHOTO_NAME_FORMAT = "{task_no}_{checkpoint}_{sample_no}_{timestamp}.jpg"
+# 照片命名格式: {TaskNo}_{HHMMSS}.jpg（实验编号沿用任务编号；24小时制，时/分/秒两位补零）
+PHOTO_NAME_FORMAT = "{task_no}_{hhmmss}.jpg"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -237,6 +237,29 @@ def generate_hazardous_waste_no(date_str: str, seq: int) -> str:
 def template_code_for_kind(kind: str) -> str:
     """根据实验 kind 获取记录模板编号"""
     return KIND_TO_TEMPLATE.get(kind, "R000")
+
+
+# 实验 kind → SOP 模板编号
+KIND_TO_SOP = {k: v.replace("R", "SOP-") for k, v in KIND_TO_TEMPLATE.items()}
+
+# SOP 模板编号 → 实验名称
+SOP_TEMPLATE_NAMES = {v.replace("R", "SOP-"): n for v, n in RECORD_TEMPLATE_CODES.items()}
+
+
+def sop_template_for_kind(kind: str) -> str:
+    """根据实验 kind 获取 SOP 模板编号（如 SOP-001）"""
+    return KIND_TO_SOP.get(kind, "")
+
+
+def sop_template_filename(kind: str) -> str:
+    """根据实验 kind 获取 SOP 模板完整文件名（如 SOP-001_表面粗糙度试验.docx）"""
+    code = sop_template_for_kind(kind)
+    if not code:
+        return ""
+    name = SOP_TEMPLATE_NAMES.get(code, "")
+    if name:
+        return f"{code}_{name}.docx"
+    return f"{code}.docx"
 
 
 def validate_commission_no(no: str) -> bool:

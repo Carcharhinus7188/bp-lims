@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Bell } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import { chinaDate, chinaTime } from '../utils/time'
 
 const loading = ref(false)
 const list = ref([])
@@ -33,7 +34,7 @@ async function markAllRead() {
   } catch { ElMessage.error('操作失败') }
 }
 
-function formatDate(d) { return d ? new Date(d).toLocaleString('zh-CN') : '—' }
+function formatDate(d) { return d ? chinaDate(new Date(d)) + ' ' + chinaTime(new Date(d)) : '—' }
 </script>
 
 <template>

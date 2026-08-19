@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, get_db, require_role
+from app.services.audit_service import log_modification
 
 router = APIRouter(prefix="/methods", tags=["检测方法"])
 
@@ -64,9 +65,9 @@ async def list_methods(
 async def create_method(
     body: MethodCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    _user: Annotated[dict, Depends(require_role("管理员", "样品管理员"))],
+    _user: Annotated[dict, Depends(require_role("管理员"))],
 ):
-    """新增检测项目（管理员、样品管理员）"""
+    """新增检测项目（仅管理员）"""
     # 检查实验编码是否已存在
     existing = await db.execute(
         text("SELECT experiment_code, experiment_name, enabled, sort_order FROM experiment_methods WHERE experiment_code=:c"),
@@ -144,15 +145,23 @@ async def update_method(
     experiment_code: str,
     body: MethodUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    _user: Annotated[dict, Depends(require_role("管理员", "样品管理员"))],
+    user: Annotated[dict, Depends(require_role("管理员"))],
 ):
-    """编辑检测项目"""
+    """编辑检测项目，并回写方法编号/标准到历史检测项目/任务"""
     existing = await db.execute(
-        text("SELECT 1 FROM experiment_methods WHERE experiment_code=:c"),
+        text("""SELECT experiment_name, method_code, standard, category, kind,
+                template_code, sop_file, enabled FROM experiment_methods WHERE experiment_code=:c"""),
         {"c": experiment_code},
     )
-    if not existing.fetchone():
+    old = existing.fetchone()
+    if not old:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="检测项目不存在")
+
+    old_vals = {
+        "experiment_name": old[0], "method_code": old[1], "standard": old[2],
+        "category": old[3], "kind": old[4], "template_code": old[5],
+        "sop_file": old[6], "enabled": old[7],
+    }
 
     updates = []
     params: dict = {"c": experiment_code}
@@ -163,22 +172,59 @@ async def update_method(
             updates.append(f"{field}=:{field}")
             params[field] = value
 
-    if updates:
-        await db.execute(
-            text(f"UPDATE experiment_methods SET {', '.join(updates)}, updated_at=localtimestamp WHERE experiment_code=:c"),
-            params,
-        )
+    if not updates:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="没有要更新的字段")
 
-    return {"message": f"检测项目 {experiment_code} 已更新"}
+    await db.execute(
+        text(f"UPDATE experiment_methods SET {', '.join(updates)}, updated_at=localtimestamp WHERE experiment_code=:c"),
+        params,
+    )
+
+    # 回写方法编号/标准到历史 requested_tests + tasks
+    synced = 0
+    if body.method_code is not None:
+        r1 = await db.execute(
+            text("UPDATE requested_tests SET method_code=:m WHERE experiment_code=:c"),
+            {"m": body.method_code, "c": experiment_code},
+        )
+        r2 = await db.execute(
+            text("UPDATE tasks SET method_code=:m WHERE experiment_code=:c"),
+            {"m": body.method_code, "c": experiment_code},
+        )
+        synced += r1.rowcount + r2.rowcount
+    if body.standard is not None:
+        r1 = await db.execute(
+            text("UPDATE requested_tests SET standard=:s WHERE experiment_code=:c"),
+            {"s": body.standard, "c": experiment_code},
+        )
+        r2 = await db.execute(
+            text("UPDATE tasks SET standard=:s WHERE experiment_code=:c"),
+            {"s": body.standard, "c": experiment_code},
+        )
+        synced += r1.rowcount + r2.rowcount
+
+    # 审计
+    for field in ["experiment_name", "method_code", "standard", "category", "kind",
+                  "template_code", "sop_file", "enabled"]:
+        new_value = getattr(body, field, None)
+        if new_value is not None and str(new_value) != str(old_vals[field]):
+            await log_modification(
+                db, "experiment_method", experiment_code, user, field,
+                old_value=str(old_vals[field]) if old_vals[field] is not None else None,
+                new_value=str(new_value),
+                reason=f"编辑检测项目，回写历史 {synced} 条",
+            )
+
+    return {"message": f"检测项目 {experiment_code} 已更新", "synced": synced}
 
 
 @router.delete("/{experiment_code}")
 async def delete_method(
     experiment_code: str,
     db: Annotated[AsyncSession, Depends(get_db)],
-    _user: Annotated[dict, Depends(require_role("管理员", "样品管理员"))],
+    _user: Annotated[dict, Depends(require_role("管理员"))],
 ):
-    """删除检测项目（软删除，管理员/样品管理员）"""
+    """删除检测项目（软删除，仅管理员）"""
     result = await db.execute(
         text("UPDATE experiment_methods SET enabled=FALSE, updated_at=localtimestamp WHERE experiment_code=:c AND enabled=TRUE"),
         {"c": experiment_code},
@@ -198,3 +244,180 @@ async def method_categories(
         text("SELECT DISTINCT category FROM experiment_methods WHERE enabled=TRUE AND category IS NOT NULL ORDER BY category")
     )
     return [r[0] for r in result.fetchall()]
+
+
+# ============ 标准变体（一个检测项目多个标准，拆分独立使用） ============
+
+class StandardOut(BaseModel):
+    id: int
+    experiment_code: str
+    standard: str
+    enabled: bool
+    sort_order: int
+
+
+class StandardCreate(BaseModel):
+    standard: str = Field(..., min_length=1, description="标准全文")
+
+
+class StandardUpdate(BaseModel):
+    standard: str | None = None
+    enabled: bool | None = None
+    sort_order: int | None = None
+
+
+_STANDARD_COLS = ("standard", "enabled", "sort_order")
+
+
+@router.get("/{experiment_code}/standards", response_model=list[StandardOut])
+async def list_standards(
+    experiment_code: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _user: Annotated[dict, Depends(get_current_user)],
+):
+    """列出某检测项目的所有标准变体"""
+    result = await db.execute(
+        text("""
+            SELECT id, experiment_code, standard, enabled, sort_order
+            FROM experiment_standards
+            WHERE experiment_code=:c
+            ORDER BY sort_order, id
+        """),
+        {"c": experiment_code},
+    )
+    return [dict(zip(result.keys(), r)) for r in result.fetchall()]
+
+
+@router.post("/{experiment_code}/standards", response_model=StandardOut, status_code=201)
+async def create_standard(
+    experiment_code: str,
+    body: StandardCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[dict, Depends(require_role("管理员"))],
+):
+    """为检测项目新增一个标准变体（沿用父实验编码，仅管理员）"""
+    parent = await db.execute(
+        text("SELECT experiment_code FROM experiment_methods WHERE experiment_code=:c"),
+        {"c": experiment_code},
+    )
+    if not parent.fetchone():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="检测项目不存在")
+
+    dup = await db.execute(
+        text("SELECT id FROM experiment_standards WHERE experiment_code=:c AND standard=:st"),
+        {"c": experiment_code, "st": body.standard},
+    )
+    if dup.fetchone():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该标准已存在")
+
+    seq_result = await db.execute(
+        text("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM experiment_standards WHERE experiment_code=:c"),
+        {"c": experiment_code},
+    )
+    sort_order = seq_result.fetchone()[0]
+
+    result = await db.execute(
+        text("""
+            INSERT INTO experiment_standards
+              (experiment_code, standard, enabled, sort_order, created_at, updated_at)
+            VALUES (:ec, :st, TRUE, :so, localtimestamp, localtimestamp)
+            RETURNING id
+        """),
+        {"ec": experiment_code, "st": body.standard, "so": sort_order},
+    )
+    new_id = result.fetchone()[0]
+
+    await log_modification(
+        db, "experiment_standard", str(new_id), user, "standard",
+        old_value=None, new_value=body.standard,
+        reason=f"为 {experiment_code} 新增标准变体", action="create",
+    )
+
+    return StandardOut(
+        id=new_id, experiment_code=experiment_code, standard=body.standard,
+        enabled=True, sort_order=sort_order,
+    )
+
+
+@router.put("/{experiment_code}/standards/{standard_id}")
+async def update_standard(
+    experiment_code: str,
+    standard_id: int,
+    body: StandardUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[dict, Depends(require_role("管理员"))],
+):
+    """编辑某标准变体（仅管理员）"""
+    existing = await db.execute(
+        text("SELECT standard, enabled, sort_order FROM experiment_standards WHERE id=:id AND experiment_code=:c"),
+        {"id": standard_id, "c": experiment_code},
+    )
+    old = existing.fetchone()
+    if not old:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="标准变体不存在")
+
+    old_vals = {"standard": old[0], "enabled": old[1], "sort_order": old[2]}
+
+    updates = []
+    params: dict = {"id": standard_id, "c": experiment_code}
+    for field in _STANDARD_COLS:
+        value = getattr(body, field, None)
+        if value is not None:
+            updates.append(f"{field}=:{field}")
+            params[field] = value
+
+    if not updates:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="没有要更新的字段")
+
+    if body.standard is not None:
+        dup = await db.execute(
+            text("SELECT id FROM experiment_standards WHERE experiment_code=:c AND standard=:st AND id<>:id"),
+            {"c": experiment_code, "st": body.standard, "id": standard_id},
+        )
+        if dup.fetchone():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该标准已存在")
+
+    await db.execute(
+        text(f"UPDATE experiment_standards SET {', '.join(updates)}, updated_at=localtimestamp "
+             f"WHERE id=:id AND experiment_code=:c"),
+        params,
+    )
+
+    for field in _STANDARD_COLS:
+        new_value = getattr(body, field, None)
+        if new_value is not None and str(new_value) != str(old_vals[field]):
+            await log_modification(
+                db, "experiment_standard", str(standard_id), user, field,
+                old_value=str(old_vals[field]) if old_vals[field] is not None else None,
+                new_value=str(new_value), reason=f"编辑标准变体 {experiment_code}",
+            )
+
+    return {"message": "标准变体已更新"}
+
+
+@router.delete("/{experiment_code}/standards/{standard_id}")
+async def delete_standard(
+    experiment_code: str,
+    standard_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[dict, Depends(require_role("管理员"))],
+):
+    """删除某标准变体（仅管理员）"""
+    existing = await db.execute(
+        text("SELECT standard FROM experiment_standards WHERE id=:id AND experiment_code=:c"),
+        {"id": standard_id, "c": experiment_code},
+    )
+    old = existing.fetchone()
+    if not old:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="标准变体不存在")
+
+    await db.execute(
+        text("DELETE FROM experiment_standards WHERE id=:id AND experiment_code=:c"),
+        {"id": standard_id, "c": experiment_code},
+    )
+    await log_modification(
+        db, "experiment_standard", str(standard_id), user, "standard",
+        old_value=old[0], new_value=None,
+        reason="删除标准变体", action="delete",
+    )
+    return {"message": "标准变体已删除"}

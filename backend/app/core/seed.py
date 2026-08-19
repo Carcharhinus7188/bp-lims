@@ -2,28 +2,27 @@
 Auto-seed 模块 —— 首次启动时自动填充基础数据
 
 在 app/main.py 的 lifespan 中调用 auto_seed()。
-如果 experiment_methods 表为空，则自动填充：
-  1. 14 项实验方法
-  2. 12 项实验配置版本 (I001-I012, V2.0)
-  3. 设备数据 (从 CSV 读取，若可用)
-  4. 设备绑定关系 (从 CSV 读取，若可用)
+首次启动时自动填充：
+  1. 默认用户
+  2. 14 项实验方法
+  3. 实验配置版本（字段/列/拍照节点/预检）
 
 数据来源：
-  - 实验方法: 硬编码 (与 seed_v10.py 一致)
+  - 实验方法: 硬编码
   - 实验配置: app.core.experiment_schemas (与 seed_configs.py 一致)
-  - 设备/绑定: CSV 文件 (可选，路径见 EQUIPMENT_CSV / BINDING_CSV)
+
+设备与设备绑定数据不再从 CSV 导入，已随 bplab_dump.sql 进入数据库。
 """
 from __future__ import annotations
 
-import csv
+import json
 import logging
-import os
-from datetime import date
-from pathlib import Path
 from typing import Sequence
 
 from sqlalchemy import text
 from app.database import async_session
+from app.core.calc_formulas import rules_for_kind, rules_by_column
+from app.core.encoding_rules import china_today
 
 logger = logging.getLogger(__name__)
 
@@ -31,33 +30,21 @@ logger = logging.getLogger(__name__)
 # 14 项实验方法 (与 seed_v10.py 一致)
 # ═══════════════════════════════════════════════════════════════
 EXPERIMENT_METHODS: list[tuple[str, str, str, str, str]] = [
-    ("I001", "表面粗糙度试验",        "YY/T 1702",   "YY/T 1702-2020",               "rough"),
+    ("I001", "表面粗糙度试验",        "YY/T 1702",   "YY/T 1702-2020；GB/T 10610-2009", "rough"),
     ("I002", "金属-陶瓷结合裂纹萌生试验", "YY 0621.1",  "YY 0621.1-2016 / ISO 9693-1",  "crack"),
-    ("I003", "金属内部质量X射线灰度分析",  "GB 17168",    "GB 17168-2013",                 "xray"),
-    ("I004", "翘曲变形试验",           "YY/T 1702",   "YY/T 1702-2020",               "warpage"),
-    ("I005", "热膨胀系数试验",          "YY 0621.1",   "YY 0621.1-2016",               "cte"),
-    ("I006", "陶瓷牙耐急冷急热试验",      "YY 0300",     "YY 0300-2009",                "thermal_shock"),
+    ("I003", "金属内部质量X射线灰度分析",  "GB 17168",    "GB 17168及实验室受控SOP",           "xray"),
+    ("I004", "翘曲变形试验",           "YY/T 1702",   "YY/T 1702-2020 第7.3.2条",        "warpage"),
+    ("I005", "热膨胀系数试验",          "YY 0621.1",   "YY 0621.1及实验室受控SOP",         "cte"),
+    ("I006", "陶瓷牙耐急冷急热试验",      "YY 0300",     "YY 0300-2009 第7.10条",          "thermal_shock"),
     ("I007", "弯曲性能试验",           "YY/T 1702",   "YY/T 1702-2020",               "bending"),
     ("I008", "维氏硬度试验",           "GB/T 4340.1", "GB/T 4340.1-2024",             "vickers"),
     ("I009", "增材制造金属试样厚度测量",    "YY/T 1702",   "YY/T 1702-2020",               "thickness"),
-    ("I010", "牙科材料色稳定性试验",      "YY 0710",     "YY 0710-2009",                "color_stability"),
-    ("I011", "定制式固定义齿检验",       "GB 17168",    "GB 17168-2013",                "fixed_denture"),
-    ("I012", "定制式活动义齿检验",       "GB 17168",    "GB 17168-2013",                "removable_denture"),
+    ("I010", "牙科材料色稳定性试验",      "YY 0710",     "YY 0710及产品技术要求",          "color_stability"),
+    ("I011", "定制式固定义齿检验",       "YY/T 1936",   "YY/T 1936及产品技术要求",        "fixed_denture"),
+    ("I012", "定制式活动义齿检验",       "YY 0270.1",   "YY 0270.1及产品技术要求",        "removable_denture"),
     ("I013", "激光选区熔化金属材料密度试验",  "YY/T 1702",   "YY/T 1702-2020",               "density"),
     ("I014", "金属材料抗晦暗性能试验",     "YY 0710",     "YY 0710-2009",                "tarnish"),
 ]
-
-# ═══════════════════════════════════════════════════════════════
-# CSV 路径（可选，不存在则跳过设备导入）
-# ═══════════════════════════════════════════════════════════════
-_ROOT = Path(__file__).parent.parent.parent.parent  # backend/../ → 项目根目录
-_EQUIPMENT_CSV = _ROOT / "资料" / "bplab_v10_update" / "bplab_v10_template_update" / "equipment_master.csv"
-_BINDING_CSV   = _ROOT / "资料" / "bplab_v10_update" / "bplab_v10_template_update" / "equipment_binding_matrix.csv"
-
-# 也可通过环境变量覆盖 CSV 路径
-EQUIPMENT_CSV = Path(os.getenv("SEED_EQUIPMENT_CSV", str(_EQUIPMENT_CSV)))
-BINDING_CSV   = Path(os.getenv("SEED_BINDING_CSV",   str(_BINDING_CSV)))
-
 
 # ═══════════════════════════════════════════════════════════════
 # 实验配置元数据 (与 seed_configs.py 一致)
@@ -87,10 +74,14 @@ _EXPERIMENT_META: dict[str, dict] = {
              "standard": "YY/T 1936及产品技术要求",          "category": "定制式义齿",   "location": "外观检测室"},
     "I012": {"name": "定制式活动义齿综合检验",      "kind": "removable_denture", "method": "YY 0270.1",
              "standard": "YY 0270.1及产品技术要求",          "category": "定制式义齿",   "location": "外观检测室"},
+    "I013": {"name": "激光选区熔化金属材料密度试验",  "kind": "density",  "method": "YY/T 1702",
+             "standard": "YY/T 1702-2020",                 "category": "增材制造检测",  "location": "性能检测室"},
+    "I014": {"name": "金属材料抗晦暗性能试验",      "kind": "tarnish",  "method": "YY 0710",
+             "standard": "YY 0710-2009",                   "category": "物理性能检测",  "location": "外观检测室"},
 }
 
-SEED_VERSION = "V2.0"
-SEED_NOTE = f"auto-seed 首次启动自动创建 ({date.today().isoformat()})"
+SEED_VERSION = "V2.1"
+SEED_NOTE = f"auto-seed 首次启动自动创建 ({china_today().isoformat()})"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -98,12 +89,12 @@ SEED_NOTE = f"auto-seed 首次启动自动创建 ({date.today().isoformat()})"
 # ═══════════════════════════════════════════════════════════════
 _COMMON_PHOTO_CHECKPOINTS = [
     {"code": "ENV",          "label": "实验开始温湿度表",               "required": False, "sample_level": False, "group": "环境与设备"},
-    {"code": "SAMPLE_BEFORE","label": "实验前样品及标签",               "required": False, "sample_level": False, "group": "样品状态"},
+    {"code": "SAMPLE_BEFORE","label": "实验前样品及标签",               "required": False, "sample_level": True, "group": "样品状态"},
     {"code": "DEVICE",       "label": "设备编号/铭牌",                  "required": False, "sample_level": False, "group": "环境与设备"},
     {"code": "PARAMETERS",   "label": "设备参数或软件数据界面",           "required": False, "sample_level": False, "group": "环境与设备"},
-    {"code": "SETUP",        "label": "样品安装、装夹或放置状态",         "required": False, "sample_level": False, "group": "样品状态"},
+    {"code": "SETUP",        "label": "样品安装、装夹或放置状态",         "required": False, "sample_level": True, "group": "样品状态"},
     {"code": "RESULT",       "label": "最终读数、曲线或结果界面",         "required": False, "sample_level": False, "group": "结果界面"},
-    {"code": "SAMPLE_AFTER", "label": "实验结束后样品状态",              "required": False, "sample_level": False, "group": "样品状态"},
+    {"code": "SAMPLE_AFTER", "label": "实验结束后样品状态",              "required": False, "sample_level": True, "group": "样品状态"},
     {"code": "REPORT_PHOTO", "label": "检验报告照片区域用代表性照片",     "required": False, "sample_level": False, "group": "报告归档"},
 ]
 
@@ -205,6 +196,21 @@ _COLUMN_DEFAULTS = {
 
 
 # ═══════════════════════════════════════════════════════════════
+# 默认用户 (首次部署自动创建)
+# ═══════════════════════════════════════════════════════════════
+DEFAULT_USERS: list[tuple[str, str, str, str]] = [
+    # (username, password_plain, role, display_name)
+    ("admin",           "admin123",      "管理员",    "赵衡"),
+    ("receiver",        "receive123",    "样品管理员", "韩丹"),
+    ("liuhong_test",    "LhTest2026",    "实验员",    "刘红"),
+    ("liuhong_review",  "LhReview2026",  "复核员",    "刘红"),
+    ("lihongli_test",   "LhlTest2026",   "实验员",    "李红丽"),
+    ("lihongli_review", "LhlReview2026", "复核员",    "李红丽"),
+    ("quality",         "quality123",    "质量负责人", "刘丽"),
+]
+
+
+# ═══════════════════════════════════════════════════════════════
 # 主入口
 # ═══════════════════════════════════════════════════════════════
 
@@ -212,12 +218,20 @@ async def auto_seed() -> dict:
     """首次启动时自动填充基础数据。幂等操作——已存在的数据不会重复插入。
 
     返回:
-        dict: {"methods": int, "configs": int, "equipment": int, "bindings": int}
+        dict: {"methods": int, "configs": int, "equipment": int, "bindings": int, "users": int}
     """
-    result = {"methods": 0, "configs": 0, "equipment": 0, "bindings": 0}
+    result = {"methods": 0, "configs": 0, "users": 0}
 
     async with async_session() as db:
         try:
+            # 0. 默认用户（必须在第一步，否则无人能登录）
+            user_count = await db.execute(text("SELECT COUNT(*) FROM users"))
+            if user_count.fetchone()[0] == 0:
+                logger.info("用户表为空，创建默认账号…")
+                result["users"] = await _seed_users(db)
+                await db.commit()
+                logger.info(f"默认用户创建完成: {result['users']} 个")
+
             # 1. 实验方法
             count = await db.execute(text("SELECT COUNT(*) FROM experiment_methods"))
             if count.fetchone()[0] == 0:
@@ -228,33 +242,7 @@ async def auto_seed() -> dict:
             else:
                 logger.info("实验方法表已有数据，跳过。")
 
-            # 2. 设备（CSV 可选）
-            if EQUIPMENT_CSV.exists():
-                equip_count = await db.execute(text("SELECT COUNT(*) FROM equipment_registry"))
-                if equip_count.fetchone()[0] == 0:
-                    logger.info(f"设备表为空，从 CSV 导入: {EQUIPMENT_CSV}")
-                    result["equipment"] = await _seed_equipment(db)
-                    await db.commit()
-                    logger.info(f"设备导入完成: {result['equipment']} 条")
-                else:
-                    logger.info("设备表已有数据，跳过。")
-            else:
-                logger.warning(f"设备 CSV 未找到 ({EQUIPMENT_CSV})，跳过设备导入。")
-
-            # 3. 设备绑定（CSV 可选）
-            if BINDING_CSV.exists():
-                binding_count = await db.execute(text("SELECT COUNT(*) FROM experiment_equipment_bindings"))
-                if binding_count.fetchone()[0] == 0:
-                    logger.info(f"设备绑定表为空，从 CSV 导入: {BINDING_CSV}")
-                    result["bindings"] = await _seed_bindings(db)
-                    await db.commit()
-                    logger.info(f"设备绑定导入完成: {result['bindings']} 条")
-                else:
-                    logger.info("设备绑定表已有数据，跳过。")
-            else:
-                logger.warning(f"绑定 CSV 未找到 ({BINDING_CSV})，跳过绑定导入。")
-
-            # 4. 实验配置版本
+            # 2. 实验配置版本
             config_count = await db.execute(text("SELECT COUNT(*) FROM experiment_config_versions"))
             if config_count.fetchone()[0] == 0:
                 logger.info("实验配置表为空，开始自动填充…")
@@ -275,6 +263,28 @@ async def auto_seed() -> dict:
 # ═══════════════════════════════════════════════════════════════
 # 子任务
 # ═══════════════════════════════════════════════════════════════
+
+async def _seed_users(db) -> int:
+    """创建默认用户账号 (幂等: 按 username 去重)"""
+    from app.core.security import hash_password
+
+    count = 0
+    for username, password_plain, role, display_name in DEFAULT_USERS:
+        existing = await db.execute(
+            text("SELECT 1 FROM users WHERE username=:u"), {"u": username}
+        )
+        if not existing.fetchone():
+            await db.execute(
+                text("""INSERT INTO users (username, display_name, password_hash, role, enabled, created_at)
+                        VALUES (:u, :d, :p, :r, TRUE, localtimestamp)"""),
+                {"u": username, "d": display_name, "p": hash_password(password_plain), "r": role},
+            )
+            count += 1
+            logger.info(f"  创建用户: {username} ({role}) — {display_name}")
+        else:
+            logger.info(f"  用户已存在，跳过: {username}")
+    return count
+
 
 async def _seed_methods(db) -> int:
     """插入 14 项实验方法 (幂等)"""
@@ -298,89 +308,6 @@ async def _seed_methods(db) -> int:
                 {"c": code, "n": name, "m": method, "s": standard, "k": kind},
             )
             count += 1
-    return count
-
-
-async def _seed_equipment(db) -> int:
-    """从 CSV 导入设备 (幂等: management_no 去重)"""
-    inserted, updated = 0, 0
-    with open(EQUIPMENT_CSV, "r", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-
-    for row in rows:
-        mgmt_no = (row.get("管理编号") or "").strip()
-        if not mgmt_no:
-            continue
-
-        name = (row.get("名称") or "").strip()
-        model = (row.get("规格型号") or "").strip()
-        measuring_range = (row.get("测量范围") or "").strip()
-        manufacturer = (row.get("生产厂家") or "").strip()
-        serial_no = (row.get("出厂编号") or "").strip()
-        purchase_time = (row.get("购置时间") or "").strip()
-        calibration_time = (row.get("校准时间") or "").strip()
-        responsible = (row.get("责任人") or "").strip()
-        equip_class = (row.get("分类") or "").strip()
-
-        existing = await db.execute(
-            text("SELECT 1 FROM equipment_registry WHERE management_no=:m"), {"m": mgmt_no}
-        )
-        if existing.fetchone():
-            await db.execute(
-                text("""UPDATE equipment_registry SET equipment_name=:en, model=:md,
-                        measuring_range=:mr, manufacturer=:mf, serial_no=:sn,
-                        purchase_time=:pd, calibration_time=:ct, responsible=:rp,
-                        equipment_class=:ec, lifecycle_status='启用', updated_at=localtimestamp
-                        WHERE management_no=:mn"""),
-                {"en": name, "md": model, "mr": measuring_range, "mf": manufacturer,
-                 "sn": serial_no, "pd": purchase_time if purchase_time else None,
-                 "ct": calibration_time if calibration_time else None, "rp": responsible,
-                 "ec": equip_class, "mn": mgmt_no},
-            )
-            updated += 1
-        else:
-            await db.execute(
-                text("""INSERT INTO equipment_registry (management_no, equipment_name, model,
-                        measuring_range, manufacturer, serial_no, purchase_time,
-                        calibration_time, responsible, equipment_class,
-                        lifecycle_status, enabled, created_at, updated_at)
-                        VALUES (:mn,:en,:md,:mr,:mf,:sn,:pd,:ct,:rp,:ec,
-                        '启用',TRUE,localtimestamp,localtimestamp)"""),
-                {"mn": mgmt_no, "en": name, "md": model, "mr": measuring_range,
-                 "mf": manufacturer, "sn": serial_no,
-                 "pd": purchase_time if purchase_time else None,
-                 "ct": calibration_time if calibration_time else None,
-                 "rp": responsible, "ec": equip_class},
-            )
-            inserted += 1
-
-    logger.info(f"  设备: 新增 {inserted}, 更新 {updated}")
-    return inserted + updated
-
-
-async def _seed_bindings(db) -> int:
-    """从 CSV 导入设备-实验绑定"""
-    await db.execute(text("DELETE FROM experiment_equipment_bindings"))
-    count = 0
-    with open(BINDING_CSV, "r", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            experiment = (row.get("实验名称") or "").strip()
-            mgmt_no = (row.get("管理编号") or "").strip()
-            if not experiment or not mgmt_no:
-                continue
-            await db.execute(
-                text("""INSERT INTO experiment_equipment_bindings
-                        (experiment, management_no, binding_role, required, note, created_at, updated_at)
-                        VALUES (:ex,:mn,:br,:rq,:nt,localtimestamp,localtimestamp)"""),
-                {"ex": experiment, "mn": mgmt_no,
-                 "br": (row.get("设备角色") or "").strip(),
-                 "rq": (row.get("是否必需") or "是").strip() == "是",
-                 "nt": (row.get("用途/绑定说明") or "").strip()},
-            )
-            count += 1
-    logger.info(f"  设备绑定: {count} 条")
     return count
 
 
@@ -445,7 +372,7 @@ async def _seed_configs(db) -> int:
                     RETURNING id"""),
             {"c": code, "v": SEED_VERSION, "n": name, "m": meta["method"],
              "s": meta["standard"], "cat": meta["category"], "k": kind,
-             "loc": meta["location"], "ed": date.today(), "note": SEED_NOTE},
+             "loc": meta["location"], "ed": china_today(), "note": SEED_NOTE},
         )
         config_id = result.fetchone()[0]
 
@@ -577,6 +504,7 @@ def _build_columns(code: str, kind: str, schemas: dict) -> list[dict]:
     schema = schemas.get(kind)
     if not schema:
         return []
+    calc_by_key = rules_by_column(rules_for_kind(kind))
     result = []
     for ci, col in enumerate(schema.get("columns", [])):
         if isinstance(col, (list, tuple)) and len(col) >= 2:
@@ -600,7 +528,9 @@ def _build_columns(code: str, kind: str, schemas: dict) -> list[dict]:
                 "calc_precision": 3, "sort_order": ci + 1,
             }
             if col_type == "calc":
-                entry["calc_expression"] = col[1]
+                # 计算列公式化：存扁平规则 JSON（任务四），无配方则留空（不臆造行为）
+                rule = calc_by_key.get(col[0])
+                entry["calc_expression"] = json.dumps(rule, ensure_ascii=False) if rule else ""
                 entry["calc_precision"] = 3
             result.append(entry)
     return result

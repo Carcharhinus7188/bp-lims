@@ -3,6 +3,7 @@ import { ref, reactive, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, Download, Folder, Files } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import { chinaDate } from '../utils/time'
 
 const commissionNo = ref('')
 const loading = ref(false)
@@ -187,7 +188,7 @@ async function doBatchDownload() {
       const url = URL.createObjectURL(new Blob([blob], { type: 'application/zip' }))
       const a = document.createElement('a')
       a.href = url
-      a.download = `${commissionNo.value.trim()}_export_${new Date().toISOString().slice(0, 10)}.zip`
+      a.download = `${commissionNo.value.trim()}_export_${chinaDate()}.zip`
       a.click()
       URL.revokeObjectURL(url)
       success += selected.records.length + selected.reports.length

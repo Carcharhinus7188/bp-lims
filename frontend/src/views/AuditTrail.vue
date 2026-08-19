@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, Clock, UserFilled, Link, CircleCheck, CircleClose, Lock, Timer } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import { chinaDate, chinaTime } from '../utils/time'
 
 const commissionNo = ref('')
 const loading = ref(false)
@@ -16,13 +17,13 @@ const verifying = ref(false)
 const chainResult = ref(null)
 
 function formatTime(d) {
-  return d ? new Date(d).toLocaleString('zh-CN', { hour12: false }) : '—'
+  return d ? chinaDate(new Date(d)) + ' ' + chinaTime(new Date(d)) : '—'
 }
 function formatDate(d) {
-  return d ? new Date(d).toLocaleDateString('zh-CN') : '—'
+  return d ? chinaDate(new Date(d)) : '—'
 }
 function formatTimeShort(d) {
-  return d ? new Date(d).toLocaleTimeString('zh-CN', { hour12: false }) : '—'
+  return d ? chinaTime(new Date(d)) : '—'
 }
 
 const actionIcons = {

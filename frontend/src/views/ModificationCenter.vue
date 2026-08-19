@@ -101,7 +101,9 @@ function getActionLabel(action) {
             <span style="word-break:break-all">{{ row.new_value || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="actor" label="操作人" width="100" />
+        <el-table-column prop="actor" label="操作人" width="100">
+          <template #default="{ row }">{{ row.actor_name || row.actor }}</template>
+        </el-table-column>
         <el-table-column prop="reason" label="原因" width="120">
           <template #default="{ row }">
             <span style="color:#64748B;font-size:12px">{{ row.reason || '—' }}</span>

@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.encoding_rules import CHINA_TZ
 
 
 async def _resolve_commission_no(
@@ -120,7 +122,7 @@ async def write_audit_log(
     if not commission_no:
         commission_no = await _resolve_commission_no(db, entity_type, entity_id)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(CHINA_TZ)
     now_str = now.isoformat()
 
     # Get previous hash for chain

@@ -4,6 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import request from '../utils/request'
 import { useAuthStore } from '../stores/auth'
 import { ElMessage } from 'element-plus'
+import { materialWithSample } from '../utils/material'
+import { formatChinaDateTime } from '../utils/time'
 
 const route = useRoute()
 const router = useRouter()
@@ -15,6 +17,8 @@ const version = parseInt(route.params.version) || 1
 const record = ref(null)
 const task = ref(null)
 const config = ref(null)
+const commission = ref(null)
+const sampleGroup = ref(null)
 const manifestFields = ref([])
 const loading = ref(true)
 const wordPreviewVisible = ref(false)
@@ -305,6 +309,78 @@ const mergedTemplateGrouped = computed(() => {
   return groups
 })
 
+// ── ⑤ 母版过程确认：字段名按「行标识 · 列头」对齐，与实验员视图一致 ──
+const fieldNameMap = computed(() => {
+  const tf = mergedTemplateFields.value
+  const byTable = {}
+  for (const f of tf) {
+    const t = f.table ?? 0
+    if (!byTable[t]) byTable[t] = []
+    byTable[t].push(f)
+  }
+  const map = {}
+  for (const t in byTable) {
+    const fields = byTable[t]
+    const rowIds = {}
+    const rowNums = []
+    for (const f of fields) {
+      const r = f.row ?? 0
+      if (rowIds[r] === undefined) { rowIds[r] = f.row_label || ''; rowNums.push(r) }
+    }
+    const ids = rowNums.map(r => rowIds[r])
+    const distinct = new Set(ids.filter(Boolean))
+    const needRowNum = ids.some(v => !v) || distinct.size < rowNums.length
+    const leftmostCol = Math.min(...fields.map(f => f.col ?? 0))
+    const isSample = fields.some(f => (f.col ?? 0) === leftmostCol && /试样编号|样品编号/.test(f.col_header || ''))
+    const ordinal = {}
+    rowNums.forEach((r, i) => { ordinal[r] = i + 1 })
+    for (const f of fields) {
+      const r = f.row ?? 0
+      const rawHeader = (f.col_header || '').trim()
+      const isMarkerColHeader = /_{2,}|＿{2,}|…{2,}|□|☐/.test(rawHeader)
+      const colHeader = isMarkerColHeader ? '' : rawHeader
+      let rid
+      if (colHeader) {
+        rid = rowIds[r] || ''
+        if (needRowNum) rid = isSample ? `试样${ordinal[r]}` : `第${ordinal[r]}条`
+      } else {
+        const lbl = (f.label || '').trim()
+        const rl = (f.row_label || '').trim()
+        const isGeneric = /^表\d+第\d+行第\d+列$/.test(lbl)
+        rid = (lbl && lbl !== rl && !isGeneric) ? lbl : (rl || lbl)
+      }
+      const parts = [rid, colHeader].filter(v => v && v.trim())
+      map[f.key] = [...new Set(parts)].join(' · ') || f.label || f.position
+    }
+    const seen = {}
+    for (const f of fields) {
+      const name = map[f.key]
+      if (!name) continue
+      if (seen[name]) {
+        seen[name] += 1
+        map[f.key] = `${name}（第${seen[name]}项）`
+      } else {
+        seen[name] = 1
+      }
+    }
+  }
+  return map
+})
+function fieldName(f) { return fieldNameMap.value[f.key] || f.label || f.position }
+function hasCheckbox(f) { return (f.template_text || '').includes('□') || (f.template_text || '').includes('☐') }
+function hasBlank(f) { return BLANK_RE.test(f.template_text || '') }
+
+// ── ⑤ 母版头部信息字段：由样品管理员/委托确定，只读引用 ──
+const READONLY_TEMPLATE_TOKENS = [
+  '生产日期', '批号', '产品编号', '材料名称', '规格型号', '样品名称',
+  '检测方法', '检测依据', '委托单位', '委托方', '生产单位', '生产厂家',
+]
+function isReadonlyTemplateField(f) {
+  const text = `${fieldName(f) || ''} ${f.label || ''} ${f.row_label || ''} ${f.col_header || ''}`
+  return READONLY_TEMPLATE_TOKENS.some(t => text.includes(t))
+}
+const editableTemplateFields = computed(() => mergedTemplateFields.value.filter(f => !isReadonlyTemplateField(f)))
+
 // ── Section ⑥: Photo checkpoints ──
 const photoCheckpoints = computed(() => {
   if (!photos.value.length) return []
@@ -393,11 +469,30 @@ async function loadRecord() {
       try {
         const taskRes = await request.get(`/tasks/${data.task_no}`)
         task.value = taskRes.data?.task || taskRes.data
-        // Load experiment config
+        // 委托上下文：委托单位/生产单位/样品组规格型号（用于⑤母版头部信息只读引用）
+        if (task.value?.commission_no) {
+          try {
+            const commRes = await request.get(`/commissions/${task.value.commission_no}`)
+            commission.value = commRes.data
+            const g = (commRes.data?.sample_groups || []).find(g => g.group_no === task.value?.group_no)
+            sampleGroup.value = g || null
+          } catch { commission.value = null }
+        }
+        // Load experiment config — 优先加载任务配置快照锁定版本，保证查看内容与实验版本对应
         if (task.value?.experiment_code) {
           try {
+            let configVersion = null
+            try {
+              const snapRes = await request.get(`/config/snapshot/${data.task_no}`)
+              configVersion = snapRes.data?.config_version || null
+            } catch { configVersion = null }
+
+            const configPath = configVersion
+              ? `/config/${task.value.experiment_code}/versions/${configVersion}`
+              : `/config/${task.value.experiment_code}`
+
             const [cfgRes, manifestRes] = await Promise.all([
-              request.get(`/config/${task.value.experiment_code}`),
+              request.get(configPath),
               request.get(`/config/${task.value.experiment_code}/template-manifest`),
             ])
             config.value = cfgRes.data
@@ -539,11 +634,11 @@ onMounted(loadRecord)
       <el-descriptions :column="4" border size="small" style="margin-bottom:16px">
         <el-descriptions-item label="实验项目">{{ record.experiment || '-' }}</el-descriptions-item>
         <el-descriptions-item label="任务编号">{{ record.task_no || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="实验员">{{ record.owner || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="提交时间">{{ record.created_at || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="实验员">{{ record.owner_name || record.owner || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="提交时间">{{ formatChinaDateTime(record.created_at) }}</el-descriptions-item>
         <el-descriptions-item label="检测方法">{{ task?.method_code || '-' }}</el-descriptions-item>
         <el-descriptions-item label="检测依据">{{ task?.standard || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="材料">{{ task?.material_name || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="材料">{{ materialWithSample(task?.material_name, task?.sample_name) || '-' }}</el-descriptions-item>
         <el-descriptions-item label="检测地点">{{ task?.detection_location || '-' }}</el-descriptions-item>
       </el-descriptions>
 
@@ -552,9 +647,9 @@ onMounted(loadRecord)
         <template #header><strong>复核历史</strong></template>
         <el-timeline>
           <el-timeline-item v-for="(r, i) in record.reviews" :key="i"
-            :timestamp="r.reviewed_at" :type="r.decision === '通过' ? 'success' : 'danger'"
+            :timestamp="formatChinaDateTime(r.reviewed_at)" :type="r.decision === '通过' ? 'success' : 'danger'"
             :hollow="r.decision === '通过'">
-            <div><strong>{{ r.reviewer }}</strong> — {{ r.decision }}</div>
+            <div><strong>{{ r.reviewer_name || r.reviewer }}</strong> — {{ r.decision }}</div>
             <div v-if="r.comment" style="color:#64748B">{{ r.comment }}</div>
             <div v-if="r.correction_fields" style="font-size:12px;color:#94A3B8">
               指定修改字段：{{ Array.isArray(r.correction_fields) ? r.correction_fields.join('、') : r.correction_fields }}
@@ -774,66 +869,71 @@ onMounted(loadRecord)
         </el-card>
       </el-card>
 
-      <!-- ⑤ Template Supplement — restructured -->
+      <!-- ⑤ Template Supplement — 与实验员母版过程确认视图一致（只读） -->
       <el-card shadow="never" class="mb-card">
         <template #header><strong>⑤ 母版过程确认</strong></template>
 
-        <!-- Fallback: no manifest -->
-        <template v-if="!manifestFields.length">
-          <el-descriptions v-if="templateFields.length" :column="2" border size="small">
-            <el-descriptions-item v-for="tf in templateFields" :key="tf.key" :label="tf.label || tf.key">
-              {{ tf.value || '-' }}
-            </el-descriptions-item>
-          </el-descriptions>
-          <div v-if="!templateFields.length" style="padding:16px;background:#F0FDF4;border-radius:8px;border:1px solid #BBF7D0">
-            <span style="color:#166534">✅ 受控原始记录模板全部字段已由前序数据、实验记录或系统规则覆盖。</span>
+        <div style="font-size:13px;color:#64748B;margin-bottom:16px">头部信息由委托与样品管理员确定，此处只读引用；下方按原始记录表分区排列实验员补充的现场观察与实际填空结果。</div>
+
+        <!-- 母版版本信息 -->
+        <el-descriptions :column="2" border size="small" style="margin-bottom:16px">
+          <el-descriptions-item label="SOP版本">{{ config?.sop_version || 'A/0' }}</el-descriptions-item>
+          <el-descriptions-item label="原始记录模板">{{ config?.record_template_file || config?.record_template_version || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="实验配置版本">{{ config?.version || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="检测标准">{{ task?.standard || '-' }}</el-descriptions-item>
+        </el-descriptions>
+
+        <!-- 头部信息只读引用（委托/样品管理员确定） -->
+        <el-descriptions :column="3" border size="small" style="margin-bottom:16px">
+          <el-descriptions-item label="委托单位">{{ commission?.client_name || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="生产单位">{{ commission?.production_org_name || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="样品名称">{{ sampleGroup?.sample_name || task?.sample_name || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="规格型号">
+            <span v-if="sampleGroup?.model && sampleGroup.model !== '-'">{{ sampleGroup.model }}</span>
+            <span v-else style="color:#F59E0B;font-weight:600">未填写</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="材料名称">{{ sampleGroup?.material_name || task?.material_name || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="实体样品编号">{{ sampleIds.length ? sampleIds.join('、') : '-' }}</el-descriptions-item>
+          <el-descriptions-item label="检测方法">{{ task?.method_code || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="检测依据">{{ task?.standard || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="检测地点">{{ task?.detection_location || '-' }}</el-descriptions-item>
+        </el-descriptions>
+
+        <div v-if="!mergedTemplateFields.length" style="padding:16px;background:#F0FDF4;border-radius:8px;border:1px solid #BBF7D0">
+          <span style="color:#166534">✅ 受控原始记录模板全部字段已由前序数据、实验记录或系统规则覆盖。</span>
+          <div v-if="config?.record_template_file" style="font-size:12px;color:#64748B;margin-top:4px">当前模板：{{ config.record_template_file }} v{{ config.record_template_version || 'A/0' }}</div>
+          <div v-if="!config?.record_template_file" style="font-size:12px;color:#94A3B8;margin-top:4px">未检测到模板文件。</div>
+        </div>
+
+        <div v-else>
+          <div style="margin-bottom:12px;padding:8px 12px;background:#EFF6FF;border-radius:6px;border:1px solid #BFDBFE">
+            <span style="color:#1E40AF;font-size:13px">母版过程确认：{{ editableTemplateFields.filter(f => f.value && f.value.trim()).length }}/{{ editableTemplateFields.length }} 项已完成。字段名按「行标识 · 列头」对齐原始记录表；头部信息（生产日期/批号/材料名称/规格型号/样品名称等）由样品管理员确定，此处只读引用。</span>
           </div>
-        </template>
 
-        <!-- Template-manifest-driven layout -->
-        <template v-else>
-          <el-descriptions :column="2" border size="small" style="margin-bottom:16px">
-            <el-descriptions-item label="SOP版本">{{ config?.sop_version || 'A/0' }}</el-descriptions-item>
-            <el-descriptions-item label="原始记录模板">{{ config?.record_template_file || config?.record_template_version || '-' }}</el-descriptions-item>
-            <el-descriptions-item label="实验配置版本">{{ config?.version || '-' }}</el-descriptions-item>
-            <el-descriptions-item label="检测标准">{{ task?.standard || '-' }}</el-descriptions-item>
-          </el-descriptions>
-
-          <div v-if="!mergedTemplateFields.length" style="padding:16px;background:#F0FDF4;border-radius:8px;border:1px solid #BBF7D0">
-            <span style="color:#166534">✅ 受控原始记录模板全部字段已由前序数据、实验记录或系统规则覆盖。</span>
-          </div>
-
-          <div v-else>
-            <div style="margin-bottom:12px;padding:8px 12px;background:#EFF6FF;border-radius:6px;border:1px solid #BFDBFE">
-              <span style="color:#1E40AF;font-size:13px">母版过程确认：{{ mergedTemplateFields.filter(f => f.value).length }}/{{ mergedTemplateFields.length }} 项已完成。</span>
-            </div>
-
-            <div v-for="(sectionFields, sectionName) in mergedTemplateGrouped" :key="sectionName" style="margin-bottom:16px">
-              <el-collapse>
-                <el-collapse-item :title="`${sectionName}｜${sectionFields.filter(f=>f.value).length}/${sectionFields.length} 已完成`" :name="sectionName">
-                  <el-row :gutter="16">
-                    <el-col v-for="f in sectionFields" :key="f.key" :span="8" style="margin-bottom:12px">
-                      <div style="font-size:12px;color:#64748B;margin-bottom:3px">{{ f.label || f.position || f.key }}</div>
+          <div v-for="(sectionFields, sectionName) in mergedTemplateGrouped" :key="sectionName" style="margin-bottom:20px">
+            <strong style="font-size:14px">{{ sectionName }}</strong>
+            <el-form label-position="top" size="small" style="margin-top:6px">
+              <el-row :gutter="16">
+                <el-col v-for="f in sectionFields" :key="f.key" :span="8" style="margin-bottom:12px">
+                  <el-form-item :label="fieldName(f)">
+                    <div v-if="isReadonlyTemplateField(f)" style="color:#1F2937;font-size:13px;word-break:break-all">{{ f.value || '—' }}</div>
+                    <template v-else>
+                      <div v-if="hasBlank(f) && !hasCheckbox(f)" style="font-size:11px;color:#94A3B8;margin-bottom:2px">原文：{{ f.template_text }}</div>
                       <!-- Checkbox fields: show parsed selections -->
-                      <template v-if="(f.template_text || '').includes('□') || (f.template_text || '').includes('☐')">
-                        <div style="font-size:11px;color:#94A3B8;margin-bottom:3px">
-                          选项：{{ _checkboxChoices(f.template_text || '').join('、') }}
-                        </div>
-                        <div style="font-size:13px;font-weight:500;color:#0F172A">
-                          {{ _parseCheckboxValue(f.template_text || '', f.value || '').selected.join('、') || '未选择' }}
-                        </div>
+                      <template v-if="hasCheckbox(f)">
+                        <div style="font-size:11px;color:#94A3B8;margin-bottom:3px">选项：{{ _checkboxChoices(f.template_text || '').join('、') }}</div>
+                        <div style="font-size:13px;font-weight:500;color:#0F172A">{{ _parseCheckboxValue(f.template_text || '', f.value || '').selected.join('、') || '未选择' }}</div>
+                        <div v-if="_parseCheckboxValue(f.template_text || '', f.value || '').note" style="font-size:11px;color:#64748B;margin-top:2px">补充说明：{{ _parseCheckboxValue(f.template_text || '', f.value || '').note }}</div>
                       </template>
                       <!-- Blank-fill fields -->
-                      <template v-else>
-                        <div style="font-size:13px;font-weight:500;color:#0F172A">{{ f.value || '-' }}</div>
-                      </template>
-                    </el-col>
-                  </el-row>
-                </el-collapse-item>
-              </el-collapse>
-            </div>
+                      <div v-else style="font-size:13px;font-weight:500;color:#0F172A">{{ f.value || '—' }}</div>
+                    </template>
+                  </el-form-item>
+                </el-col>
+              </el-row>
+            </el-form>
           </div>
-        </template>
+        </div>
       </el-card>
 
       <!-- ⑦ Tester Self-Check & Conclusion -->
@@ -858,7 +958,7 @@ onMounted(loadRecord)
         <el-icon class="is-loading" :size="32"><Loading /></el-icon>
         <span style="margin-left:12px">正在生成Word预览…</span>
       </div>
-      <iframe v-else :srcdoc="wordPreviewHtml" style="width:100%;height:70vh;border:1px solid #E2E8F0;border-radius:8px" sandbox="allow-same-origin" />
+      <iframe v-else :srcdoc="wordPreviewHtml" style="width:100%;height:70vh;border:1px solid #E2E8F0;border-radius:8px" sandbox="allow-same-origin allow-scripts" />
     </el-dialog>
 
     <!-- Review Dialog -->
@@ -868,8 +968,8 @@ onMounted(loadRecord)
           <el-descriptions-item label="记录编号">{{ record.record_no }}</el-descriptions-item>
           <el-descriptions-item label="版本">V{{ record.version }}</el-descriptions-item>
           <el-descriptions-item label="检测项目" :span="2">{{ record.experiment }}</el-descriptions-item>
-          <el-descriptions-item label="实验员">{{ record.owner }}</el-descriptions-item>
-          <el-descriptions-item label="提交时间">{{ record.created_at }}</el-descriptions-item>
+          <el-descriptions-item label="实验员">{{ record.owner_name || record.owner }}</el-descriptions-item>
+          <el-descriptions-item label="提交时间">{{ formatChinaDateTime(record.created_at) }}</el-descriptions-item>
         </el-descriptions>
 
         <el-form label-width="100px">

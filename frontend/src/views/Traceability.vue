@@ -1,11 +1,13 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Search, Link, Clock, Document, Picture } from '@element-plus/icons-vue'
+import { Search, Link, Clock, Document, Picture, Download, View } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import { chinaDate, chinaTime } from '../utils/time'
 
 const activeTab = ref('attachments')
 const loading = ref(false)
+const batchDownloading = ref(false)
 
 // 附件
 const attFilters = reactive({ commission_no: '', task_no: '', attachment_type: '', search: '' })
@@ -29,7 +31,7 @@ const entityTypeMap = { commission: '委托', task: '任务', report: '报告', 
 
 function formatDate(d) {
   if (!d) return '—'
-  return new Date(d).toLocaleString('zh-CN')
+  return chinaDate(new Date(d)) + ' ' + chinaTime(new Date(d))
 }
 
 async function loadAttachments() {
@@ -46,6 +48,59 @@ async function loadAttachments() {
     ElMessage.warning('加载附件列表失败')
   } finally {
     loading.value = false
+  }
+}
+
+function attFileUrl(row) {
+  return `/api/v1/attachments/file/${row.relative_path || (row.task_no + '/' + row.stored_name)}`
+}
+
+const PREVIEW_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.pdf']
+function isPreviewable(row) {
+  const name = (row.original_name || row.stored_name || '').toLowerCase()
+  return PREVIEW_EXTS.some(ext => name.endsWith(ext))
+}
+
+function downloadAttachment(row) {
+  const a = document.createElement('a')
+  a.href = attFileUrl(row)
+  a.download = row.original_name || row.stored_name || 'attachment'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
+function previewAttachment(row) {
+  window.open(attFileUrl(row), '_blank')
+}
+
+async function batchDownload() {
+  batchDownloading.value = true
+  try {
+    const resp = await request.post('/export/attachments-batch', {
+      commission_no: attFilters.commission_no || '',
+      task_no: attFilters.task_no || '',
+      attachment_type: attFilters.attachment_type || '',
+      search: attFilters.search || '',
+    }, { responseType: 'blob' })
+    const blob = resp.data || resp
+    if (!blob || blob.size < 50) {
+      ElMessage.warning('没有可打包的内容，请检查筛选条件')
+      return
+    }
+    const url = URL.createObjectURL(new Blob([blob], { type: 'application/zip' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = '附件与表单打包.zip'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+    ElMessage.success('打包下载已开始')
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '打包下载失败')
+  } finally {
+    batchDownloading.value = false
   }
 }
 
@@ -132,6 +187,9 @@ onMounted(() => {
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
           <el-button type="primary" @click="loadAttachments">查询</el-button>
+          <el-button type="success" :icon="Download" :loading="batchDownloading" @click="batchDownload">
+            打包下载（附件 + 表单）
+          </el-button>
         </div>
 
         <el-table :data="attachments" v-loading="loading && activeTab === 'attachments'" stripe border>
@@ -144,7 +202,9 @@ onMounted(() => {
           <el-table-column prop="commission_no" label="委托编号" width="160" />
           <el-table-column prop="task_no" label="任务编号" width="140" />
           <el-table-column prop="checkpoint_label" label="检查点" width="120" />
-          <el-table-column prop="uploader" label="上传者" width="90" />
+          <el-table-column prop="uploader" label="上传者" width="90">
+            <template #default="{ row }">{{ row.uploader_name || row.uploader }}</template>
+          </el-table-column>
           <el-table-column prop="evidence_status" label="状态" width="80" align="center">
             <template #default="{ row }">
               <el-tag :type="row.evidence_status === '有效' ? 'success' : 'info'" size="small">{{ row.evidence_status }}</el-tag>
@@ -152,6 +212,12 @@ onMounted(() => {
           </el-table-column>
           <el-table-column label="时间" width="160">
             <template #default="{ row }">{{ formatDate(row.captured_at || row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="120" fixed="right">
+            <template #default="{ row }">
+              <el-button v-if="isPreviewable(row)" text type="primary" :icon="View" @click="previewAttachment(row)">预览</el-button>
+              <el-button text type="primary" :icon="Download" @click="downloadAttachment(row)">下载</el-button>
+            </template>
           </el-table-column>
         </el-table>
       </el-tab-pane>
@@ -214,7 +280,9 @@ onMounted(() => {
           <el-table-column label="时间" width="160">
             <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
           </el-table-column>
-          <el-table-column prop="actor" label="修改人" width="100" />
+          <el-table-column prop="actor" label="修改人" width="100">
+            <template #default="{ row }">{{ row.actor_name || row.actor }}</template>
+          </el-table-column>
           <el-table-column prop="entity_type" label="实体类型" width="90" />
           <el-table-column prop="entity_id" label="实体ID" width="180" />
           <el-table-column prop="commission_no" label="委托编号" width="160" />
@@ -250,7 +318,9 @@ onMounted(() => {
               <el-table-column prop="original_name" label="文件名" min-width="180" show-overflow-tooltip />
               <el-table-column prop="attachment_type" label="类型" width="70" />
               <el-table-column prop="checkpoint_label" label="检查点" width="110" />
-              <el-table-column prop="uploader" label="上传者" width="80" />
+              <el-table-column prop="uploader" label="上传者" width="80">
+                <template #default="{ row }">{{ row.uploader_name || row.uploader }}</template>
+              </el-table-column>
               <el-table-column label="时间" width="150">
                 <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
               </el-table-column>
@@ -284,7 +354,9 @@ onMounted(() => {
               <el-table-column label="时间" width="150">
                 <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
               </el-table-column>
-              <el-table-column prop="actor" label="修改人" width="90" />
+              <el-table-column prop="actor" label="修改人" width="90">
+                <template #default="{ row }">{{ row.actor_name || row.actor }}</template>
+              </el-table-column>
               <el-table-column prop="field_name" label="字段" width="110" />
               <el-table-column label="变更" min-width="180">
                 <template #default="{ row }">

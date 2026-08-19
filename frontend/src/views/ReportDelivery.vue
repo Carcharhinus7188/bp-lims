@@ -3,6 +3,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Document, Search, RefreshLeft, InfoFilled } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import { chinaDate, chinaTime } from '../utils/time'
 
 const user = JSON.parse(localStorage.getItem('user') || '{}')
 const loading = ref(false)
@@ -65,7 +66,7 @@ function searchReport() {
   } catch { ElMessage.warning('报告未找到'); loading.value = false }
 }
 
-function formatDate(d) { return d ? new Date(d).toLocaleString('zh-CN') : '—' }
+function formatDate(d) { return d ? chinaDate(new Date(d)) + ' ' + chinaTime(new Date(d)) : '—' }
 function canRevoke(row) {
   return (user.role === '管理员' || user.role === '质量负责人') && row.status === '已发布'
 }

@@ -4,6 +4,8 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Plus, Delete } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import { chinaDate } from '../utils/time'
+import { isRealModel, normalizeModel } from '../utils/model'
 
 const router = useRouter()
 const formRef = ref(null)
@@ -16,8 +18,8 @@ const form = reactive({
   client_org_id: null,
   production_org_id: null,
   production_relation: '客户提供',
-  commission_date: new Date().toISOString().slice(0, 10),
-  due_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+  commission_date: chinaDate(),
+  due_date: chinaDate(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)),
   notes: '',
 })
 
@@ -25,6 +27,8 @@ const form = reactive({
 const sampleGroups = ref([{
   catalog_id: null,
   material_name: '',
+  sample_name: '',
+  model: '',
   sample_count: 1,
   experiment_codes: [],
   batch_no: '',
@@ -47,6 +51,8 @@ function addSampleGroup() {
   sampleGroups.value.push({
     catalog_id: null,
     material_name: '',
+    sample_name: '',
+    model: '',
     sample_count: 1,
     experiment_codes: [],
     batch_no: '',
@@ -61,6 +67,9 @@ function onCatalogSelect(idx, val) {
     if (item) {
       sg.catalog_id = item.id
       sg.material_name = item.material_name
+      sg.sample_name = item.sample_name || ''
+      // 规格型号仅当资料库中是真实值时才自动带入；占位符（标准/-/无）留空强制手填
+      sg.model = isRealModel(item.model) ? normalizeModel(item.model) : ''
       // 自动填充资料库中预设的检测项目
       if (item.experiment_codes && item.experiment_codes.length > 0) {
         sg.experiment_codes = [...item.experiment_codes]
@@ -74,6 +83,8 @@ function onCatalogSelect(idx, val) {
     // 清空
     sg.catalog_id = null
     sg.material_name = ''
+    sg.sample_name = ''
+    sg.model = ''
   }
 }
 
@@ -89,11 +100,18 @@ async function handleSubmit() {
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) return
 
-  // 验证至少一个样品组填写了材料和批号
-  const validGroups = sampleGroups.value.filter(g => g.material_name.trim() && g.batch_no.trim())
+  // 验证至少一个样品组填写了材料、规格型号、批号和检测项目；规格型号需为真实值（非「标准」「-」占位符）
+  const validGroups = sampleGroups.value.filter(g => g.material_name.trim() && isRealModel(g.model) && g.batch_no.trim())
   if (!validGroups.length) {
-    ElMessage.warning('请至少填写一个样品组的材料名称和批号')
+    ElMessage.warning('请至少填写一个样品组的材料名称、真实规格型号和批号（规格型号不能为「-」「无」等占位符）')
     return
+  }
+  // 检测项目必填
+  for (const g of validGroups) {
+    if (!g.experiment_codes || g.experiment_codes.length === 0) {
+      ElMessage.warning('检测项目为必填项，请为每个样品组选择至少一个检测项目')
+      return
+    }
   }
 
   loading.value = true
@@ -113,6 +131,8 @@ async function handleSubmit() {
         await request.post(`/commissions/${commissionNo}/sample-groups`, {
           catalog_id: g.catalog_id || null,
           material_name: g.material_name,
+          sample_name: g.sample_name || null,
+          model: g.model || null,
           sample_count: g.sample_count,
           experiment_codes: g.experiment_codes,
           experiments: expNames,
@@ -213,7 +233,7 @@ async function handleSubmit() {
 
           <el-row :gutter="16">
             <el-col :span="10">
-              <el-form-item label="材料名称">
+              <el-form-item label="材料名称+样品名称">
                 <el-select
                   v-model="sg.catalog_id"
                   filterable
@@ -233,10 +253,17 @@ async function handleSubmit() {
               </el-form-item>
             </el-col>
             <el-col :span="7">
+              <el-form-item label="规格型号" required>
+                <el-input v-model="sg.model" placeholder="请输入规格型号" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="7">
               <el-form-item label="数量">
                 <el-input-number v-model="sg.sample_count" :min="1" :max="200" controls-position="right" style="width:100%" />
               </el-form-item>
             </el-col>
+          </el-row>
+          <el-row :gutter="16" style="margin-top:4px">
             <el-col :span="7">
               <el-form-item label="批号" required>
                 <el-input v-model="sg.batch_no" placeholder="请输入批号" />
@@ -244,10 +271,10 @@ async function handleSubmit() {
             </el-col>
           </el-row>
 
-          <el-form-item label="检测项目">
+          <el-form-item label="检测项目" required>
             <el-select
               v-model="sg.experiment_codes"
-              placeholder="选择检测项目（可多选）"
+              placeholder="请选择检测项目（必填，可多选）"
               multiple
               filterable
               style="width:100%"

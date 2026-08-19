@@ -23,6 +23,7 @@ async def list_attachments(
     task_no: str | None = Query(None),
     package_no: str | None = Query(None),
     attachment_type: str | None = Query(None, description="附件类型：photo/doc/scan/other"),
+    capture_source: str | None = Query(None, description="采集来源：file/device_export/camera 等"),
     search: str | None = Query(None, description="搜索原始文件名"),
     limit: int = Query(100, le=500),
     offset: int = Query(0, ge=0),
@@ -43,6 +44,9 @@ async def list_attachments(
     if attachment_type:
         where += " AND a.attachment_type = :atype"
         params["atype"] = attachment_type
+    if capture_source:
+        where += " AND a.capture_source = :csrc"
+        params["csrc"] = capture_source
     if search:
         where += " AND (a.original_name ILIKE :s OR a.description ILIKE :s)"
         params["s"] = f"%{search}%"
@@ -52,9 +56,11 @@ async def list_attachments(
             SELECT a.id, a.attachment_id, a.commission_no, a.package_no, a.task_no,
                    a.sample_no, a.attachment_type, a.original_name, a.stored_name,
                    a.relative_path, a.sha256, a.captured_at, a.uploader,
+                   u.display_name AS uploader_name,
                    a.description, a.is_original, a.checkpoint_code, a.checkpoint_label,
-                   a.evidence_status, a.created_at
+                   a.capture_source, a.evidence_status, a.created_at AT TIME ZONE 'Asia/Shanghai' AS created_at
             FROM attachments a
+            LEFT JOIN users u ON u.username = a.uploader
             {where}
             ORDER BY a.created_at DESC
             LIMIT :limit OFFSET :offset
@@ -101,7 +107,7 @@ async def list_audit_logs(
         text(f"""
             SELECT al.id, al.entity_type, al.entity_id, al.actor, al.actor_name,
                    al.actor_role, al.action, al.field_name, al.old_value, al.new_value,
-                   al.commission_no, al.created_at
+                   al.commission_no, al.created_at AT TIME ZONE 'Asia/Shanghai' AS created_at
             FROM audit_logs al
             {where}
             ORDER BY al.created_at DESC
@@ -144,9 +150,11 @@ async def list_modifications(
     result = await db.execute(
         text(f"""
             SELECT ml.id, ml.entity_type, ml.entity_id, ml.actor, ml.action,
+                   u.display_name AS actor_name,
                    ml.field_name, ml.old_value, ml.new_value, ml.reason,
-                   ml.commission_no, ml.created_at
+                   ml.commission_no, ml.created_at AT TIME ZONE 'Asia/Shanghai' AS created_at
             FROM modification_logs ml
+            LEFT JOIN users u ON u.username = ml.actor
             {where}
             ORDER BY ml.created_at DESC
             LIMIT :limit OFFSET :offset
@@ -166,7 +174,12 @@ async def trace_commission(
     """按委托号聚合追溯信息（附件+审计+修改+样品事件）——使用 commission_no 精确匹配"""
     # 附件
     att_result = await db.execute(
-        text("SELECT * FROM attachments WHERE commission_no=:c ORDER BY created_at DESC"),
+        text("""
+            SELECT a.*, u.display_name AS uploader_name
+            FROM attachments a
+            LEFT JOIN users u ON u.username = a.uploader
+            WHERE a.commission_no=:c ORDER BY a.created_at DESC
+        """),
         {"c": commission_no},
     )
     attachments = [dict(zip(att_result.keys(), r)) for r in att_result.fetchall()]
@@ -180,7 +193,12 @@ async def trace_commission(
 
     # 修改日志 — 直接用 commission_no 列精确匹配
     mod_result = await db.execute(
-        text("SELECT * FROM modification_logs WHERE commission_no=:c ORDER BY created_at DESC LIMIT 500"),
+        text("""
+            SELECT ml.*, u.display_name AS actor_name
+            FROM modification_logs ml
+            LEFT JOIN users u ON u.username = ml.actor
+            WHERE ml.commission_no=:c ORDER BY ml.created_at DESC LIMIT 500
+        """),
         {"c": commission_no},
     )
     modifications = [dict(zip(mod_result.keys(), r)) for r in mod_result.fetchall()]
@@ -194,7 +212,13 @@ async def trace_commission(
 
     # 报告操作记录（也按 commission_no）
     ra_result = await db.execute(
-        text("SELECT ra.*, r.commission_no FROM report_actions ra JOIN reports r ON ra.report_no = r.report_no WHERE r.commission_no=:c ORDER BY ra.created_at DESC"),
+        text("""
+            SELECT ra.*, r.commission_no, u.display_name AS actor_name
+            FROM report_actions ra
+            JOIN reports r ON ra.report_no = r.report_no
+            LEFT JOIN users u ON u.username = ra.actor
+            WHERE r.commission_no=:c ORDER BY ra.created_at DESC
+        """),
         {"c": commission_no},
     )
     report_actions = [dict(zip(ra_result.keys(), row)) for row in ra_result.fetchall()]

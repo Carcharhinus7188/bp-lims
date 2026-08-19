@@ -7,20 +7,24 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.deps import get_current_user, get_db, require_role
 
 # ── 硬编码 schema 回退 ──
 from app.core.experiment_schemas import SCHEMAS
+from app.core.calc_formulas import rules_for_kind, rules_by_column
+from app.core.field_synonyms import match_field_key, normalize_label
 
 router = APIRouter(prefix="/config", tags=["实验配置"])
 
@@ -39,20 +43,40 @@ async def list_experiment_methods(
                    em.category, em.kind, em.enabled,
                    (SELECT ecv.version FROM experiment_config_versions ecv
                     WHERE ecv.experiment_code = em.experiment_code AND ecv.status = '现行'
-                    LIMIT 1) AS current_version
+                    LIMIT 1) AS current_version,
+                   (SELECT count(*) FROM experiment_standards es
+                    WHERE es.experiment_code = em.experiment_code AND es.enabled = TRUE) AS standard_count
             FROM experiment_methods em
             WHERE em.enabled = TRUE
             ORDER BY em.sort_order, em.experiment_code
         """)
     )
-    return [
+    methods = [
         {
             "experiment_code": r[0], "experiment_name": r[1], "method_code": r[2],
             "standard": r[3], "category": r[4], "kind": r[5], "enabled": r[6],
-            "current_version": r[7],
+            "current_version": r[7], "standard_count": r[8],
         }
         for r in result.fetchall()
     ]
+
+    # 标准变体（父标准 + 已启用变体）——供样品库「检验依据」下拉选择
+    std_result = await db.execute(
+        text("SELECT experiment_code, standard FROM experiment_standards "
+             "WHERE enabled=TRUE ORDER BY sort_order, id")
+    )
+    variants: dict[str, list[str]] = {}
+    for ec, std in std_result.fetchall():
+        variants.setdefault(ec, []).append(std)
+
+    for m in methods:
+        standards: list[str] = []
+        if m["standard"]:
+            standards.append(m["standard"])
+        standards.extend(variants.get(m["experiment_code"], []))
+        m["standards"] = standards
+
+    return methods
 
 
 def _normalize_db_fields(db_fields: list[dict]) -> list[dict]:
@@ -66,10 +90,25 @@ def _normalize_db_fields(db_fields: list[dict]) -> list[dict]:
             "default": _parse_default(f.get("field_default")),
             "options": _parse_options(f.get("field_options")),
             "readonly": bool(f.get("is_readonly")),
+            "required": bool(f.get("is_required")),
+            "actual": bool(f.get("is_actual")),
             "section_title": f.get("section_title", ""),
             "section_order": f.get("section_order", 0),
         })
     return out
+
+
+def _parse_calc_expression(raw) -> Any | None:
+    """把 calc_expression（TEXT 存 JSON）解析为对象；空 / 非法 JSON 返回 None。"""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, (dict, list)):
+        return raw
+    s = str(raw).strip()
+    try:
+        return json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
 def _normalize_db_columns(db_cols: list[dict]) -> list[dict]:
@@ -82,17 +121,24 @@ def _normalize_db_columns(db_cols: list[dict]) -> list[dict]:
         # Reconstruct select:opts format so the frontend getColumnOptions()
         # can extract choices — the seed script stores options in column_default
         # and strips them from column_type.
-        if col_type == "select" and col_default_raw and "|" in col_default_raw:
-            col_type = f"select:{col_default_raw}"
-            # The actual default for a select column is the first option.
-            options = col_default_raw.split("|")
-            col_default_parsed = options[0] if options else ""
+        if col_type == "select" and col_default_raw:
+            if "|" in col_default_raw:
+                col_type = f"select:{col_default_raw}"
+                # The actual default for a select column is the first option.
+                options = col_default_raw.split("|")
+                col_default_parsed = options[0] if options else ""
+            else:
+                # 单一选项 select（如「委托要求」）
+                col_type = f"select:{col_default_raw}"
+                col_default_parsed = col_default_raw
 
         out.append({
             "column_key": c.get("column_key", ""),
             "column_label": c.get("column_label", ""),
             "column_type": col_type,
             "column_default": col_default_parsed,
+            "calc_expression": _parse_calc_expression(c.get("calc_expression")),
+            "calc_precision": c.get("calc_precision", 3),
         })
     return out
 
@@ -292,12 +338,12 @@ _CAMERA_HINTS: dict[str, str] = {
 # CMA不强制"证明做了实验"类照片 → required=False
 _COMMON_PHOTO_CHECKPOINTS = [
     {"code": "ENV", "label": "实验开始温湿度表", "required": False, "is_sample_level": False, "checkpoint_group": "环境与设备"},
-    {"code": "SAMPLE_BEFORE", "label": "实验前样品及标签", "required": False, "is_sample_level": False, "checkpoint_group": "样品状态"},
+    {"code": "SAMPLE_BEFORE", "label": "实验前样品及标签", "required": False, "is_sample_level": True, "checkpoint_group": "样品状态"},
     {"code": "DEVICE", "label": "设备编号/铭牌", "required": False, "is_sample_level": False, "checkpoint_group": "环境与设备"},
     {"code": "PARAMETERS", "label": "设备参数或软件数据界面", "required": False, "is_sample_level": False, "checkpoint_group": "环境与设备"},
-    {"code": "SETUP", "label": "样品安装、装夹或放置状态", "required": False, "is_sample_level": False, "checkpoint_group": "样品状态"},
+    {"code": "SETUP", "label": "样品安装、装夹或放置状态", "required": False, "is_sample_level": True, "checkpoint_group": "样品状态"},
     {"code": "RESULT", "label": "最终读数、曲线或结果界面", "required": False, "is_sample_level": False, "checkpoint_group": "结果界面"},
-    {"code": "SAMPLE_AFTER", "label": "实验结束后样品状态", "required": False, "is_sample_level": False, "checkpoint_group": "样品状态"},
+    {"code": "SAMPLE_AFTER", "label": "实验结束后样品状态", "required": False, "is_sample_level": True, "checkpoint_group": "样品状态"},
     {"code": "REPORT_PHOTO", "label": "检验报告照片区域用代表性照片", "required": False, "is_sample_level": False, "checkpoint_group": "报告归档"},
 ]
 
@@ -482,10 +528,13 @@ def _resolve_kind(experiment_code: str) -> str | None:
         return experiment_code
     return None
 
-def _build_fallback_config(experiment_code: str) -> dict | None:
-    """从硬编码 SCHEMAS 构建前端可用配置（无 DB 版本时的安全网）"""
+def _build_fallback_config(experiment_code: str, kind_hint: str | None = None) -> dict | None:
+    """从硬编码 SCHEMAS 构建前端可用配置（无 DB 版本时的安全网）。
+
+    kind_hint：新建检测项目时由表单直接给出 kind，绕过 experiment_code→kind 的反向解析。
+    """
     # SCHEMAS keyed by kind, not experiment_code — resolve kind from experiment_methods or known mapping
-    kind = _resolve_kind(experiment_code)
+    kind = kind_hint or _resolve_kind(experiment_code)
     schema = SCHEMAS.get(kind) if kind else None
     if not schema:
         return None
@@ -507,14 +556,18 @@ def _build_fallback_config(experiment_code: str) -> dict | None:
 
     columns = []
     raw_columns = schema.get("columns", [])
+    calc_by_key = rules_by_column(rules_for_kind(kind))
     for i, col in enumerate(raw_columns):
         if isinstance(col, (list, tuple)) and len(col) >= 3:
-            columns.append({
+            entry = {
                 "column_key": col[0],
                 "column_label": col[1],
                 "column_type": col[2],
                 "column_default": "",
-            })
+                "calc_expression": calc_by_key.get(col[0]) if col[2] == "calc" else None,
+                "calc_precision": 3,
+            }
+            columns.append(entry)
         elif isinstance(col, dict):
             columns.append(col)
 
@@ -535,6 +588,243 @@ def _build_fallback_config(experiment_code: str) -> dict | None:
         "row_expansion": schema.get("row_expansion"),
         "face_labels": schema.get("face_labels"),
         "_source": "hardcoded",
+    }
+
+
+def _apply_config_extras(config_dict: dict[str, Any], kind_resolved: str) -> dict[str, Any]:
+    """DB 优先、硬编码兜底：camera_hints / report_decisive_photo_codes / record_template_file。
+
+    extra_json 为 JSONB，可能为 None 或 dict；只取这三个键，缺失回退硬编码常量。
+    """
+    extra = config_dict.get("extra_json") or {}
+    if not isinstance(extra, dict):
+        extra = {}
+
+    config_dict["camera_hints"] = extra.get("camera_hints") or _CAMERA_HINTS
+
+    exp_name_db = config_dict.get("experiment_name") or _KIND_TO_NAME.get(kind_resolved, "")
+    config_dict["report_decisive_photo_codes"] = (
+        extra.get("report_decisive_photo_codes")
+        or _REPORT_DECISIVE_PHOTO_CODES.get(exp_name_db, [])
+    )
+
+    config_dict["record_template_file"] = (
+        extra.get("record_template_file") or _TEMPLATE_FILE_MAP.get(kind_resolved, "")
+    )
+
+    # 透出原始 extra_json，便于配置编辑器读写（含 constants 等 P3 键）
+    config_dict["extra_json"] = extra
+    return config_dict
+
+
+async def resolve_record_template_file(
+    db: AsyncSession, experiment_code: str | None
+) -> str:
+    """导出路径复用：返回 DB 配置的 record_template_file（extra_json 优先），无则返回空串。
+
+    空串表示「无 DB 覆盖」，调用方应保留引擎原有的 kind 推断逻辑，绝不改变现有兜底行为。
+    """
+    if not experiment_code:
+        return ""
+    row = await db.execute(
+        text(
+            "SELECT extra_json FROM experiment_config_versions "
+            "WHERE experiment_code=:ec AND status='现行' "
+            "ORDER BY effective_date DESC LIMIT 1"
+        ),
+        {"ec": experiment_code},
+    )
+    r = row.fetchone()
+    extra = r[0] if r and r[0] else None
+    if isinstance(extra, dict):
+        return extra.get("record_template_file") or ""
+    return ""
+
+
+async def load_mapping_registry(
+    db: AsyncSession, experiment_code: str | None, task_no: str | None = None
+) -> dict[str, Any]:
+    """导出路径复用：加载受控模板映射的 DB 权威值（坐标 + 常量）。
+
+    返回结构直接注入 `apply_controlled_mapping(..., registry=...)`：
+      {"db_mappings": [template_field_mappings 行…], "extra_json": {…}}
+
+    传入 task_no 时优先读任务配置快照（检测期间锁定），保证历史记录按当时配置导出；
+    无快照或无现行版本时返回空结构，映射注册表回退到硬编码兜底（逐格一致）。
+    """
+    result: dict[str, Any] = {"db_mappings": [], "extra_json": {}}
+    # 优先任务级快照
+    if task_no:
+        srow = await db.execute(
+            text("SELECT snapshot_json FROM task_config_snapshots WHERE task_no=:t"),
+            {"t": task_no},
+        )
+        sr = srow.fetchone()
+        if sr and sr[0]:
+            snap = sr[0] if isinstance(sr[0], dict) else (json.loads(sr[0]) if sr[0] else {})
+            result["db_mappings"] = snap.get("db_mappings", [])
+            result["extra_json"] = snap.get("extra_json") or {}
+            return result
+    if not experiment_code:
+        return result
+    row = await db.execute(
+        text(
+            "SELECT id, extra_json FROM experiment_config_versions "
+            "WHERE experiment_code=:ec AND status='现行' "
+            "ORDER BY effective_date DESC LIMIT 1"
+        ),
+        {"ec": experiment_code},
+    )
+    r = row.fetchone()
+    if not r:
+        return result
+    config_id, extra_json = r[0], r[1]
+    if isinstance(extra_json, dict):
+        result["extra_json"] = extra_json
+    mrow = await db.execute(
+        text(
+            "SELECT field_key, table_index, row_index, col_index, transform, checkbox_selection "
+            "FROM template_field_mappings WHERE config_id=:cid ORDER BY sort_order"
+        ),
+        {"cid": config_id},
+    )
+    result["db_mappings"] = [dict(zip(mrow.keys(), x)) for x in mrow.fetchall()]
+    return result
+
+
+async def snapshot_task_config(
+    db: AsyncSession, task_no: str, experiment_code: str | None
+) -> dict | None:
+    """锁定任务级配置快照：把当前「现行」版本写入 task_config_snapshots。
+
+    在实验员接收任务包/开始检测时调用，保证检测期间配置不漂移；
+    导出路径 `load_mapping_registry(..., task_no=…)` 优先读该快照。
+    无现行版本时返回 None（不写快照，导出回退硬编码兜底）。
+    """
+    if not experiment_code:
+        return None
+    row = await db.execute(
+        text(
+            "SELECT id, version, extra_json FROM experiment_config_versions "
+            "WHERE experiment_code=:ec AND status='现行' "
+            "ORDER BY effective_date DESC LIMIT 1"
+        ),
+        {"ec": experiment_code},
+    )
+    r = row.fetchone()
+    if not r:
+        return None
+    config_id, config_version, extra_json = r[0], r[1], r[2]
+    extra = extra_json if isinstance(extra_json, dict) else {}
+
+    mrow = await db.execute(
+        text(
+            "SELECT field_key, table_index, row_index, col_index, transform, checkbox_selection "
+            "FROM template_field_mappings WHERE config_id=:cid ORDER BY sort_order"
+        ),
+        {"cid": config_id},
+    )
+    db_mappings = [dict(zip(mrow.keys(), x)) for x in mrow.fetchall()]
+
+    frow = await db.execute(
+        text("SELECT * FROM experiment_config_fields WHERE config_id=:cid ORDER BY sort_order"),
+        {"cid": config_id},
+    )
+    fields = [dict(zip(frow.keys(), x)) for x in frow.fetchall()]
+    crow = await db.execute(
+        text("SELECT * FROM experiment_config_columns WHERE config_id=:cid ORDER BY sort_order"),
+        {"cid": config_id},
+    )
+    columns = [dict(zip(crow.keys(), x)) for x in crow.fetchall()]
+
+    snapshot = {
+        "db_mappings": db_mappings,
+        "extra_json": extra,
+        "fields": fields,
+        "columns": columns,
+    }
+    snapshot_str = json.dumps(snapshot, ensure_ascii=False, default=str)
+    snapshot_hash = hashlib.sha256(snapshot_str.encode("utf-8")).hexdigest()
+
+    await db.execute(
+        text("""
+            INSERT INTO task_config_snapshots (task_no, config_id, config_version, snapshot_json, snapshot_hash, created_at)
+            VALUES (:t, :cid, :cv, CAST(:snap AS jsonb), :hash, localtimestamp)
+            ON CONFLICT (task_no) DO UPDATE SET
+                config_id=EXCLUDED.config_id, config_version=EXCLUDED.config_version,
+                snapshot_json=EXCLUDED.snapshot_json, snapshot_hash=EXCLUDED.snapshot_hash,
+                created_at=localtimestamp
+        """),
+        {
+            "t": task_no, "cid": config_id, "cv": config_version,
+            "snap": snapshot_str, "hash": snapshot_hash,
+        },
+    )
+    return {"config_id": config_id, "config_version": config_version, "snapshot_hash": snapshot_hash}
+
+
+async def _config_fingerprint(db: AsyncSession, config_id: int) -> str:
+    """计算配置内容指纹（SHA-256）：字段/列/照片/预检/验证规则/设备/坐标映射/extra_json。
+
+    执行界面据此轮询检测「同版本内就地修改」等任意内容变更 —— config_id 不变时也能感知。
+    """
+    payload: dict[str, Any] = {}
+
+    extra_row = await db.execute(
+        text("SELECT extra_json FROM experiment_config_versions WHERE id=:cid"),
+        {"cid": config_id},
+    )
+    er = extra_row.fetchone()
+    extra = er[0] if er and er[0] is not None else {}
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except (json.JSONDecodeError, TypeError):
+            extra = {"_raw": extra}
+    payload["extra_json"] = extra
+
+    for table, order_by in [
+        ("experiment_config_fields", "sort_order, id"),
+        ("experiment_config_columns", "sort_order, id"),
+        ("experiment_config_photo_checkpoints", "sort_order, id"),
+        ("experiment_config_prechecks", "sort_order, id"),
+        ("experiment_config_validation_rules", "id"),
+        ("experiment_config_equipment", "sort_order, management_no"),
+        ("template_field_mappings", "sort_order, id"),
+    ]:
+        r = await db.execute(
+            text(f"SELECT * FROM {table} WHERE config_id=:cid ORDER BY {order_by}"),
+            {"cid": config_id},
+        )
+        payload[table] = [dict(zip(r.keys(), row)) for row in r.fetchall()]
+
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@router.get("/{experiment_code}/current-version")
+async def get_current_version_info(
+    experiment_code: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _user: Annotated[dict, Depends(get_current_user)],
+):
+    """轻量接口：返回某实验当前「现行」配置版本 + 内容指纹（供执行界面轮询实时刷新）"""
+    row = await db.execute(
+        text("""
+            SELECT id, version FROM experiment_config_versions
+            WHERE experiment_code=:ec AND status='现行'
+            ORDER BY effective_date DESC LIMIT 1
+        """),
+        {"ec": experiment_code},
+    )
+    r = row.fetchone()
+    if not r:
+        return {"experiment_code": experiment_code, "version": None, "config_id": None, "fingerprint": None}
+    return {
+        "experiment_code": experiment_code,
+        "version": r[1],
+        "config_id": r[0],
+        "fingerprint": await _config_fingerprint(db, r[0]),
     }
 
 
@@ -708,10 +998,7 @@ async def get_current_config(
             return fb
 
     config_dict["_source"] = "database"
-    config_dict["camera_hints"] = _CAMERA_HINTS
-    exp_name_db = config_dict.get("experiment_name") or _KIND_TO_NAME.get(_kind_resolved, "")
-    config_dict["report_decisive_photo_codes"] = _REPORT_DECISIVE_PHOTO_CODES.get(exp_name_db, [])
-    config_dict["record_template_file"] = _TEMPLATE_FILE_MAP.get(_kind_resolved, "")
+    _apply_config_extras(config_dict, _kind_resolved)
     return config_dict
 
 
@@ -779,10 +1066,7 @@ async def get_config_version(
         config_dict["photo_checkpoints"] = _get_photo_checkpoints(_kind_resolved)
 
     config_dict["_source"] = "database"
-    config_dict["camera_hints"] = _CAMERA_HINTS
-    exp_name_db = config_dict.get("experiment_name") or _KIND_TO_NAME.get(_kind_resolved, "")
-    config_dict["report_decisive_photo_codes"] = _REPORT_DECISIVE_PHOTO_CODES.get(exp_name_db, [])
-    config_dict["record_template_file"] = _TEMPLATE_FILE_MAP.get(_kind_resolved, "")
+    _apply_config_extras(config_dict, _kind_resolved)
     return config_dict
 
 
@@ -855,6 +1139,7 @@ class ConfigVersionCreate(BaseModel):
     prechecks: list[dict[str, Any]] = Field(default_factory=list)
     validation_rules: list[dict[str, Any]] = Field(default_factory=list)
     equipment: list[dict[str, Any]] = Field(default_factory=list)
+    extra_json: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.post("/{experiment_code}/versions", status_code=201)
@@ -914,6 +1199,13 @@ async def create_config_version(
     )
     config_id = result.fetchone()[0]
 
+    # 写入 extra_json（camera_hints / report_decisive_photo_codes / record_template_file / constants）
+    if body.extra_json:
+        await db.execute(
+            text("UPDATE experiment_config_versions SET extra_json = CAST(:ej AS jsonb) WHERE id = :cid"),
+            {"ej": json.dumps(body.extra_json, ensure_ascii=False), "cid": config_id},
+        )
+
     # 插入子配置
     await _insert_config_children(db, config_id, body)
 
@@ -923,6 +1215,227 @@ async def create_config_version(
         "experiment_code": experiment_code,
         "version": body.version,
         "status": "草稿",
+    }
+
+
+@router.post("/import-docx", status_code=201)
+async def import_method_docx(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[dict, Depends(require_role("管理员"))],
+    experiment_code: str = Form(...),
+    experiment_name: str = Form(...),
+    method_code: str = Form(...),
+    standard: str | None = Form(None),
+    category: str | None = Form(None),
+    kind: str = Form("generic"),
+    record_template: UploadFile | None = File(None),
+    sop_file: UploadFile | None = File(None),
+):
+    """一键导入检测项目（管理员）：新建方法 + 保存 Word 模板/SOP + 生成配置版本 V1.0。
+
+    - 记录模板(.docx) 保存为 RECORD_{code}_{name}.docx，并解析填空/勾选格自动匹配字段编码，
+      写入 experiment_config_fields + template_field_mappings（版本控制相关内容）。
+    - SOP(.docx) 保存为 SOP_{code}_{name}.docx。
+    - 列/拍照节点/预检项/设备按 kind 回退硬编码 SCHEMAS 兜底生成。
+    """
+    experiment_code = (experiment_code or "").strip()
+    experiment_name = (experiment_name or "").strip()
+    method_code = (method_code or "").strip()
+    if not experiment_code:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="实验编码不能为空")
+    if not experiment_name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="实验名称不能为空")
+    if not method_code:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="方法编号不能为空")
+
+    # 1. 方法库去重
+    existing = await db.execute(
+        text("SELECT 1 FROM experiment_methods WHERE experiment_code=:ec"), {"ec": experiment_code}
+    )
+    if existing.fetchone():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="实验编码已存在，请直接编辑或停用后重试")
+
+    # 2. 保存模板文件到 TEMPLATE_DIR
+    template_dir = _Path(settings.TEMPLATE_DIR)
+    template_dir.mkdir(parents=True, exist_ok=True)
+
+    def _safe(name: str) -> str:
+        return _re.sub(r'[\\/:*?"<>|]', "_", name)
+
+    record_filename = ""
+    if record_template and record_template.filename:
+        if not record_template.filename.lower().endswith(".docx"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="原始记录模板仅支持 .docx 文件")
+        record_filename = f"RECORD_{_safe(experiment_code)}_{_safe(experiment_name)}.docx"
+        (template_dir / record_filename).write_bytes(await record_template.read())
+
+    sop_filename = ""
+    if sop_file and sop_file.filename:
+        if not sop_file.filename.lower().endswith(".docx"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="SOP 仅支持 .docx 文件")
+        sop_filename = f"SOP_{_safe(experiment_code)}_{_safe(experiment_name)}.docx"
+        (template_dir / sop_filename).write_bytes(await sop_file.read())
+
+    # 3. 新建方法
+    seq_result = await db.execute(text("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM experiment_methods"))
+    next_seq = seq_result.fetchone()[0]
+    await db.execute(
+        text("""
+            INSERT INTO experiment_methods (experiment_code, experiment_name, method_code,
+              standard, category, kind, template_code, sop_file, enabled, sort_order, created_at, updated_at)
+            VALUES (:ec, :en, :mc, :st, :ct, :kd, :tc, :sf, TRUE, :so, localtimestamp, localtimestamp)
+        """),
+        {"ec": experiment_code, "en": experiment_name, "mc": method_code,
+         "st": standard, "ct": category, "kd": kind,
+         "tc": record_filename or None, "sf": sop_filename or None, "so": next_seq},
+    )
+
+    # 4. 生成配置版本 V1.0（草稿）
+    version = "V1.0"
+    ver_exists = await db.execute(
+        text("SELECT 1 FROM experiment_config_versions WHERE experiment_code=:ec AND version=:v"),
+        {"ec": experiment_code, "v": version},
+    )
+    if ver_exists.fetchone():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"配置版本 {version} 已存在")
+
+    fb = _build_fallback_config(experiment_code, kind_hint=(kind if kind != "generic" else None))  # 已知 kind 提供列/拍照/预检兜底
+
+    result = await db.execute(
+        text("""
+            INSERT INTO experiment_config_versions
+              (experiment_code, version, experiment_name, method_code, standard,
+               category, kind, default_location, sop_version, record_template_version,
+               software, status, effective_date, note, created_by)
+            VALUES (:ec, :v, :en, :mc, :st, :cat, :kd, NULL, :sv, :rtv, NULL, '草稿', NULL, NULL, :cb)
+            RETURNING id
+        """),
+        {"ec": experiment_code, "v": version, "en": experiment_name, "mc": method_code,
+         "st": standard, "cat": category, "kd": kind,
+         "sv": sop_filename or None, "rtv": record_filename or None,
+         "cb": current_user["username"]},
+    )
+    config_id = result.fetchone()[0]
+
+    # 4a. extra_json：记录模板文件名 + 拍照提示/决定性照片（fallback 兜底）
+    extra: dict[str, Any] = {}
+    if record_filename:
+        extra["record_template_file"] = record_filename
+    if fb:
+        if fb.get("camera_hints"):
+            extra["camera_hints"] = fb["camera_hints"]
+        if fb.get("report_decisive_photo_codes"):
+            extra["report_decisive_photo_codes"] = fb["report_decisive_photo_codes"]
+    if extra:
+        await db.execute(
+            text("UPDATE experiment_config_versions SET extra_json = CAST(:ej AS jsonb) WHERE id = :cid"),
+            {"ej": json.dumps(extra, ensure_ascii=False), "cid": config_id},
+        )
+
+    # 4b. 字段：优先从 Word 模板自动匹配，否则用 fallback 字段
+    fields: list[dict[str, Any]] = []
+    mappings: list[dict[str, Any]] = []
+    if record_filename:
+        record_path = template_dir / record_filename
+        for i, f in enumerate(_parse_template_docx(record_path)):
+            fk = match_field_key(f["label"]) or f"field_{i + 1}"
+            input_type = f.get("input_type") or "text"
+            fields.append({
+                "section_title": f["section"], "section_order": int(f.get("table", 0)) + 1,
+                "field_key": fk, "field_label": f["label"],
+                "field_type": "checkbox" if input_type == "checkbox" else "text",
+                "field_default": "", "field_options": "", "is_required": False,
+                "is_readonly": False, "is_actual": False, "sort_order": i,
+            })
+            mappings.append({
+                "field_source": "static", "field_key": fk, "template_name": record_filename,
+                "table_index": int(f.get("table", 0)), "row_index": int(f.get("row", 0)),
+                "col_index": int(f.get("col", 0)),
+                "transform": "checkbox" if input_type == "checkbox" else "text",
+                "checkbox_selection": _checkbox_selection(f.get("template_text", "")) if input_type == "checkbox" else "",
+                "sort_order": i,
+            })
+    elif fb and fb.get("fields"):
+        for i, f in enumerate(fb["fields"]):
+            fields.append({
+                "section_title": f.get("section_title", ""),
+                "section_order": f.get("section_order", 1),
+                "field_key": f.get("key", f"field_{i}"),
+                "field_label": f.get("label", f"字段 {i+1}"),
+                "field_type": f.get("type", "text"),
+                "field_default": f.get("default", ""),
+                "field_options": f.get("options", []),
+                "is_required": False, "is_readonly": f.get("readonly", False),
+                "is_actual": False, "sort_order": i,
+            })
+
+    if fields:
+        await _insert_fields(db, config_id, fields)
+    for m in mappings:
+        await db.execute(
+            text("""
+                INSERT INTO template_field_mappings
+                  (config_id, field_source, field_key, template_name,
+                   table_index, row_index, col_index, transform, checkbox_selection, sort_order)
+                VALUES (:cid, :field_source, :field_key, :template_name,
+                        :table_index, :row_index, :col_index, :transform, :checkbox_selection, :sort_order)
+            """),
+            {"cid": config_id, **m},
+        )
+
+    # 4c. 列 / 拍照 / 预检 / 设备（来自 fallback，形状归一化）
+    if fb:
+        if fb.get("columns"):
+            cols = []
+            for i, c in enumerate(fb["columns"]):
+                cols.append({
+                    "column_key": c.get("column_key", c.get("key", f"col_{i}")),
+                    "column_label": c.get("column_label", c.get("label", f"列 {i+1}")),
+                    "column_type": c.get("column_type", c.get("type", "number")),
+                    "is_required": c.get("is_required", False),
+                    "column_default": c.get("column_default", c.get("default", "")),
+                    "calc_expression": c.get("calc_expression"),
+                    "calc_precision": c.get("calc_precision", 3),
+                    "sort_order": i,
+                })
+            await _insert_columns(db, config_id, cols)
+
+        if fb.get("photo_checkpoints"):
+            photos = []
+            for i, p in enumerate(fb["photo_checkpoints"]):
+                photos.append({
+                    "checkpoint_code": p.get("code", p.get("checkpoint_code", f"photo_{i}")),
+                    "checkpoint_label": p.get("label", p.get("checkpoint_label", f"拍照节点 {i+1}")),
+                    "is_required": p.get("required", p.get("is_required", True)),
+                    "is_sample_level": p.get("is_sample_level", False),
+                    "checkpoint_group": p.get("checkpoint_group"),
+                    "sort_order": i,
+                })
+            await _insert_photo_checkpoints(db, config_id, photos)
+
+        if fb.get("prechecks"):
+            pres = []
+            for i, p in enumerate(fb["prechecks"]):
+                pres.append({
+                    "precheck_code": p.get("precheck_code", f"precheck_{i}"),
+                    "precheck_label": p.get("label", p.get("precheck_label", p.get("check_name", f"预检查项 {i+1}"))),
+                    "is_required": p.get("is_required", True),
+                    "sort_order": i,
+                })
+            await _insert_prechecks(db, config_id, pres)
+
+        if fb.get("equipment"):
+            await _insert_equipment(db, config_id, fb["equipment"])
+
+    return {
+        "message": "检测项目一键导入成功",
+        "experiment_code": experiment_code,
+        "method_created": True,
+        "record_template": record_filename or None,
+        "sop_file": sop_filename or None,
+        "version": version,
+        "config_id": config_id,
+        "fields_written": len(fields),
     }
 
 
@@ -945,6 +1458,8 @@ class ConfigVersionUpdate(BaseModel):
     prechecks: list[dict[str, Any]] | None = None
     validation_rules: list[dict[str, Any]] | None = None
     equipment: list[dict[str, Any]] | None = None
+    field_mappings: list[dict[str, Any]] | None = None
+    extra_json: dict[str, Any] | None = None
 
 
 @router.put("/{experiment_code}/versions/{version}")
@@ -1010,6 +1525,42 @@ async def update_config_version(
     if body.equipment is not None:
         await db.execute(text("DELETE FROM experiment_config_equipment WHERE config_id=:cid"), {"cid": config_id})
         await _insert_equipment(db, config_id, body.equipment)
+
+    # 模板坐标映射（配置编辑器「标签→编码」自动匹配后回传）：按 field_key 覆盖写
+    if body.field_mappings is not None:
+        actual_path = _resolve_template_path(experiment_code)
+        template_name = actual_path.name if actual_path else ""
+        for i, fm in enumerate(body.field_mappings):
+            fk = (fm.get("field_key") or "").strip()
+            if not fk:
+                continue
+            table_idx = int(fm.get("table", 0))
+            row_idx = int(fm.get("row", 0))
+            col_idx = int(fm.get("col", 0))
+            transform = fm.get("transform") or "text"
+            await db.execute(
+                text("DELETE FROM template_field_mappings WHERE config_id=:cid AND field_key=:fk"),
+                {"cid": config_id, "fk": fk},
+            )
+            await db.execute(
+                text("""
+                    INSERT INTO template_field_mappings
+                      (config_id, field_source, field_key, template_name,
+                       table_index, row_index, col_index, transform, checkbox_selection, sort_order)
+                    VALUES (:cid, 'static', :fk, :tn, :ti, :ri, :ci, :tr, '', :srt)
+                """),
+                {
+                    "cid": config_id, "fk": fk, "tn": template_name,
+                    "ti": table_idx, "ri": row_idx, "ci": col_idx,
+                    "tr": transform, "srt": i,
+                },
+            )
+
+    if body.extra_json is not None:
+        await db.execute(
+            text("UPDATE experiment_config_versions SET extra_json = CAST(:ej AS jsonb) WHERE id = :cid"),
+            {"ej": json.dumps(body.extra_json, ensure_ascii=False), "cid": config_id},
+        )
 
     return {"message": f"配置版本 {version} 已更新", "config_id": config_id}
 
@@ -1138,6 +1689,11 @@ async def _insert_fields(db: AsyncSession, config_id: int, items: list[dict[str,
 
 async def _insert_columns(db: AsyncSession, config_id: int, items: list[dict[str, Any]]) -> None:
     for i, c in enumerate(items):
+        ce = c.get("calc_expression")
+        if isinstance(ce, (dict, list)):
+            ce = json.dumps(ce, ensure_ascii=False)
+        elif ce is None:
+            ce = ""
         await db.execute(
             text("""
                 INSERT INTO experiment_config_columns
@@ -1149,7 +1705,7 @@ async def _insert_columns(db: AsyncSession, config_id: int, items: list[dict[str
                 "cid": config_id, "ck": c.get("column_key", f"col_{i}"),
                 "cl": c.get("column_label", f"列 {i+1}"), "ct": c.get("column_type", "number"),
                 "ir": c.get("is_required", False), "cd": str(c.get("column_default", "")),
-                "ce": c.get("calc_expression"), "cp": c.get("calc_precision", 3),
+                "ce": ce, "cp": c.get("calc_precision", 3),
                 "srt": c.get("sort_order", i),
             },
         )
@@ -1222,6 +1778,7 @@ async def _insert_equipment(db: AsyncSession, config_id: int, items: list[dict[s
 
 # ── Template manifest ──
 import re as _re
+from pathlib import Path as _Path
 from docx import Document as _Document
 
 # kind → template code mapping
@@ -1263,94 +1820,112 @@ def _table_section_name(table, fallback: str) -> str:
     return name
 
 
-@router.get("/{experiment_code}/template-manifest")
-async def get_template_manifest(experiment_code: str):
-    """Return template supplement fields for the given experiment code.
-
-    Reads the SOP template DOCX (or RECORD template if available) and extracts
-    form fields that need user confirmation — checkboxes, blanks, etc.
-    """
-    from pathlib import Path as _Path
+def _resolve_template_path(experiment_code: str, template_name: str | None = None) -> _Path | None:
+    """解析模板 DOCX 绝对路径：显式 template_name 优先，否则按 kind→模板代码扫描。"""
     from app.config import Settings
     settings = Settings()
+    template_dir = _Path(settings.TEMPLATE_DIR)
+    if not template_dir.exists():
+        return None
 
-    # Resolve experiment_code → kind via SCHEMAS / _EXPERIMENT_CODE_TO_KIND
+    # 显式指定文件名（含或不含 .docx）
+    if template_name:
+        direct = template_dir / template_name
+        if direct.exists() and direct.suffix == ".docx":
+            return direct
+        if not direct.suffix:
+            candidate = _Path(str(direct) + ".docx")
+            if candidate.exists():
+                return candidate
+        # 前缀匹配
+        prefix = template_name[:-5] if template_name.endswith(".docx") else template_name
+        for f in template_dir.iterdir():
+            if f.suffix == ".docx" and f.name.startswith(prefix):
+                return f
+        return None
+
+    # 未指定：按 kind → 模板代码扫描（RECORD 优先，SOP 兜底）
     kind = _resolve_kind(experiment_code)
     if kind is None:
         kind = experiment_code
     template_code = _KIND_TO_TEMPLATE_CODE.get(kind, kind)
-
-    # Try RECORD template first, then SOP template
-    template_dir = _Path(settings.TEMPLATE_DIR)
-    # Search patterns — files can be named:
-    #   RECORD_R001_xxx.docx, R001_xxx.docx, SOP_R001_xxx.docx
-    #   Also try experiment code directly: I001_xxx.docx
     rec_patterns = [f"RECORD_{template_code}", f"{template_code}_", f"{template_code}."]
     sop_patterns = [f"SOP_{template_code}"]
-    # Also try the experiment_code as fallback
     if template_code != experiment_code:
         rec_patterns.insert(0, f"RECORD_{experiment_code}")
         rec_patterns.append(f"{experiment_code}_")
         rec_patterns.append(f"{experiment_code}.")
         sop_patterns.append(f"SOP_{experiment_code}")
+    for f in template_dir.iterdir():
+        if f.suffix != ".docx":
+            continue
+        if any(f.name.startswith(p) for p in rec_patterns):
+            return f
+    for f in template_dir.iterdir():
+        if f.suffix != ".docx":
+            continue
+        if any(f.name.startswith(p) for p in sop_patterns):
+            return f
+    return None
 
-    actual_path = None
-    if template_dir.exists():
-        for f in template_dir.iterdir():
-            if f.suffix != '.docx':
-                continue
-            for pat in rec_patterns:
-                if f.name.startswith(pat):
-                    actual_path = f
-                    break
-            if actual_path:
-                break
-        if not actual_path:
-            for f in template_dir.iterdir():
-                if f.suffix != '.docx':
+
+def _parse_template_docx(path: _Path) -> list[dict[str, Any]]:
+    """解析模板 DOCX，返回含坐标/标签/输入类型的填空与勾选框清单。"""
+    doc = _Document(str(path))
+    fields: list[dict[str, Any]] = []
+    for table_idx, table in enumerate(doc.tables):
+        section = _table_section_name(table, f"表{table_idx + 1}")
+        seen_cells = set()
+        for row_idx, row in enumerate(table.rows):
+            for col_idx, cell in enumerate(row.cells):
+                if cell._tc in seen_cells:
                     continue
-                for pat in sop_patterns:
-                    if f.name.startswith(pat):
-                        actual_path = f
+                seen_cells.add(cell._tc)
+                text = cell.text.strip()
+                if not _contains_marker(text):
+                    continue
+                label = f"{section}-R{row_idx + 1}C{col_idx + 1}"
+                row_label = ""
+                for c in row.cells[:col_idx]:
+                    ct = c.text.strip()
+                    if ct and not _contains_marker(ct):
+                        row_label = ct
                         break
-                if actual_path:
-                    break
+                if row_label:
+                    label = row_label
+                fields.append({
+                    "key": f"t{table_idx}_r{row_idx}_c{col_idx}",
+                    "section": section,
+                    "label": label,
+                    "position": f"表{table_idx + 1}-R{row_idx + 1}C{col_idx + 1}",
+                    "template_text": text,
+                    "input_type": _infer_input_type(text),
+                    "table": table_idx,
+                    "row": row_idx,
+                    "col": col_idx,
+                })
+    return fields
 
+
+def _checkbox_selection(text: str) -> str:
+    """从勾选框单元格文本提取选项文案（去 □/☐/☑ 符号后拼接）。"""
+    parts = [p.strip() for p in _re.split(r"[□☐☑]", text) if p.strip()]
+    return " ".join(parts)
+
+
+@router.get("/{experiment_code}/template-manifest")
+async def get_template_manifest(experiment_code: str):
+    """Return template supplement fields for the given experiment code.
+
+    严格对齐原始记录模板：复用受控记录引擎 record_word_engine.template_manifest 作为唯一权威解析，
+    使 ⑤ 母版过程确认的字段、章节名（段落标题）、row_label/col_header、空白标记（＿/…）与导出 DOCX 完全一致。
+    """
+    from app.services.record_word_engine import template_manifest
+    actual_path = _resolve_template_path(experiment_code)
     if not actual_path or not actual_path.exists():
         return {"fields": [], "template_name": None, "note": "未找到模板文件，请上传受控原始记录模板"}
-
     try:
-        doc = _Document(str(actual_path))
-        fields = []
-        for table_idx, table in enumerate(doc.tables):
-            section = _table_section_name(table, f"表{table_idx + 1}")
-            for row_idx, row in enumerate(table.rows):
-                for col_idx, cell in enumerate(row.cells):
-                    text = cell.text.strip()
-                    if not _contains_marker(text):
-                        continue
-                    # Build a label from left neighbor or header
-                    label = f"{section}-R{row_idx + 1}C{col_idx + 1}"
-                    # Try to get a row label from the leftmost non-marker cell
-                    row_label = ""
-                    for c in row.cells[:col_idx]:
-                        ct = c.text.strip()
-                        if ct and not _contains_marker(ct):
-                            row_label = ct
-                            break
-                    if row_label:
-                        label = row_label
-                    fields.append({
-                        "key": f"t{table_idx}_r{row_idx}_c{col_idx}",
-                        "section": section,
-                        "label": label,
-                        "position": f"表{table_idx + 1}-R{row_idx + 1}C{col_idx + 1}",
-                        "template_text": text,
-                        "input_type": _infer_input_type(text),
-                        "table": table_idx,
-                        "row": row_idx,
-                        "col": col_idx,
-                    })
+        fields = template_manifest(actual_path)
         return {
             "fields": fields,
             "template_name": actual_path.name,
@@ -1358,3 +1933,216 @@ async def get_template_manifest(experiment_code: str):
         }
     except Exception as e:
         return {"fields": [], "template_name": str(actual_path.name), "error": str(e)}
+
+
+class MatchLabelRequest(BaseModel):
+    label: str
+
+
+@router.post("/{experiment_code}/match-label")
+async def match_label(
+    experiment_code: str,
+    body: MatchLabelRequest,
+    current_user: Annotated[dict, Depends(require_role("管理员"))],
+):
+    """配置编辑器「标签 → 编码 + 模板坐标」匹配（逐格解析真实模板）。
+
+    给定一个标签（如「检测前温度」），在真实模板 DOCX 中按归一化标签精确/包含匹配
+    一个 manifest 字段，返回其坐标与同义词命中的业务 field_key。未命中坐标时
+    `matched=false`，仍返回 `field_key`（若词库命中）供管理员人工补坐标。
+    """
+    label = (body.label or "").strip()
+    if not label:
+        return {"matched": False, "field_key": None, "label": "", "reason": "标签为空"}
+
+    actual_path = _resolve_template_path(experiment_code)
+    if not actual_path or not actual_path.exists():
+        return {
+            "matched": False, "field_key": None, "label": label,
+            "reason": "未找到模板文件，请先上传受控原始记录模板",
+        }
+
+    norm = normalize_label(label)
+    fields = _parse_template_docx(actual_path)
+
+    best = None
+    if norm:
+        for f in fields:
+            if normalize_label(f["label"]) == norm:
+                best = f
+                break
+    if best is None and norm:
+        for f in fields:
+            fl = normalize_label(f["label"])
+            if fl and (norm in fl or fl in norm):
+                best = f
+                break
+
+    fk = match_field_key(norm or label)
+
+    if best is not None:
+        return {
+            "matched": True,
+            "field_key": fk,
+            "label": best["label"],
+            "position": best["position"],
+            "table": best["table"],
+            "row": best["row"],
+            "col": best["col"],
+            "input_type": best["input_type"],
+            "synonym_hit": bool(fk),
+            "template_name": actual_path.name,
+        }
+
+    return {
+        "matched": False,
+        "field_key": fk,
+        "label": label,
+        "position": None,
+        "table": None,
+        "row": None,
+        "col": None,
+        "input_type": "text",
+        "synonym_hit": bool(fk),
+        "template_name": actual_path.name,
+        "reason": "未在模板中匹配到该标签，请确认标签或手动填写编码/坐标",
+    }
+
+
+# ── 模板自动匹配向导（任务三 P4）──
+
+class AutoMapField(BaseModel):
+    table: int = 0
+    row: int = 0
+    col: int = 0
+    label: str = ""
+    section: str = ""
+    input_type: str = "text"
+    field_key: str = ""
+
+
+class AutoMapRequest(BaseModel):
+    template_name: str | None = None
+    apply: bool = False
+    fields: list[AutoMapField] | None = None
+
+
+@router.post("/{experiment_code}/versions/{version}/auto-map")
+async def auto_map_template(
+    experiment_code: str,
+    version: str,
+    body: AutoMapRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[dict, Depends(require_role("管理员"))],
+):
+    """模板自动匹配向导：解析模板 DOCX → 同义词匹配 → 生成字段与坐标映射。
+
+    - `apply=false`（预览）：返回解析结果（含 `matched` 标记），不写库。
+    - `apply=true`（提交）：按 `fields`（可人工修正 field_key）覆盖写
+      `experiment_config_fields` + `template_field_mappings`。
+
+    仅「静态单元格」能自动匹配；动态行/判定逻辑/阈值仍由管理员在编辑器人工补录。
+    """
+    cfg = await db.execute(
+        text("SELECT id, status FROM experiment_config_versions WHERE experiment_code=:ec AND version=:v"),
+        {"ec": experiment_code, "v": version},
+    )
+    row = cfg.fetchone()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="配置版本不存在")
+    config_id, current_status = row[0], row[1]
+    if current_status not in ("草稿", "现行"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"仅草稿/现行状态可自动匹配，当前状态：{current_status}",
+        )
+
+    # 模板路径：显式 template_name 优先，否则 extra_json.record_template_file，最后按 kind 扫描
+    erow = await db.execute(
+        text("SELECT extra_json FROM experiment_config_versions WHERE id=:cid"), {"cid": config_id}
+    )
+    er = erow.fetchone()
+    extra = er[0] if er and isinstance(er[0], dict) else {}
+    template_name = body.template_name or ((extra or {}).get("record_template_file") or "")
+    actual_path = _resolve_template_path(experiment_code, template_name or None)
+    if not actual_path or not actual_path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到模板文件，请先上传受控原始记录模板")
+
+    # 构建带 field_key 的字段列表（预览用；提交时直接取 body.fields）
+    if body.fields:
+        field_rows = [f.model_dump() for f in body.fields]
+    else:
+        parsed = _parse_template_docx(actual_path)
+        field_rows = []
+        for i, f in enumerate(parsed):
+            fk = match_field_key(f["label"])
+            field_rows.append({
+                "table": f["table"], "row": f["row"], "col": f["col"],
+                "label": f["label"], "section": f["section"],
+                "input_type": f["input_type"], "template_text": f["template_text"],
+                "field_key": fk or f"field_{i + 1}",
+                "matched": bool(fk),
+            })
+
+    # 预览：不写库
+    if not body.apply:
+        matched_count = sum(1 for f in field_rows if f.get("matched"))
+        return {
+            "template_name": actual_path.name,
+            "count": len(field_rows),
+            "matched_count": matched_count,
+            "unmatched_count": len(field_rows) - matched_count,
+            "fields": field_rows,
+        }
+
+    # 提交：重解析模板用于勾选框文案，覆盖写字段 + 坐标映射
+    text_by_pos = {(f["table"], f["row"], f["col"]): f["template_text"] for f in _parse_template_docx(actual_path)}
+
+    await db.execute(text("DELETE FROM experiment_config_fields WHERE config_id=:cid"), {"cid": config_id})
+    await db.execute(text("DELETE FROM template_field_mappings WHERE config_id=:cid"), {"cid": config_id})
+
+    for i, f in enumerate(field_rows):
+        fk = (f.get("field_key") or "").strip() or f"field_{i + 1}"
+        label = f.get("label") or ""
+        section = f.get("section") or ""
+        input_type = f.get("input_type") or "text"
+        table_idx = int(f.get("table", 0))
+        row_idx = int(f.get("row", 0))
+        col_idx = int(f.get("col", 0))
+
+        await db.execute(
+            text("""
+                INSERT INTO experiment_config_fields
+                  (config_id, section_title, section_order, field_key, field_label,
+                   field_type, field_default, field_options, is_required, is_readonly, is_actual, sort_order)
+                VALUES (:cid, :st, :so, :fk, :fl, :ft, '', '', FALSE, FALSE, FALSE, :srt)
+            """),
+            {
+                "cid": config_id, "st": section, "so": table_idx + 1, "fk": fk,
+                "fl": label, "ft": "checkbox" if input_type == "checkbox" else "text",
+                "srt": i,
+            },
+        )
+
+        transform = "checkbox" if input_type == "checkbox" else "text"
+        selection = _checkbox_selection(text_by_pos.get((table_idx, row_idx, col_idx), "")) if input_type == "checkbox" else ""
+        await db.execute(
+            text("""
+                INSERT INTO template_field_mappings
+                  (config_id, field_source, field_key, template_name,
+                   table_index, row_index, col_index, transform, checkbox_selection, sort_order)
+                VALUES (:cid, 'static', :fk, :tn, :ti, :ri, :ci, :tr, :sel, :srt)
+            """),
+            {
+                "cid": config_id, "fk": fk, "tn": actual_path.name,
+                "ti": table_idx, "ri": row_idx, "ci": col_idx,
+                "tr": transform, "sel": selection, "srt": i,
+            },
+        )
+
+    return {
+        "message": "自动匹配完成",
+        "config_id": config_id,
+        "fields_written": len(field_rows),
+        "template_name": actual_path.name,
+    }

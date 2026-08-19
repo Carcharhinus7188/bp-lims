@@ -16,6 +16,7 @@ from app.api.v1.templates import router as templates_router
 from app.api.v1.export import router as export_router
 from app.api.v1.experiment_config import router as experiment_config_router
 from app.api.v1.returns import router as returns_router
+from app.api.v1.samples import router as samples_router
 from app.api.v1.traceability import router as traceability_router
 from app.api.v1.incidents import router as incidents_router
 from app.api.v1.objections import router as objections_router
@@ -23,6 +24,7 @@ from app.api.v1.hazardous_waste import router as hazardous_waste_router
 from app.api.v1.notifications import router as notifications_router
 from app.api.v1.signatures import router as signatures_router
 from app.api.v1.system import router as system_router
+from app.api.v1.attachments import router as attachments_router
 
 api_router = APIRouter()
 api_router.include_router(auth_router)
@@ -40,6 +42,7 @@ api_router.include_router(templates_router)
 api_router.include_router(export_router)
 api_router.include_router(experiment_config_router)
 api_router.include_router(returns_router)
+api_router.include_router(samples_router)
 api_router.include_router(traceability_router)
 api_router.include_router(incidents_router)
 api_router.include_router(objections_router)
@@ -47,3 +50,4 @@ api_router.include_router(hazardous_waste_router)
 api_router.include_router(notifications_router)
 api_router.include_router(signatures_router)
 api_router.include_router(system_router)
+api_router.include_router(attachments_router)

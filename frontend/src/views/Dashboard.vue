@@ -64,7 +64,6 @@ const quickActions = computed(() => {
     { label: '查看任务包', icon: Box, path: '/task-packages' },
     { label: '开始实验', icon: Notebook, path: '/my-tasks' },
     { label: '登记危废', icon: Warning, path: '/hazardous-waste' },
-    { label: '样品归还', icon: Van, path: '/sample-return' },
   ]
   if (r === '复核员') return [
     { label: '开始复核', icon: Checked, path: '/pending-reviews' },

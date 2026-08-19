@@ -1,8 +1,9 @@
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Delete, Plus, Search } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import { chinaDate, chinaTime } from '../utils/time'
 
 const user = JSON.parse(localStorage.getItem('user') || '{}')
 const loading = ref(false)
@@ -15,15 +16,17 @@ const form = reactive({
   unit: 'mL', hazard_category: '', disposal_method: '', container_no: '', note: '',
 })
 const formError = ref('')
-const taskNoInput = ref('')
+const myTasks = ref([])
 
-function addTaskNo() {
-  const v = taskNoInput.value.trim()
-  if (v && !form.task_nos.includes(v)) { form.task_nos.push(v); taskNoInput.value = '' }
+async function loadMyTasks() {
+  try {
+    const { data } = await request.get('/tasks/my', { params: { limit: 200 } })
+    myTasks.value = Array.isArray(data) ? data : []
+  } catch { myTasks.value = [] }
 }
-function removeTaskNo(idx) { form.task_nos.splice(idx, 1) }
 
-onMounted(() => { loadList() })
+onMounted(() => { loadList(); loadMyTasks() })
+watch(showCreate, (v) => { if (v) loadMyTasks() })
 
 async function loadList() {
   loading.value = true
@@ -45,12 +48,11 @@ async function submitCreate() {
     ElMessage.success(`危废记录已登记: ${res.data.disposal_no}`)
     showCreate.value = false
     Object.assign(form, { task_nos: [], waste_type: '实验废液', waste_name: '', quantity: 0, unit: 'mL', hazard_category: '', disposal_method: '', container_no: '', note: '' })
-    taskNoInput.value = ''
     loadList()
   } catch (e) { ElMessage.error(e.response?.data?.detail || '登记失败') } finally { submitting.value = false }
 }
 
-function formatDate(d) { return d ? new Date(d).toLocaleString('zh-CN') : '—' }
+function formatDate(d) { return d ? chinaDate(new Date(d)) + ' ' + chinaTime(new Date(d)) : '—' }
 </script>
 
 <template>
@@ -82,11 +84,9 @@ function formatDate(d) { return d ? new Date(d).toLocaleString('zh-CN') : '—' 
     <el-dialog v-model="showCreate" title="危废处置登记" width="550px">
       <el-form :model="form" label-width="90px">
         <el-form-item label="关联任务" required>
-          <div style="display:flex;gap:8px;width:100%">
-            <el-input v-model="taskNoInput" placeholder="输入任务编号后点击添加" @keyup.enter="addTaskNo" />
-            <el-button @click="addTaskNo">添加</el-button>
-          </div>
-          <el-tag v-for="(t, i) in form.task_nos" :key="t" closable @close="removeTaskNo(i)" style="margin:4px 4px 0 0">{{ t }}</el-tag>
+          <el-select v-model="form.task_nos" multiple filterable placeholder="选择本人负责的实验任务" style="width:100%">
+            <el-option v-for="t in myTasks" :key="t.task_no" :label="`${t.experiment || t.task_no}（${t.task_no}）`" :value="t.task_no" />
+          </el-select>
         </el-form-item>
         <el-form-item label="危废名称" required><el-input v-model="form.waste_name" placeholder="如：含铬废液" /></el-form-item>
         <el-form-item label="危废类型"><el-select v-model="form.waste_type" style="width:100%">

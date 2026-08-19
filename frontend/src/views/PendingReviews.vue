@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import request from '../utils/request'
 import { ElMessage } from 'element-plus'
+import { formatChinaDateTime } from '../utils/time'
 
 const router = useRouter()
 const records = ref([])
@@ -117,8 +118,12 @@ onMounted(loadRecords)
             <el-tag :type="getStatusType(row.status)" size="small">{{ row.status }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="owner" label="实验员" width="100" />
-        <el-table-column prop="created_at" label="提交时间" width="160" />
+        <el-table-column label="实验员" width="100">
+          <template #default="{ row }">{{ row.owner_name || row.owner }}</template>
+        </el-table-column>
+        <el-table-column label="提交时间" width="160">
+          <template #default="{ row }">{{ formatChinaDateTime(row.created_at) }}</template>
+        </el-table-column>
         <el-table-column label="操作" width="260" fixed="right">
           <template #default="{ row }">
             <el-button size="small" @click="viewRecord(row)">查看数据</el-button>
@@ -135,8 +140,8 @@ onMounted(loadRecords)
           <el-descriptions-item label="记录编号">{{ currentRecord.record_no }}</el-descriptions-item>
           <el-descriptions-item label="版本">V{{ currentRecord.version }}</el-descriptions-item>
           <el-descriptions-item label="检测项目" :span="2">{{ currentRecord.experiment }}</el-descriptions-item>
-          <el-descriptions-item label="实验员">{{ currentRecord.owner }}</el-descriptions-item>
-          <el-descriptions-item label="提交时间">{{ currentRecord.created_at }}</el-descriptions-item>
+          <el-descriptions-item label="实验员">{{ currentRecord.owner_name || currentRecord.owner }}</el-descriptions-item>
+          <el-descriptions-item label="提交时间">{{ formatChinaDateTime(currentRecord.created_at) }}</el-descriptions-item>
         </el-descriptions>
 
         <el-alert type="info" :closable="false" show-icon style="margin-bottom:16px">

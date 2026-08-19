@@ -21,6 +21,7 @@ const docTypes = [
   { code: 'sample_reg', label: '样品登记表',   tagType: 'info' },
   { code: 'loan_return', label: '借出归还表',  tagType: '' },
   { code: 'hazardous', label: '危废处置表',    tagType: 'danger' },
+  { code: 'sop',       label: '标准操作规程',  tagType: '' },
   { code: 'report',    label: '检验报告',      tagType: 'success' },
   { code: 'delivery',  label: '报告发放登记',  tagType: 'primary' },
 ]
@@ -68,6 +69,17 @@ async function query() {
           experiment: t.experiment || '',
           preview_url: `/export/record/${t.task_no}/preview`,
           download_url: `/export/record/${t.task_no}`,
+        })
+        // SOP per task (linked to experiment)
+        result.push({
+          id: `sop-${t.task_no}`,
+          code: 'sop',
+          no: t.task_no,
+          label: `标准操作规程 — ${t.experiment || t.task_no}`,
+          status: '',
+          experiment: t.experiment || '',
+          preview_url: `/export/sop/${t.task_no}/preview`,
+          download_url: `/export/sop/${t.task_no}/export`,
         })
       }
     }
@@ -163,7 +175,9 @@ async function openPreview(item) {
   previewLoading.value = true
   previewHtml.value = ''
   try {
-    const resp = await request.get(item.preview_url, { responseType: 'text' })
+    // Strip /api/v1 prefix since request already has baseURL: '/api/v1'
+    const url = item.preview_url.replace(/^\/api\/v1/, '')
+    const resp = await request.get(url, { responseType: 'text' })
     previewHtml.value = typeof resp === 'string' ? resp : resp.data
   } catch (e) {
     previewHtml.value = `<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#EF4444"><div>⚠️ 预览失败：${e.response?.status === 403 ? '无权限访问' : e.response?.data?.detail || e.message}</div></body></html>`
@@ -175,7 +189,9 @@ async function openPreview(item) {
 // ── Download (blob with auth) ──
 async function downloadDoc(item) {
   try {
-    const resp = await request.get(item.download_url, { responseType: 'blob' })
+    // Strip /api/v1 prefix since request already has baseURL: '/api/v1'
+    const durl = item.download_url.replace(/^\/api\/v1/, '')
+    const resp = await request.get(durl, { responseType: 'blob' })
     const blob = resp.data || resp
     const url = URL.createObjectURL(new Blob([blob], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }))
     const a = document.createElement('a')
@@ -228,7 +244,7 @@ async function downloadDoc(item) {
     <el-dialog v-model="previewVisible" :title="previewTitle" width="75%" top="4vh" :close-on-click-modal="false" destroy-on-close>
       <div v-loading="previewLoading" style="min-height:300px">
         <div v-if="previewHtml" style="border:1px solid #E2E8F0;border-radius:6px;overflow:hidden">
-          <iframe :srcdoc="previewHtml" style="width:100%;height:70vh;border:none" sandbox="allow-same-origin" />
+          <iframe :srcdoc="previewHtml" style="width:100%;height:70vh;border:none" sandbox="allow-same-origin allow-scripts" />
         </div>
         <el-empty v-else-if="!previewLoading" description="暂无预览内容" />
       </div>

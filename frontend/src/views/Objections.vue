@@ -3,6 +3,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ChatLineSquare, Search } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import { chinaDate, chinaTime } from '../utils/time'
 
 const user = JSON.parse(localStorage.getItem('user') || '{}')
 const loading = ref(false)
@@ -113,6 +114,18 @@ async function doDispatchRetest(ono) {
   }
 }
 
+// ── 完成重测 ──
+async function doCompleteRetest(ono) {
+  try {
+    await ElMessageBox.confirm('确认重测任务已签发报告？完成后异议将进入待回复阶段。', '完成重测', { confirmButtonText: '确认完成', type: 'warning' })
+    await request.post(`/objections/${ono}/complete-retest`)
+    ElMessage.success('重测已完成，异议进入待回复阶段')
+    loadList()
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') ElMessage.error(e.response?.data?.detail || '操作失败')
+  }
+}
+
 // ── 生成回复 ──
 async function doPrepareResponse(ono) {
   try {
@@ -142,7 +155,7 @@ function statusTag(s) {
   const map = { '调查中': 'danger', '待客户确认重测': 'warning', '待安排重测': '', '重测任务已下发': '', '待异议回复': 'warning', '待发送': '', '已归档': 'success' }
   return map[s] || 'info'
 }
-function formatDate(d) { return d ? new Date(d).toLocaleString('zh-CN') : '—' }
+function formatDate(d) { return d ? chinaDate(new Date(d)) + ' ' + chinaTime(new Date(d)) : '—' }
 </script>
 
 <template>
@@ -168,6 +181,7 @@ function formatDate(d) { return d ? new Date(d).toLocaleString('zh-CN') : '—' 
           <el-button v-if="row.status==='调查中' && (user.role==='质量负责人'||user.role==='管理员')" size="small" type="warning" @click.stop="doInvestigate(row.objection_no)">调查</el-button>
           <el-button v-if="row.status==='待客户确认重测' && (user.role==='样品管理员'||user.role==='管理员')" size="small" @click.stop="doRetestDecision(row.objection_no)">重测决定</el-button>
           <el-button v-if="row.status==='待安排重测' && (user.role==='样品管理员'||user.role==='管理员')" size="small" type="primary" @click.stop="doDispatchRetest(row.objection_no)">下发重测</el-button>
+          <el-button v-if="row.status==='重测任务已下发' && (user.role==='样品管理员'||user.role==='管理员')" size="small" type="primary" @click.stop="doCompleteRetest(row.objection_no)">完成重测</el-button>
           <el-button v-if="row.status==='待异议回复' && (user.role==='样品管理员'||user.role==='管理员')" size="small" type="success" @click.stop="doPrepareResponse(row.objection_no)">生成回复</el-button>
           <el-button v-if="row.status==='待发送' && (user.role==='样品管理员'||user.role==='管理员')" size="small" type="success" @click.stop="doSend(row.objection_no)">发送归档</el-button>
         </template>
